@@ -1,4 +1,4 @@
-Feature: Redlining the boundary view
+Feature: Planning on the boundary view
 
   Connections can be severed, new ones drawn, and any of them annotated.
   Every markup lands in the project's plan, which persists immediately: the

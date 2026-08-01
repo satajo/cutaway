@@ -2,7 +2,7 @@
 
 Cutaway is a desktop tool that visualises the architecture of software
 projects: current state through lenses, deltas between versions, and
-redlines for planned changes. See README.md for the product description.
+plans for future changes. See README.md for the product description.
 
 ## Commands
 
@@ -38,13 +38,13 @@ crates/
   lenses/              Domain: boundary views - rollups of the graph at a chosen
                        set of element kinds, with provenance per rolled-up edge.
   comparison/          Domain: deltas between two architecture versions.
-  redlining/           Planning core: redlines, plans, notes, annotations.
+  planning/            Planning core: plans, change sets, notes, annotations.
     src/ports/         PlanStore.
   adapters/
     git/               Driven adapter: git repository as a SourceTree (gix).
     rust/              Driven adapter: Rust ecosystem as a SourceAnalyzer
                        (Cargo manifests via toml, sources via tree-sitter).
-    plan-json/         Driven adapter: PlanStore as .cutaway/redline.json in
+    plan-json/         Driven adapter: PlanStore as cutaway.json in the root of
                        the planned repository. The format is the agent contract.
     gui/               Driving adapter: eframe/egui shell with the boundary canvas.
   cutaway/             Composition root: wires adapters to the cores, starts the GUI.

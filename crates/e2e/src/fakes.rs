@@ -5,8 +5,8 @@ use std::cell::RefCell;
 use cutaway_inspection::ports::source_tree::{
     ProjectName, SourceFile, SourcePath, SourceTree, SourceTreeError,
 };
-use cutaway_redlining::Plan;
-use cutaway_redlining::ports::plan_store::{PlanStore, PlanStoreError};
+use cutaway_planning::Plan;
+use cutaway_planning::ports::plan_store::{PlanStore, PlanStoreError};
 
 /// A source tree held fully in memory; scenarios describe project contents
 /// through it without touching a real repository.

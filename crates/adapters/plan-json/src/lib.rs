@@ -1,6 +1,5 @@
-//! JSON plan store adapter: persists a
-//! [`cutaway_redlining::Plan`] as `.cutaway/redline.json` inside the planned
-//! repository.
+//! JSON plan store adapter: persists a [`cutaway_planning::Plan`] as
+//! `cutaway.json` in the root of the planned repository.
 //!
 //! The file lives in the repository on purpose: it is the hand-off artifact
 //! for an agent working in that repository, and it versions together with
@@ -11,8 +10,8 @@ mod format;
 
 use std::path::{Path, PathBuf};
 
-use cutaway_redlining::Plan;
-use cutaway_redlining::ports::plan_store::{PlanStore, PlanStoreError};
+use cutaway_planning::Plan;
+use cutaway_planning::ports::plan_store::{PlanStore, PlanStoreError};
 
 pub struct JsonPlanStore {
     file: PathBuf,
@@ -23,7 +22,7 @@ impl JsonPlanStore {
     #[must_use]
     pub fn for_repository(repository: &Path) -> Self {
         Self {
-            file: repository.join(".cutaway").join("redline.json"),
+            file: repository.join("cutaway.json"),
         }
     }
 }
@@ -47,21 +46,18 @@ impl PlanStore for JsonPlanStore {
     }
 
     fn save(&self, plan: &Plan) -> Result<(), PlanStoreError> {
-        let unwritable = |error: std::io::Error| PlanStoreError::Unwritable {
-            reason: error.to_string(),
-        };
-        let directory = self.file.parent().expect("the store path has a parent");
-        std::fs::create_dir_all(directory).map_err(unwritable)?;
         let stored = format::StoredPlan::from_plan(plan);
         let text = serde_json::to_string_pretty(&stored).expect("the format is serializable");
-        std::fs::write(&self.file, text + "\n").map_err(unwritable)
+        std::fs::write(&self.file, text + "\n").map_err(|error| PlanStoreError::Unwritable {
+            reason: error.to_string(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{ElementId, Relation, RelationKind};
-    use cutaway_redlining::{Note, ProposedChange, Subject};
+    use cutaway_planning::{Note, ProposedChange, Subject};
 
     use super::*;
 
@@ -111,8 +107,7 @@ mod tests {
     #[test]
     fn a_corrupt_file_is_reported_not_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".cutaway")).unwrap();
-        std::fs::write(dir.path().join(".cutaway/redline.json"), "not json").unwrap();
+        std::fs::write(dir.path().join("cutaway.json"), "not json").unwrap();
         let store = JsonPlanStore::for_repository(dir.path());
         assert!(matches!(store.load(), Err(PlanStoreError::Corrupt { .. })));
     }
@@ -123,7 +118,7 @@ mod tests {
         let store = JsonPlanStore::for_repository(dir.path());
         store.save(&marked_up_plan()).unwrap();
 
-        let text = std::fs::read_to_string(dir.path().join(".cutaway/redline.json")).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("cutaway.json")).unwrap();
         assert!(text.contains("\"version\": 1"));
         assert!(text.contains("remove-relation"));
         assert!(text.contains("cut the cycle"));

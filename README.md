@@ -7,12 +7,12 @@ then examine from three angles:
 
 - **Lenses** — views of the current architecture at a chosen abstraction level.
 - **Deltas** — what changed in the architecture between two versions.
-- **Redlines** — proposed changes drawn on top of the current architecture, to
+- **Plans** — proposed changes drawn on top of the current architecture, to
   plan work before any code moves.
 
 AI agents produce large codebases faster than people can read them. Cutaway
 raises the abstraction level at which you work with such a codebase: instead
-of reading files, you inspect, compare, and redline its architecture.
+of reading files, you inspect, compare, and plan its architecture.
 
 Cutaway is fully local and self-contained. It reads the repository on your
 disk and talks to nothing else.
@@ -25,7 +25,7 @@ and draws the boundary lens: packages and modules as nested boxes, with the
 dependencies that cross boundary lines as arrows. Existing connections are
 monochrome; severing one turns it red, drawing a new one turns it green, and
 any connection or boundary can carry a note. All markup saves immediately to
-`.cutaway/redline.json` inside the inspected repository — a versioned JSON
+`cutaway.json` in the root of the inspected repository — a versioned JSON
 work order ready to hand to an AI agent. The delta view exists as a domain
 model only.
 

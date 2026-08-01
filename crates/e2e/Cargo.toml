@@ -11,7 +11,7 @@ workspace = true
 cutaway-architecture.workspace = true
 cutaway-inspection.workspace = true
 cutaway-lenses.workspace = true
-cutaway-redlining.workspace = true
+cutaway-planning.workspace = true
 cutaway-rust.workspace = true
 
 [dev-dependencies]

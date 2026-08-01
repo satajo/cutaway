@@ -5,7 +5,7 @@ members = [
   "crates/inspection",
   "crates/comparison",
   "crates/lenses",
-  "crates/redlining",
+  "crates/planning",
   "crates/adapters/git",
   "crates/adapters/gui",
   "crates/adapters/plan-json",
@@ -24,7 +24,7 @@ cutaway-architecture = { path = "crates/architecture" }
 cutaway-inspection = { path = "crates/inspection" }
 cutaway-comparison = { path = "crates/comparison" }
 cutaway-lenses = { path = "crates/lenses" }
-cutaway-redlining = { path = "crates/redlining" }
+cutaway-planning = { path = "crates/planning" }
 cutaway-git = { path = "crates/adapters/git" }
 cutaway-gui = { path = "crates/adapters/gui" }
 cutaway-plan-json = { path = "crates/adapters/plan-json" }

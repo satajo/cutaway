@@ -16,8 +16,8 @@ use std::sync::mpsc;
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation, RelationKind};
 use cutaway_lenses::{BoundaryView, boundary_view};
-use cutaway_redlining::ports::plan_store::PlanStore;
-use cutaway_redlining::{Note, Plan, ProposedChange, Subject};
+use cutaway_planning::ports::plan_store::PlanStore;
+use cutaway_planning::{Note, Plan, ProposedChange, Subject};
 use eframe::egui::{self, emath::TSTransform};
 
 use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual};
@@ -500,7 +500,7 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
             }
             ui.separator();
             ui.label("Select a node or a connection to annotate it. Selecting a node fades everything it does not touch.");
-            ui.label("Severed connections turn red, drawn ones green; the plan saves to .cutaway/redline.json in the repository.");
+            ui.label("Severed connections turn red, drawn ones green; the plan saves to cutaway.json in the repository.");
             ui.label("Drag or scroll to pan, ctrl+scroll or pinch to zoom, double-click the background to refit.");
         }
         Some(Selection::Node(id)) => {

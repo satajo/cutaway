@@ -16,7 +16,7 @@ use cutaway_architecture::{
 ///
 /// `graph` holds the boundary elements, the `Contains` nesting between them,
 /// and the rolled-up `DependsOn` edges. It is a plain [`ArchitectureGraph`],
-/// so redlining and comparison apply to it unchanged.
+/// so planning and comparison apply to it unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryView {
     pub graph: ArchitectureGraph,

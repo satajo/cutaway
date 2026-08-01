@@ -1,7 +1,7 @@
-//! The redline itself: an ordered list of proposed changes.
+//! The change set: an ordered list of proposed changes.
 //!
-//! Applying a redline yields the architecture as it would look after the
-//! plan is enacted; the base graph stays untouched, so a redline can be
+//! Applying a change set yields the architecture as it would look after the
+//! plan is enacted; the base graph stays untouched, so a change set can be
 //! previewed, revised, and discarded freely.
 
 use cutaway_architecture::{ArchitectureGraph, Element, ElementId, GraphError, Relation};
@@ -10,18 +10,18 @@ use cutaway_architecture::{ArchitectureGraph, Element, ElementId, GraphError, Re
 pub enum ProposedChange {
     AddElement(Element),
     /// Rejected while relations still point at the element; retract them
-    /// with [`ProposedChange::RemoveRelation`] earlier in the redline.
+    /// with [`ProposedChange::RemoveRelation`] earlier in the change set.
     RemoveElement(ElementId),
     AddRelation(Relation),
     RemoveRelation(Relation),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Redline {
+pub struct ChangeSet {
     changes: Vec<ProposedChange>,
 }
 
-impl Redline {
+impl ChangeSet {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -39,7 +39,7 @@ impl Redline {
     /// Applies every change in order to a copy of `base`. The first change
     /// the graph rejects aborts the application and names its position, so
     /// the planner can point at the offending markup.
-    pub fn apply_to(&self, base: &ArchitectureGraph) -> Result<ArchitectureGraph, RedlineError> {
+    pub fn apply_to(&self, base: &ArchitectureGraph) -> Result<ArchitectureGraph, ChangeSetError> {
         let mut graph = base.clone();
         for (index, change) in self.changes.iter().enumerate() {
             let applied = match change {
@@ -48,7 +48,7 @@ impl Redline {
                 ProposedChange::AddRelation(relation) => graph.add_relation(relation.clone()),
                 ProposedChange::RemoveRelation(relation) => graph.remove_relation(relation),
             };
-            applied.map_err(|source| RedlineError::Rejected {
+            applied.map_err(|source| ChangeSetError::Rejected {
                 change_index: index,
                 source,
             })?;
@@ -58,8 +58,8 @@ impl Redline {
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum RedlineError {
-    #[error("change {change_index} of the redline cannot be applied")]
+pub enum ChangeSetError {
+    #[error("change {change_index} of the change set cannot be applied")]
     Rejected {
         change_index: usize,
         source: GraphError,
@@ -89,13 +89,13 @@ mod tests {
     }
 
     #[test]
-    fn applying_a_redline_leaves_the_base_architecture_untouched() {
+    fn applying_a_change_set_leaves_the_base_architecture_untouched() {
         let mut base = ArchitectureGraph::new();
         base.add_element(element("a")).unwrap();
 
-        let mut redline = Redline::new();
-        redline.propose(ProposedChange::AddElement(element("b")));
-        let planned = redline.apply_to(&base).unwrap();
+        let mut changes = ChangeSet::new();
+        changes.propose(ProposedChange::AddElement(element("b")));
+        let planned = changes.apply_to(&base).unwrap();
 
         assert_eq!(base.elements().count(), 1);
         assert_eq!(planned.elements().count(), 2);
@@ -108,11 +108,11 @@ mod tests {
         base.add_element(element("b")).unwrap();
         base.add_relation(relation("a", "b")).unwrap();
 
-        let mut premature = Redline::new();
+        let mut premature = ChangeSet::new();
         premature.propose(ProposedChange::RemoveElement(ElementId::new("b").unwrap()));
         assert!(premature.apply_to(&base).is_err());
 
-        let mut complete = Redline::new();
+        let mut complete = ChangeSet::new();
         complete.propose(ProposedChange::RemoveRelation(relation("a", "b")));
         complete.propose(ProposedChange::RemoveElement(ElementId::new("b").unwrap()));
         let planned = complete.apply_to(&base).unwrap();
@@ -123,14 +123,14 @@ mod tests {
     fn a_rejected_change_names_its_position_in_the_plan() {
         let base = ArchitectureGraph::new();
 
-        let mut redline = Redline::new();
-        redline.propose(ProposedChange::AddElement(element("a")));
-        redline.propose(ProposedChange::AddElement(element("a")));
+        let mut changes = ChangeSet::new();
+        changes.propose(ProposedChange::AddElement(element("a")));
+        changes.propose(ProposedChange::AddElement(element("a")));
 
-        let error = redline.apply_to(&base).unwrap_err();
+        let error = changes.apply_to(&base).unwrap_err();
         assert!(matches!(
             error,
-            RedlineError::Rejected {
+            ChangeSetError::Rejected {
                 change_index: 1,
                 ..
             }

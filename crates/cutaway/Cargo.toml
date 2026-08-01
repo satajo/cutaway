@@ -12,7 +12,7 @@ cutaway-git.workspace = true
 cutaway-gui.workspace = true
 cutaway-inspection.workspace = true
 cutaway-plan-json.workspace = true
-cutaway-redlining.workspace = true
+cutaway-planning.workspace = true
 cutaway-rust.workspace = true
 
 [dev-dependencies]

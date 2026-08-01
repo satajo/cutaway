@@ -5,8 +5,8 @@
 //! a file that fails validation is corrupt, not partially usable.
 
 use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, Relation, RelationKind};
-use cutaway_redlining::ports::plan_store::PlanStoreError;
-use cutaway_redlining::{Note, Plan, ProposedChange, Subject};
+use cutaway_planning::ports::plan_store::PlanStoreError;
+use cutaway_planning::{Note, Plan, ProposedChange, Subject};
 use serde::{Deserialize, Serialize};
 
 const VERSION: u32 = 1;

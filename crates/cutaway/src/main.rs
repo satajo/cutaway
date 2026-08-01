@@ -9,7 +9,7 @@ use cutaway_git::GitSourceTree;
 use cutaway_gui::OpenedProject;
 use cutaway_inspection::inspect;
 use cutaway_plan_json::JsonPlanStore;
-use cutaway_redlining::ports::plan_store::PlanStore;
+use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_rust::RustSourceAnalyzer;
 
 fn main() -> ExitCode {

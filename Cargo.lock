@@ -1074,7 +1074,7 @@ dependencies = [
  "cutaway-inspection",
  "cutaway-lenses",
  "cutaway-plan-json",
- "cutaway-redlining",
+ "cutaway-planning",
  "cutaway-rust",
 ]
 
@@ -1100,7 +1100,7 @@ dependencies = [
  "cutaway-architecture",
  "cutaway-inspection",
  "cutaway-lenses",
- "cutaway-redlining",
+ "cutaway-planning",
  "cutaway-rust",
  "tokio",
 ]
@@ -1121,7 +1121,7 @@ version = "0.1.0"
 dependencies = [
  "cutaway-architecture",
  "cutaway-lenses",
- "cutaway-redlining",
+ "cutaway-planning",
  "eframe",
  "pollster",
  "rfd",
@@ -1149,7 +1149,7 @@ name = "cutaway-plan-json"
 version = "0.1.0"
 dependencies = [
  "cutaway-architecture",
- "cutaway-redlining",
+ "cutaway-planning",
  "serde",
  "serde_json",
  "tempfile",
@@ -1157,7 +1157,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cutaway-redlining"
+name = "cutaway-planning"
 version = "0.1.0"
 dependencies = [
  "cutaway-architecture",

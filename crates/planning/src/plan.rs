@@ -1,7 +1,7 @@
 use cutaway_architecture::Relation;
 
 use crate::annotation::{Annotation, Note, Subject};
-use crate::redline::{ProposedChange, Redline};
+use crate::change_set::{ChangeSet, ProposedChange};
 
 /// A complete markup of an architecture: the proposed changes, each with an
 /// optional rationale, plus annotations on parts that stay as they are.
@@ -121,14 +121,14 @@ impl Plan {
         })
     }
 
-    /// The plan's changes as a bare redline, ready to apply to a graph.
+    /// The plan's changes as a bare change set, ready to apply to a graph.
     #[must_use]
-    pub fn redline(&self) -> Redline {
-        let mut redline = Redline::new();
+    pub fn change_set(&self) -> ChangeSet {
+        let mut changes = ChangeSet::new();
         for planned in &self.changes {
-            redline.propose(planned.change.clone());
+            changes.propose(planned.change.clone());
         }
-        redline
+        changes
     }
 }
 
@@ -191,12 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn the_redline_carries_the_changes_in_planning_order() {
+    fn the_change_set_carries_the_changes_in_planning_order() {
         let mut plan = Plan::new();
         plan.propose(ProposedChange::RemoveRelation(relation("a", "b")))
             .unwrap();
         plan.propose(ProposedChange::AddRelation(relation("a", "c")))
             .unwrap();
-        assert_eq!(plan.redline().changes().len(), 2);
+        assert_eq!(plan.change_set().changes().len(), 2);
     }
 }

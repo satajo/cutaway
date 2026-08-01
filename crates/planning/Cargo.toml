@@ -1,5 +1,5 @@
 [package]
-name = "cutaway-redlining"
+name = "cutaway-planning"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
