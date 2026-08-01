@@ -9,25 +9,45 @@
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
-use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath, SourceTree, SourceTreeError};
+use cutaway_inspection::ports::source_tree::{
+    ProjectName, SourceFile, SourcePath, SourceTree, SourceTreeError,
+};
 use gix::bstr::ByteSlice;
 
 pub struct GitSourceTree {
     repo: gix::Repository,
+    name: ProjectName,
 }
 
 impl GitSourceTree {
     /// Opens the repository at `path` (a worktree or a `.git` directory).
+    /// The project takes its name from the worktree directory.
     pub fn open(path: &Path) -> Result<Self, OpenRepositoryError> {
         let repo = gix::open(path).map_err(|source| OpenRepositoryError::NotARepository {
             path: path.to_owned(),
             reason: source.to_string(),
         })?;
-        Ok(Self { repo })
+        let directory = repo.workdir().unwrap_or(path);
+        let name = directory
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .unwrap_or(directory)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| ProjectName::new(n).ok())
+            .ok_or_else(|| OpenRepositoryError::Unnameable {
+                path: path.to_owned(),
+            })?;
+        Ok(Self { repo, name })
     }
 }
 
 impl SourceTree for GitSourceTree {
+    fn name(&self) -> ProjectName {
+        self.name.clone()
+    }
+
     fn files(&self) -> Result<Vec<SourceFile>, SourceTreeError> {
         let commit = self.repo.head_commit().map_err(unreadable)?;
         let tree = commit.tree().map_err(unreadable)?;
@@ -69,4 +89,6 @@ fn unreadable(source: impl Display) -> SourceTreeError {
 pub enum OpenRepositoryError {
     #[error("{path} is not a git repository: {reason}")]
     NotARepository { path: PathBuf, reason: String },
+    #[error("{path} yields no usable project name")]
+    Unnameable { path: PathBuf },
 }

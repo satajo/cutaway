@@ -4,10 +4,12 @@ members = [
   "crates/architecture",
   "crates/inspection",
   "crates/comparison",
+  "crates/lenses",
   "crates/redlining",
   "crates/adapters/git",
-  "crates/adapters/treesitter",
   "crates/adapters/gui",
+  "crates/adapters/plan-json",
+  "crates/adapters/rust",
   "crates/cutaway",
   "crates/e2e",
 ]
@@ -21,17 +23,22 @@ publish = false
 cutaway-architecture = { path = "crates/architecture" }
 cutaway-inspection = { path = "crates/inspection" }
 cutaway-comparison = { path = "crates/comparison" }
+cutaway-lenses = { path = "crates/lenses" }
 cutaway-redlining = { path = "crates/redlining" }
 cutaway-git = { path = "crates/adapters/git" }
-cutaway-treesitter = { path = "crates/adapters/treesitter" }
 cutaway-gui = { path = "crates/adapters/gui" }
+cutaway-plan-json = { path = "crates/adapters/plan-json" }
+cutaway-rust = { path = "crates/adapters/rust" }
 
 cucumber = "0.23"
 eframe = "0.35"
 gix = "0.86"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+toml = "1.1"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 

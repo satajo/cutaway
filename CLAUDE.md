@@ -32,32 +32,44 @@ concept it serves (screaming architecture):
 ```
 crates/
   architecture/        Domain: the architecture model (elements, relations, graph).
+                       Containment hierarchy: project ⊃ package ⊃ module ⊃ item.
   inspection/          Application core: builds the model from sources.
-    src/ports/         Ports of the core, one file per port.
+    src/ports/         SourceTree, SourceAnalyzer. One file per port.
+  lenses/              Domain: boundary views - rollups of the graph at a chosen
+                       set of element kinds, with provenance per rolled-up edge.
   comparison/          Domain: deltas between two architecture versions.
-  redlining/           Domain: proposed changes on top of an architecture.
+  redlining/           Planning core: redlines, plans, notes, annotations.
+    src/ports/         PlanStore.
   adapters/
     git/               Driven adapter: git repository as a SourceTree (gix).
-    treesitter/        Driven adapter: SyntaxAnalyzer per language (tree-sitter).
-    gui/               Driving adapter: eframe/egui desktop shell.
-  cutaway/             Composition root: wires adapters to the core, starts the GUI.
+    rust/              Driven adapter: Rust ecosystem as a SourceAnalyzer
+                       (Cargo manifests via toml, sources via tree-sitter).
+    plan-json/         Driven adapter: PlanStore as .cutaway/redline.json in
+                       the planned repository. The format is the agent contract.
+    gui/               Driving adapter: eframe/egui shell with the boundary canvas.
+  cutaway/             Composition root: wires adapters to the cores, starts the GUI.
   e2e/                 Cucumber suite + the ApplicationDriver port it drives.
 ```
 
 ### Rules
 
-- Dependencies point inward only: adapters depend on the core and the domain,
-  never the reverse. The domain crates depend on nothing but `thiserror`.
-- Every need the core has from the outside world is an explicit port: a trait
+- Dependencies point inward only: adapters depend on the cores and the
+  domain, never the reverse. The domain crates depend on nothing but
+  `thiserror`.
+- Every need a core has from the outside world is an explicit port: a trait
   in `src/ports/<port>.rs` together with the value and error types that cross
   the boundary. One file per port.
 - Only the composition root (`crates/cutaway`) and the e2e driver know which
   concrete adapters exist.
-- The GUI receives capabilities (e.g. `ProjectLoader`) from the composition
-  root; it never constructs adapters itself.
-- Nothing outside `crates/adapters/treesitter` knows which languages exist.
-  A new language = a new analyzer in that crate + wiring in the composition
-  root.
+- The GUI receives capabilities (`ProjectOpener`, the opened project's
+  `PlanStore`) from the composition root; it never constructs adapters
+  itself.
+- Nothing outside `crates/adapters/rust` knows which languages exist. A new
+  language = a new analyzer crate under `crates/adapters/` + wiring in the
+  composition root.
+- Element ids are deterministic and derive only from source paths, kinds,
+  and names (`project:<name>`, `package:<name>`, `<path>`,
+  `<path>#<kind>:<name>`), so graphs of different versions align.
 
 ### Adding a port
 

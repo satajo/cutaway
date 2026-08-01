@@ -1,5 +1,5 @@
 [package]
-name = "cutaway-e2e"
+name = "cutaway-plan-json"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -9,15 +9,10 @@ workspace = true
 
 [dependencies]
 cutaway-architecture.workspace = true
-cutaway-inspection.workspace = true
-cutaway-lenses.workspace = true
 cutaway-redlining.workspace = true
-cutaway-rust.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-cucumber.workspace = true
-tokio.workspace = true
-
-[[test]]
-name = "cucumber"
-harness = false
+tempfile.workspace = true

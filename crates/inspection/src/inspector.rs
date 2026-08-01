@@ -1,69 +1,55 @@
+use std::collections::BTreeSet;
+
 use cutaway_architecture::{
     ArchitectureGraph, Element, ElementId, ElementKind, ElementName, GraphError, Relation,
     RelationKind,
 };
 
-use crate::ports::source_tree::{SourcePath, SourceTree, SourceTreeError};
-use crate::ports::syntax_analyzer::{Declaration, SyntaxAnalysisError, SyntaxAnalyzer};
+use crate::ports::source_analyzer::{AnalyzedElement, SourceAnalysisError, SourceAnalyzer};
+use crate::ports::source_tree::{ProjectName, SourceTree, SourceTreeError};
 
 /// Builds the architecture graph of one version of a source tree.
 ///
-/// Every file becomes a `Module` element, whether or not any analyzer
-/// understands it: the file layout is architecture too. Every declaration a
-/// supporting analyzer finds becomes an element contained by its file's
-/// element. At most one analyzer may support a given path; two analyzers
-/// claiming the same file would produce colliding elements and fail.
+/// The inspector contributes the project root element; everything else comes
+/// from the analyzers. Analyzer elements nest under their declared parent, or
+/// under the project root when they declare none. Relations from all
+/// analyzers merge as a set: the same fact found twice is one relation.
 pub fn inspect(
     tree: &dyn SourceTree,
-    analyzers: &[&dyn SyntaxAnalyzer],
+    analyzers: &[&dyn SourceAnalyzer],
 ) -> Result<ArchitectureGraph, InspectionError> {
-    let mut graph = ArchitectureGraph::new();
-    for file in tree.files()? {
-        let file_element = file_element(&file.path);
-        let file_id = file_element.id.clone();
-        graph.add_element(file_element)?;
+    let files = tree.files()?;
+    let project = project_element(&tree.name());
+    let project_id = project.id.clone();
 
-        for analyzer in analyzers {
-            if !analyzer.supports(&file.path) {
-                continue;
-            }
-            for declaration in analyzer.analyze(&file)? {
-                let element = declaration_element(&file.path, &declaration);
-                let element_id = element.id.clone();
-                graph.add_element(element)?;
-                graph.add_relation(Relation {
-                    from: file_id.clone(),
-                    to: element_id,
-                    kind: RelationKind::Contains,
-                })?;
-            }
+    let mut graph = ArchitectureGraph::new();
+    graph.add_element(project)?;
+
+    let mut relations = BTreeSet::new();
+    for analyzer in analyzers {
+        let structure = analyzer.analyze(&files)?;
+        for AnalyzedElement { element, parent } in structure.elements {
+            let child_id = element.id.clone();
+            graph.add_element(element)?;
+            relations.insert(Relation {
+                from: parent.unwrap_or_else(|| project_id.clone()),
+                to: child_id,
+                kind: RelationKind::Contains,
+            });
         }
+        relations.extend(structure.relations);
+    }
+    for relation in relations {
+        graph.add_relation(relation)?;
     }
     Ok(graph)
 }
 
-fn file_element(path: &SourcePath) -> Element {
+fn project_element(name: &ProjectName) -> Element {
     Element {
-        id: ElementId::new(path.as_str()).expect("a source path is never empty"),
-        name: ElementName::new(path.as_str()).expect("a source path is never empty"),
-        kind: ElementKind::Module,
-    }
-}
-
-/// Declaration ids embed the path and the kind so that same-named
-/// declarations in different files, or in different namespaces of the same
-/// file (a struct and a function may share a name in Rust), stay distinct.
-fn declaration_element(path: &SourcePath, declaration: &Declaration) -> Element {
-    let kind_tag = match declaration.kind {
-        ElementKind::Module => "module",
-        ElementKind::Function => "function",
-        ElementKind::Type => "type",
-    };
-    Element {
-        id: ElementId::new(format!("{path}#{kind_tag}:{}", declaration.name))
-            .expect("the id embeds a non-empty path"),
-        name: declaration.name.clone(),
-        kind: declaration.kind,
+        id: ElementId::new(format!("project:{name}")).expect("a project name is never empty"),
+        name: ElementName::new(name.as_str()).expect("a project name is never empty"),
+        kind: ElementKind::Project,
     }
 }
 
@@ -71,10 +57,10 @@ fn declaration_element(path: &SourcePath, declaration: &Declaration) -> Element 
 pub enum InspectionError {
     #[error(transparent)]
     Source(#[from] SourceTreeError),
-    #[error("analysis of a source file failed")]
+    #[error("analysis of the sources failed")]
     Analysis {
         #[from]
-        source: SyntaxAnalysisError,
+        source: SourceAnalysisError,
     },
     #[error("the inspected sources describe an inconsistent architecture")]
     Inconsistent {
@@ -85,75 +71,142 @@ pub enum InspectionError {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::ElementName;
-
     use super::*;
+    use crate::ports::source_analyzer::SourceStructure;
     use crate::ports::source_tree::SourceFile;
 
     #[derive(Debug)]
-    struct FakeTree(Vec<SourceFile>);
+    struct FakeTree;
 
     impl SourceTree for FakeTree {
+        fn name(&self) -> ProjectName {
+            ProjectName::new("fixture").unwrap()
+        }
+
         fn files(&self) -> Result<Vec<SourceFile>, SourceTreeError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct FakeAnalyzer(SourceStructure);
+
+    impl SourceAnalyzer for FakeAnalyzer {
+        fn analyze(&self, _files: &[SourceFile]) -> Result<SourceStructure, SourceAnalysisError> {
             Ok(self.0.clone())
         }
     }
 
-    /// Claims `.fake` files and declares one function named after the file's
-    /// entire contents.
-    #[derive(Debug)]
-    struct FakeAnalyzer;
-
-    impl SyntaxAnalyzer for FakeAnalyzer {
-        fn supports(&self, path: &SourcePath) -> bool {
-            path.extension() == Some("fake")
-        }
-
-        fn analyze(&self, file: &SourceFile) -> Result<Vec<Declaration>, SyntaxAnalysisError> {
-            let name = String::from_utf8(file.contents.clone()).unwrap();
-            Ok(vec![Declaration {
-                name: ElementName::new(name).unwrap(),
-                kind: ElementKind::Function,
-            }])
+    fn element(id: &str, kind: ElementKind) -> Element {
+        Element {
+            id: ElementId::new(id).unwrap(),
+            name: ElementName::new(id).unwrap(),
+            kind,
         }
     }
 
-    fn file(path: &str, contents: &str) -> SourceFile {
-        SourceFile {
-            path: SourcePath::new(path).unwrap(),
-            contents: contents.into(),
+    fn analyzed(id: &str, kind: ElementKind, parent: Option<&str>) -> AnalyzedElement {
+        AnalyzedElement {
+            element: element(id, kind),
+            parent: parent.map(|p| ElementId::new(p).unwrap()),
         }
     }
 
     #[test]
-    fn every_source_file_appears_as_a_module_element() {
-        let tree = FakeTree(vec![file("README.md", "hello"), file("main.fake", "run")]);
-        let graph = inspect(&tree, &[]).unwrap();
-        let names: Vec<_> = graph.elements().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["README.md", "main.fake"]);
-    }
+    fn the_project_root_contains_every_parentless_element() {
+        let analyzer = FakeAnalyzer(SourceStructure {
+            elements: vec![analyzed("package:a", ElementKind::Package, None)],
+            relations: Vec::new(),
+        });
+        let graph = inspect(&FakeTree, &[&analyzer]).unwrap();
 
-    #[test]
-    fn declarations_are_contained_by_their_file() {
-        let tree = FakeTree(vec![file("main.fake", "run")]);
-        let graph = inspect(&tree, &[&FakeAnalyzer]).unwrap();
-
-        let file_id = ElementId::new("main.fake").unwrap();
-        let declaration_id = ElementId::new("main.fake#function:run").unwrap();
-        assert_eq!(
-            graph.element(&declaration_id).unwrap().kind,
-            ElementKind::Function
-        );
         assert!(graph.relations().any(|r| {
-            r.from == file_id && r.to == declaration_id && r.kind == RelationKind::Contains
+            r.from == ElementId::new("project:fixture").unwrap()
+                && r.to == ElementId::new("package:a").unwrap()
+                && r.kind == RelationKind::Contains
         }));
     }
 
     #[test]
-    fn files_without_a_supporting_analyzer_contribute_only_their_module_element() {
-        let tree = FakeTree(vec![file("README.md", "hello")]);
-        let graph = inspect(&tree, &[&FakeAnalyzer]).unwrap();
+    fn declared_parents_form_the_containment_chain() {
+        let analyzer = FakeAnalyzer(SourceStructure {
+            elements: vec![
+                analyzed("package:a", ElementKind::Package, None),
+                analyzed("a/src/lib.rs", ElementKind::Module, Some("package:a")),
+            ],
+            relations: Vec::new(),
+        });
+        let graph = inspect(&FakeTree, &[&analyzer]).unwrap();
+
+        assert!(graph.relations().any(|r| {
+            r.from == ElementId::new("package:a").unwrap()
+                && r.to == ElementId::new("a/src/lib.rs").unwrap()
+                && r.kind == RelationKind::Contains
+        }));
+    }
+
+    #[test]
+    fn the_same_relation_found_by_two_analyzers_is_one_relation() {
+        let depends = Relation {
+            from: ElementId::new("package:a").unwrap(),
+            to: ElementId::new("package:b").unwrap(),
+            kind: RelationKind::DependsOn,
+        };
+        let one = FakeAnalyzer(SourceStructure {
+            elements: vec![
+                analyzed("package:a", ElementKind::Package, None),
+                analyzed("package:b", ElementKind::Package, None),
+            ],
+            relations: vec![depends.clone()],
+        });
+        let two = FakeAnalyzer(SourceStructure {
+            elements: Vec::new(),
+            relations: vec![depends.clone()],
+        });
+        let graph = inspect(&FakeTree, &[&one, &two]).unwrap();
+
+        assert_eq!(
+            graph.relations().filter(|r| **r == depends).count(),
+            1,
+            "the duplicate must merge instead of failing"
+        );
+    }
+
+    #[test]
+    fn two_analyzers_declaring_the_same_element_fail_the_inspection() {
+        let one = FakeAnalyzer(SourceStructure {
+            elements: vec![analyzed("package:a", ElementKind::Package, None)],
+            relations: Vec::new(),
+        });
+        let two = FakeAnalyzer(SourceStructure {
+            elements: vec![analyzed("package:a", ElementKind::Package, None)],
+            relations: Vec::new(),
+        });
+        assert!(matches!(
+            inspect(&FakeTree, &[&one, &two]),
+            Err(InspectionError::Inconsistent { .. })
+        ));
+    }
+
+    #[test]
+    fn a_relation_to_an_undeclared_element_fails_the_inspection() {
+        let analyzer = FakeAnalyzer(SourceStructure {
+            elements: vec![analyzed("package:a", ElementKind::Package, None)],
+            relations: vec![Relation {
+                from: ElementId::new("package:a").unwrap(),
+                to: ElementId::new("package:missing").unwrap(),
+                kind: RelationKind::DependsOn,
+            }],
+        });
+        assert!(matches!(
+            inspect(&FakeTree, &[&analyzer]),
+            Err(InspectionError::Inconsistent { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_project_is_just_its_root() {
+        let graph = inspect(&FakeTree, &[]).unwrap();
         assert_eq!(graph.elements().count(), 1);
-        assert_eq!(graph.relations().count(), 0);
+        assert_eq!(graph.elements().next().unwrap().kind, ElementKind::Project);
     }
 }

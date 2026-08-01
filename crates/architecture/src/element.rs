@@ -69,9 +69,19 @@ pub enum InvalidElementName {
 
 /// The coarse classification of an element. The set grows as new lenses need
 /// to distinguish more of the architecture.
+///
+/// The kinds form the levels of the containment hierarchy every producer
+/// follows: project ⊃ package ⊃ module ⊃ item. Each level is a boundary in
+/// the sense of the boundary lens: relations crossing it mean more than
+/// relations inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ElementKind {
-    /// A grouping of other elements: a source file, a directory, a namespace.
+    /// One inspected source tree: a repository, a monorepo root.
+    Project,
+    /// A unit of distribution and dependency declaration: a Rust crate, a Go
+    /// module, a Java artifact, an npm package.
+    Package,
+    /// A grouping of code within a package: a source file, a namespace.
     Module,
     /// An executable unit: a function, a method, a procedure.
     Function,

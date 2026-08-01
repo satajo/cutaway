@@ -11,4 +11,10 @@ workspace = true
 cutaway-git.workspace = true
 cutaway-gui.workspace = true
 cutaway-inspection.workspace = true
-cutaway-treesitter.workspace = true
+cutaway-plan-json.workspace = true
+cutaway-redlining.workspace = true
+cutaway-rust.workspace = true
+
+[dev-dependencies]
+cutaway-architecture.workspace = true
+cutaway-lenses.workspace = true

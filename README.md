@@ -19,9 +19,15 @@ disk and talks to nothing else.
 
 ## Status
 
-Early scaffold. The application opens a git repository, inspects the Rust
-sources of its `HEAD` commit, and lists the architecture elements it found.
-The lens, delta, and redline views exist as domain models only.
+Early but usable. The application opens a git repository, inspects the Rust
+sources of its `HEAD` commit (Cargo manifests, module structure, imports),
+and draws the boundary lens: packages and modules as nested boxes, with the
+dependencies that cross boundary lines as arrows. Existing connections are
+monochrome; severing one turns it red, drawing a new one turns it green, and
+any connection or boundary can carry a note. All markup saves immediately to
+`.cutaway/redline.json` inside the inspected repository — a versioned JSON
+work order ready to hand to an AI agent. The delta view exists as a domain
+model only.
 
 ## Installation
 

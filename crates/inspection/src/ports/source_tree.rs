@@ -6,7 +6,43 @@ use std::fmt;
 /// "version" means belongs to the adapter: a git tree at a commit, a plain
 /// directory, an in-memory fixture.
 pub trait SourceTree {
+    /// The identity of the project these sources belong to. It roots the
+    /// containment hierarchy and must be stable across versions of the same
+    /// project.
+    fn name(&self) -> ProjectName;
+
     fn files(&self) -> Result<Vec<SourceFile>, SourceTreeError>;
+}
+
+/// The name of an inspected project: never empty.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProjectName(String);
+
+impl ProjectName {
+    pub fn new(name: impl Into<String>) -> Result<Self, InvalidProjectName> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(InvalidProjectName::Empty);
+        }
+        Ok(Self(name))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProjectName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidProjectName {
+    #[error("a project name must not be empty")]
+    Empty,
 }
 
 /// One file in a source tree.
