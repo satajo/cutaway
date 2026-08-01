@@ -1,0 +1,12 @@
+[package]
+name = "cutaway-inspection"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cutaway-architecture.workspace = true
+thiserror.workspace = true

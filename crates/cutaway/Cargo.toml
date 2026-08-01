@@ -1,0 +1,14 @@
+[package]
+name = "cutaway"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cutaway-git.workspace = true
+cutaway-gui.workspace = true
+cutaway-inspection.workspace = true
+cutaway-treesitter.workspace = true

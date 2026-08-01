@@ -1,0 +1,21 @@
+[package]
+name = "cutaway-e2e"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cutaway-architecture.workspace = true
+cutaway-inspection.workspace = true
+cutaway-treesitter.workspace = true
+
+[dev-dependencies]
+cucumber.workspace = true
+tokio.workspace = true
+
+[[test]]
+name = "cucumber"
+harness = false
