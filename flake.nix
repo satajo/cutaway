@@ -14,8 +14,10 @@
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # Libraries the GUI (winit/egui) loads at runtime via dlopen; they must
-      # be on LD_LIBRARY_PATH both in the dev shell and for the installed binary.
+      # Libraries the GUI (winit/egui/wgpu) loads at runtime via dlopen; they
+      # must be on LD_LIBRARY_PATH both in the dev shell and for the installed
+      # binary. vulkan-loader serves the wgpu renderer and finds the system's
+      # Vulkan drivers itself (on NixOS under /run/opengl-driver).
       guiRuntimeLibs =
         pkgs:
         pkgs.lib.optionals pkgs.stdenv.isLinux (
@@ -23,6 +25,7 @@
           [
             libGL
             libxkbcommon
+            vulkan-loader
             wayland
             libx11
             libxcursor
