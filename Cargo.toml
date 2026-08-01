@@ -33,6 +33,10 @@ cutaway-rust = { path = "crates/adapters/rust" }
 cucumber = "0.23"
 eframe = "0.35"
 gix = "0.86"
+pollster = "0.4"
+# The portal backend talks to the desktop's file-chooser service over
+# D-Bus in pure Rust, so no GTK libraries enter the build closure.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

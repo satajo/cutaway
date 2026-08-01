@@ -10,16 +10,17 @@
 mod canvas;
 mod layout;
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation, RelationKind};
 use cutaway_lenses::{BoundaryView, boundary_view};
 use cutaway_redlining::ports::plan_store::PlanStore;
 use cutaway_redlining::{Note, Plan, ProposedChange, Subject};
-use eframe::egui::{self, Rect};
+use eframe::egui::{self, emath::TSTransform};
 
-use crate::canvas::{CanvasAction, EdgeStatus, EdgeVisual};
+use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual};
 
 /// Everything the GUI needs about one opened project. The composition root
 /// builds this from the real adapters.
@@ -77,7 +78,10 @@ struct Session {
     store: Box<dyn PlanStore>,
     level: Level,
     view: Result<BoundaryView, String>,
-    scene_rect: Rect,
+    /// Contained-concept counts from the full graph; they size the boxes.
+    weights: BTreeMap<ElementId, usize>,
+    /// World-to-screen camera; None until a frame fits the graph into view.
+    camera: Option<TSTransform>,
     selection: Option<Selection>,
     note_draft: String,
     drawing: bool,
@@ -87,13 +91,15 @@ struct Session {
 
 impl Session {
     fn open(project: OpenedProject) -> Self {
+        let weights = layout::concept_weights(&project.graph);
         let mut session = Self {
             graph: project.graph,
             plan: project.plan,
             store: project.store,
             level: Level::Packages,
             view: Err("not built yet".to_owned()),
-            scene_rect: Rect::ZERO,
+            weights,
+            camera: None,
             selection: None,
             note_draft: String::new(),
             drawing: false,
@@ -110,7 +116,7 @@ impl Session {
         self.selection = None;
         self.note_draft.clear();
         self.draw_source = None;
-        self.scene_rect = Rect::ZERO;
+        self.camera = None;
     }
 
     fn edges(&self) -> Vec<EdgeVisual> {
@@ -329,7 +335,10 @@ fn edge_exists(view: &Result<BoundaryView, String>, relation: &Relation) -> bool
 
 struct CutawayApp {
     opener: ProjectOpener,
-    repository_path: String,
+    repository: Option<PathBuf>,
+    /// Delivers the folder chosen in the system picker; Some while a picker
+    /// dialog is open.
+    picker: Option<mpsc::Receiver<Option<PathBuf>>>,
     session: Option<Result<Session, String>>,
 }
 
@@ -337,21 +346,58 @@ impl CutawayApp {
     fn new(opener: ProjectOpener) -> Self {
         Self {
             opener,
-            repository_path: String::new(),
+            repository: None,
+            picker: None,
             session: None,
+        }
+    }
+
+    /// Opens the system folder picker on a helper thread: the dialog blocks
+    /// until the user chooses, and the GUI thread must keep painting.
+    fn pick_repository(&mut self, context: egui::Context) {
+        let (sender, receiver) = mpsc::channel();
+        let start_in = self.repository.clone();
+        std::thread::spawn(move || {
+            let mut dialog = rfd::AsyncFileDialog::new().set_title("Open a git repository");
+            if let Some(directory) = start_in {
+                dialog = dialog.set_directory(directory);
+            }
+            let choice = pollster::block_on(dialog.pick_folder());
+            let _ = sender.send(choice.map(|folder| folder.path().to_path_buf()));
+            context.request_repaint();
+        });
+        self.picker = Some(receiver);
+    }
+
+    fn receive_picked_repository(&mut self) {
+        let Some(receiver) = self.picker.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Some(path)) => {
+                self.session = Some((self.opener)(&path).map(Session::open));
+                self.repository = Some(path);
+            }
+            Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {}
+            Err(mpsc::TryRecvError::Empty) => self.picker = Some(receiver),
         }
     }
 }
 
 impl eframe::App for CutawayApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.receive_picked_repository();
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Repository:");
-                ui.text_edit_singleline(&mut self.repository_path);
-                if ui.button("Open").clicked() {
-                    self.session =
-                        Some((self.opener)(Path::new(&self.repository_path)).map(Session::open));
+                let picking = self.picker.is_some();
+                if ui
+                    .add_enabled(!picking, egui::Button::new("Open repository…"))
+                    .clicked()
+                {
+                    self.pick_repository(ui.ctx().clone());
+                }
+                if let Some(repository) = &self.repository {
+                    ui.label(repository.display().to_string());
                 }
                 if let Some(Ok(session)) = &mut self.session {
                     ui.separator();
@@ -406,29 +452,25 @@ impl eframe::App for CutawayApp {
                         ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
                     }
                     Ok(view) => {
-                        let computed = layout::compute(&view.graph);
+                        let computed = layout::compute(&view.graph, &session.weights);
                         let edges = session.edges();
                         let (selected_edge, selected_node) = match &session.selection {
                             Some(Selection::Edge(relation)) => (Some(relation), None),
                             Some(Selection::Node(id)) => (None, Some(id)),
                             None => (None, None),
                         };
-                        let mut action = None;
-                        let mut scene_rect = session.scene_rect;
-                        egui::Scene::new()
-                            .zoom_range(0.1..=4.0)
-                            .show(ui, &mut scene_rect, |ui| {
-                                action = canvas::show(
-                                    ui,
-                                    &view.graph,
-                                    &computed,
-                                    &edges,
-                                    selected_edge,
-                                    selected_node,
-                                    session.draw_source.as_ref(),
-                                );
-                            });
-                        session.scene_rect = scene_rect;
+                        let action = canvas::show(
+                            ui,
+                            &Content {
+                                view: &view.graph,
+                                layout: &computed,
+                                edges: &edges,
+                                selected_edge,
+                                selected_node,
+                                draw_source: session.draw_source.as_ref(),
+                            },
+                            &mut session.camera,
+                        );
                         if let Some(action) = action {
                             session.handle(action);
                         }
@@ -457,8 +499,9 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
                 }
             }
             ui.separator();
-            ui.label("Select a node or a connection to annotate it.");
+            ui.label("Select a node or a connection to annotate it. Selecting a node fades everything it does not touch.");
             ui.label("Severed connections turn red, drawn ones green; the plan saves to .cutaway/redline.json in the repository.");
+            ui.label("Drag or scroll to pan, ctrl+scroll or pinch to zoom, double-click the background to refit.");
         }
         Some(Selection::Node(id)) => {
             let (name, kind) = session.graph.element(&id).map_or_else(

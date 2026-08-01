@@ -12,4 +12,6 @@ cutaway-architecture.workspace = true
 cutaway-lenses.workspace = true
 cutaway-redlining.workspace = true
 eframe.workspace = true
+pollster.workspace = true
+rfd.workspace = true
 thiserror.workspace = true
