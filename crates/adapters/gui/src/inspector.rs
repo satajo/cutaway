@@ -91,6 +91,10 @@ fn help(ui: &mut egui::Ui) {
          picture; select it to expand or collapse it from here.",
     );
     ui.label(
+        "Press ctrl+F or / to search every element by name, however the picture is \
+         cut; enter opens the picture down to the one you choose.",
+    );
+    ui.label(
         "Severed connections turn red, drawn ones green; the plan saves to \
          cutaway.json in the repository.",
     );
@@ -395,34 +399,10 @@ fn provenance_rows(
                 name_of(graph, &concrete.from),
                 name_of(graph, &concrete.to)
             ),
-            target: boundary_in_view(&view.graph, graph, &concrete.from).map(Selection::Node),
+            target: focus::boundary_in_view(&view.graph, graph, &concrete.from)
+                .map(Selection::Node),
         })
         .collect()
-}
-
-/// The boundary a concrete element shows up as in the view. The element
-/// itself often sits below the detail the view cuts at, so the walk climbs
-/// the containment of the full graph until it meets a boundary the view
-/// holds. Answers None while no boundary above the element is visible.
-fn boundary_in_view(
-    view: &ArchitectureGraph,
-    graph: &ArchitectureGraph,
-    id: &ElementId,
-) -> Option<ElementId> {
-    // Containment is a tree wherever a view exists at all, but a walk that
-    // trusts that and meets a cycle never ends; the seen set bounds it.
-    let mut seen = BTreeSet::new();
-    let mut current = Some(id);
-    while let Some(id) = current {
-        if !seen.insert(id) {
-            return None;
-        }
-        if view.element(id).is_some() {
-            return Some(id.clone());
-        }
-        current = focus::frame_of(graph, id);
-    }
-    None
 }
 
 /// A concrete element as its sources name it. Rows about concrete
@@ -674,35 +654,6 @@ mod tests {
         for row in &rows {
             assert_eq!(row.target, Some(Selection::Node(id("package:a"))));
         }
-    }
-
-    #[test]
-    fn an_element_the_view_already_holds_maps_to_itself() {
-        let graph = graph();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
-        assert_eq!(
-            boundary_in_view(&view.graph, &graph, &id("a/two")),
-            Some(id("a/two"))
-        );
-    }
-
-    #[test]
-    fn an_element_below_the_view_maps_to_the_boundary_that_holds_it() {
-        let graph = graph();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
-        assert_eq!(
-            boundary_in_view(&view.graph, &graph, &id("a/two#type:X")),
-            Some(id("package:a")),
-            "the walk climbs until a boundary of this view answers"
-        );
-    }
-
-    #[test]
-    fn an_element_no_boundary_holds_maps_nowhere() {
-        let mut graph = graph();
-        add(&mut graph, "stray", ElementKind::Module);
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
-        assert_eq!(boundary_in_view(&view.graph, &graph, &id("stray")), None);
     }
 
     #[test]

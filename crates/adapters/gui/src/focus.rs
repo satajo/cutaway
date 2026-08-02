@@ -12,6 +12,11 @@
 //! The computation is pure view logic: it reads the view graph and the drawn
 //! edges and answers with a strength per element and per edge. The canvas
 //! only applies the answer.
+//!
+//! Every walk here reads containment, so the containment queries the rest of
+//! the shell needs - what a boundary holds, what holds it, and which
+//! boundary of a picture answers for an element below its detail - live here
+//! too, and answer for the full graph as readily as for a view.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -135,18 +140,53 @@ pub(crate) fn frame_of<'a>(view: &'a ArchitectureGraph, id: &ElementId) -> Optio
         .map(|relation| &relation.from)
 }
 
+/// Contained boundary -> the boundary that directly contains it. A walk that
+/// climbs the containment of a whole graph asks this once instead of asking
+/// [`frame_of`] per step.
+pub(crate) type Frames<'a> = BTreeMap<&'a ElementId, &'a ElementId>;
+
+pub(crate) fn frames_of(view: &ArchitectureGraph) -> Frames<'_> {
+    let mut frames = Frames::new();
+    for relation in view.relations() {
+        if relation.kind == RelationKind::Contains {
+            frames.insert(&relation.to, &relation.from);
+        }
+    }
+    frames
+}
+
+/// The boundary a concrete element shows up as in the view. The element
+/// itself often sits below the detail the view cuts at, so the walk climbs
+/// the containment of the full graph until it meets a boundary the view
+/// holds. Answers None while no boundary above the element is visible.
+pub(crate) fn boundary_in_view(
+    view: &ArchitectureGraph,
+    graph: &ArchitectureGraph,
+    id: &ElementId,
+) -> Option<ElementId> {
+    // Containment is a tree wherever a view exists at all, but a walk that
+    // trusts that and meets a cycle never ends; the seen set bounds it.
+    let mut seen = BTreeSet::new();
+    let mut current = Some(id);
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            return None;
+        }
+        if view.element(id).is_some() {
+            return Some(id.clone());
+        }
+        current = frame_of(graph, id);
+    }
+    None
+}
+
 /// The containing boundaries above the given elements, excluding the
 /// elements themselves.
 fn ancestors_of<'a>(
     view: &'a ArchitectureGraph,
     of: &BTreeSet<&'a ElementId>,
 ) -> BTreeSet<&'a ElementId> {
-    let mut parents: BTreeMap<&ElementId, &ElementId> = BTreeMap::new();
-    for relation in view.relations() {
-        if relation.kind == RelationKind::Contains {
-            parents.insert(&relation.to, &relation.from);
-        }
-    }
+    let parents = frames_of(view);
     let mut context = BTreeSet::new();
     for id in of {
         // Containment of a view is a tree, but a walk that trusts that and
@@ -305,6 +345,73 @@ mod tests {
         assert_eq!(focus.element(&id("a/two")), Strength::Focused);
         assert_eq!(focus.edge(&depends("a/two", "b/one")), Strength::Faded);
         assert_eq!(focus.element(&id("b/one")), Strength::Faded);
+    }
+
+    /// The view above, plus the type declared inside a/one. The full graph
+    /// holds it; a picture cut at packages does not.
+    fn graph() -> ArchitectureGraph {
+        let mut graph = view();
+        graph
+            .add_element(Element {
+                id: id("a/one#type:X"),
+                name: ElementName::new("X").unwrap(),
+                kind: ElementKind::Type,
+            })
+            .unwrap();
+        graph
+            .add_relation(Relation {
+                from: id("a/one"),
+                to: id("a/one#type:X"),
+                kind: RelationKind::Contains,
+            })
+            .unwrap();
+        graph
+    }
+
+    /// A picture holding the packages alone, as a cut at packages leaves it.
+    fn packages() -> ArchitectureGraph {
+        let mut packages = ArchitectureGraph::new();
+        for package in ["package:a", "package:b", "package:c", "package:d"] {
+            packages
+                .add_element(Element {
+                    id: id(package),
+                    name: ElementName::new(package).unwrap(),
+                    kind: ElementKind::Package,
+                })
+                .unwrap();
+        }
+        packages
+    }
+
+    #[test]
+    fn an_element_the_picture_already_holds_maps_to_itself() {
+        let graph = graph();
+        assert_eq!(
+            boundary_in_view(&graph, &graph, &id("a/two")),
+            Some(id("a/two"))
+        );
+    }
+
+    #[test]
+    fn an_element_below_the_picture_maps_to_the_boundary_that_holds_it() {
+        assert_eq!(
+            boundary_in_view(&packages(), &graph(), &id("a/one#type:X")),
+            Some(id("package:a")),
+            "the walk climbs until a boundary of this picture answers"
+        );
+    }
+
+    #[test]
+    fn an_element_no_boundary_holds_maps_nowhere() {
+        let mut graph = graph();
+        graph
+            .add_element(Element {
+                id: id("stray"),
+                name: ElementName::new("stray").unwrap(),
+                kind: ElementKind::Module,
+            })
+            .unwrap();
+        assert_eq!(boundary_in_view(&packages(), &graph, &id("stray")), None);
     }
 
     #[test]

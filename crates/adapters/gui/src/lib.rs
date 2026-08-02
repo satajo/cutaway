@@ -17,6 +17,7 @@ mod focus;
 mod inspector;
 mod label;
 mod layout;
+mod palette;
 mod routing;
 
 use std::collections::BTreeMap;
@@ -31,6 +32,7 @@ use eframe::egui::{self, Rect, emath::TSTransform};
 
 use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual};
 use crate::layout::Layout;
+use crate::palette::Palette;
 
 /// Everything the GUI needs about one opened project. The composition root
 /// builds this from the real adapters.
@@ -99,6 +101,8 @@ struct Session {
     drawing: bool,
     draw_source: Option<ElementId>,
     status: Option<String>,
+    /// Searching the whole architecture by name, whatever the picture shows.
+    palette: Palette,
 }
 
 impl Session {
@@ -118,6 +122,7 @@ impl Session {
             drawing: false,
             draw_source: None,
             status: None,
+            palette: Palette::default(),
         };
         session.rebuild_view();
         session
@@ -322,6 +327,38 @@ impl Session {
         if let (Some(shift), Some(camera)) = (shift, self.camera.as_mut()) {
             camera.translation += shift;
         }
+    }
+
+    /// Puts one element of the full architecture in front of the reader.
+    ///
+    /// A search reaches past the picture, so the element found is often
+    /// finer than the detail the picture cuts at. The cut then opens down to
+    /// it - one override per boundary on the way, exactly as expanding each
+    /// of them by hand would - and the element itself becomes the selection
+    /// the camera moves to. Where even that leaves it hidden, the nearest
+    /// boundary above it answers instead, so the reader always lands
+    /// somewhere the picture holds.
+    fn locate(&mut self, target: &ElementId) {
+        if !self.shows(target) {
+            for (boundary, detail) in palette::overrides_revealing(&self.graph, target) {
+                // A boundary the reader closed opens again: the search is
+                // the later question, and the later question wins.
+                self.cut
+                    .overrides
+                    .entry(boundary)
+                    .and_modify(|open| *open = (*open).max(detail))
+                    .or_insert(detail);
+            }
+            self.rebuild_view();
+        }
+        let Ok(scene) = &self.scene else {
+            return;
+        };
+        let Some(found) = focus::boundary_in_view(&scene.view.graph, &self.graph, target) else {
+            return;
+        };
+        self.select(Some(Selection::Node(found.clone())));
+        self.reveal(&found);
     }
 
     fn save_plan(&mut self) {
@@ -563,6 +600,9 @@ impl eframe::App for CutawayApp {
                         session.drawing = !session.drawing;
                         session.draw_source = None;
                     }
+                    if ui.button("Search (Ctrl+F)").clicked() {
+                        session.palette.open();
+                    }
                     if let Some(status) = &session.status {
                         ui.separator();
                         ui.colored_label(ui.visuals().warn_fg_color, status);
@@ -589,37 +629,57 @@ impl eframe::App for CutawayApp {
 
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(Ok(session)) = &mut self.session {
-                session.viewport = ui.max_rect();
-                match &session.scene {
-                    Err(reason) => {
-                        ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
-                    }
-                    Ok(scene) => {
-                        let edges = session.edges();
-                        let (selected_edge, selected_node) = match &session.selection {
-                            Some(Selection::Edge(relation)) => (Some(relation), None),
-                            Some(Selection::Node(id)) => (None, Some(id)),
-                            None => (None, None),
-                        };
-                        let action = canvas::show(
-                            ui,
-                            &Content {
-                                view: &scene.view.graph,
-                                layout: &scene.layout,
-                                edges: &edges,
-                                selected_edge,
-                                selected_node,
-                                draw_source: session.draw_source.as_ref(),
-                            },
-                            &mut session.camera,
-                        );
-                        if let Some(action) = action {
-                            session.handle(action);
-                        }
-                    }
-                }
+                picture(ui, session);
             }
         });
+
+        // The palette floats over everything and takes its keys before any
+        // widget of the next frame reads them, so it paints after the panels
+        // and beside the picture rather than inside it.
+        if let Some(Ok(session)) = &mut self.session {
+            let found = palette::show(
+                ui.ctx(),
+                &mut session.palette,
+                &session.graph,
+                session.viewport,
+            );
+            if let Some(target) = found {
+                session.locate(&target);
+            }
+        }
+    }
+}
+
+/// The boundary canvas, and what a click on it does.
+fn picture(ui: &mut egui::Ui, session: &mut Session) {
+    session.viewport = ui.max_rect();
+    let scene = match &session.scene {
+        Err(reason) => {
+            ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
+            return;
+        }
+        Ok(scene) => scene,
+    };
+    let edges = session.edges();
+    let (selected_edge, selected_node) = match &session.selection {
+        Some(Selection::Edge(relation)) => (Some(relation), None),
+        Some(Selection::Node(id)) => (None, Some(id)),
+        None => (None, None),
+    };
+    let action = canvas::show(
+        ui,
+        &Content {
+            view: &scene.view.graph,
+            layout: &scene.layout,
+            edges: &edges,
+            selected_edge,
+            selected_node,
+            draw_source: session.draw_source.as_ref(),
+        },
+        &mut session.camera,
+    );
+    if let Some(action) = action {
+        session.handle(action);
     }
 }
 

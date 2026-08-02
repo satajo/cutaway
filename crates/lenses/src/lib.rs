@@ -55,7 +55,11 @@ use cutaway_architecture::{
 };
 
 /// How deep into the containment hierarchy a boundary view reaches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The order is the hierarchy: one detail is deeper than another when it is
+/// greater, so opening a boundary to reach two elements at once asks for the
+/// greater of the two details each of them needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Detail {
     Packages,
     Modules,
@@ -82,6 +86,14 @@ impl Detail {
             Self::Modules => Some(Self::Packages),
             Self::Items => Some(Self::Modules),
         }
+    }
+
+    /// The coarsest detail that shows a boundary of this kind, and None for
+    /// a kind no detail ever shows. Opening a picture down to one element
+    /// asks this of every step on the way to it: the boundary above the step
+    /// must show at least this much for the step to appear at all.
+    pub fn showing(kind: ElementKind) -> Option<Self> {
+        Self::ALL.into_iter().find(|detail| detail.shows(kind))
     }
 
     /// Whether a boundary of this kind shows at this detail. The levels
@@ -937,6 +949,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plain, stale);
+    }
+
+    #[test]
+    fn the_coarsest_detail_showing_a_kind_is_the_first_one_that_shows_it() {
+        assert_eq!(
+            Detail::showing(ElementKind::Package),
+            Some(Detail::Packages)
+        );
+        assert_eq!(Detail::showing(ElementKind::Module), Some(Detail::Modules));
+        assert_eq!(Detail::showing(ElementKind::Function), Some(Detail::Items));
+        assert_eq!(Detail::showing(ElementKind::Type), Some(Detail::Items));
+    }
+
+    #[test]
+    fn a_project_is_the_whole_picture_and_so_shows_at_no_detail() {
+        assert_eq!(Detail::showing(ElementKind::Project), None);
+    }
+
+    #[test]
+    fn a_detail_reaching_deeper_into_the_hierarchy_is_the_greater_one() {
+        assert!(Detail::Items > Detail::Modules);
+        assert!(Detail::Modules > Detail::Packages);
     }
 
     #[test]
