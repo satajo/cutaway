@@ -15,6 +15,7 @@
 //! question stays the reader's.
 
 mod bundle;
+mod camera;
 mod canvas;
 mod continuity;
 mod detail;
@@ -36,9 +37,12 @@ use cutaway_architecture::{ArchitectureGraph, Element, ElementId, Relation, Rela
 use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{Note, Plan, ProposedChange, Subject};
-use eframe::egui::{self, Rect, emath::TSTransform};
+use eframe::egui::{self, Rect};
 
+use crate::camera::Camera;
 use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual};
+use crate::continuity::Piece;
+use crate::label::Labels;
 use crate::layout::Layout;
 use crate::palette::Palette;
 
@@ -77,13 +81,35 @@ enum Selection {
     Edge(Relation),
 }
 
-/// What a selection asks the camera to show. A connection shows at the end
-/// it leaves: that is where the reader's question started.
-pub(crate) fn revealed(selection: &Selection) -> &ElementId {
+/// What a selection asks the camera to show, in world coordinates: the box
+/// of a boundary, and both ends of a connection together, because a
+/// connection is the run between them and one end alone says nothing about
+/// where the other lies. An end the picture has no box for is left out;
+/// nothing the picture draws at all answers None.
+fn subject_of(layout: &Layout, selection: &Selection) -> Option<Rect> {
+    let boxed = |id| layout.rects.get(id).copied();
     match selection {
-        Selection::Node(id) => id,
-        Selection::Edge(relation) => &relation.from,
+        Selection::Node(id) => boxed(id),
+        Selection::Edge(relation) => match (boxed(&relation.from), boxed(&relation.to)) {
+            (Some(from), Some(to)) => Some(from.union(to)),
+            (Some(one), None) | (None, Some(one)) => Some(one),
+            (None, None) => None,
+        },
     }
+}
+
+/// What the toolbar says when a connection carried into a new detail only in
+/// part: the new picture draws the dependencies behind it as several
+/// connections, and the selection follows the largest of them. Naming the
+/// connection the reader asked about tells them which question the picture
+/// is still answering.
+fn following_a_piece(from: &str, to: &str, piece: &Piece) -> String {
+    format!(
+        "Following {from} {} {to}: largest piece at this detail, {} of {} dependencies.",
+        glyph::OUTWARD,
+        piece.carried,
+        piece.whole
+    )
 }
 
 /// A boundary view with the arrangement that paints it. The arrangement
@@ -104,8 +130,9 @@ struct Session {
     scene: Result<Scene, String>,
     /// Contained-concept counts from the full graph; they size the boxes.
     weights: BTreeMap<ElementId, usize>,
-    /// World-to-screen camera; None until a frame fits the graph into view.
-    camera: Option<TSTransform>,
+    /// Where the picture stands in front of the reader, and where it is
+    /// travelling.
+    camera: Camera,
     /// The screen rectangle the canvas painted into last. The canvas knows
     /// the viewport and the inspector does not, yet a selection made in the
     /// inspector must land inside it; the canvas therefore records the
@@ -132,7 +159,7 @@ impl Session {
             cut: Cut::uniform(Detail::Packages),
             scene: Err("not built yet".to_owned()),
             weights,
-            camera: None,
+            camera: Camera::default(),
             viewport: Rect::NOTHING,
             selection: None,
             note_draft: String::new(),
@@ -185,13 +212,20 @@ impl Session {
     ///
     /// The subject of the reading is not dropped with them. Element ids hold
     /// across details, so whatever stood selected reappears as another box or
-    /// another connection, and the camera moves to where it reappeared.
+    /// another connection, and the camera travels to where it reappeared.
     /// Nothing selected leaves the camera where it is, unless the new picture
     /// no longer meets it at all.
+    ///
+    /// A connection can reappear as several, and then the selection follows
+    /// the largest piece alone; the toolbar says so, because the reader
+    /// asked about the whole.
     fn recut(&mut self, detail: Detail) {
         if self.cut.detail == detail {
             return;
         }
+        // A new detail is a new question, and the answers to the last one no
+        // longer stand.
+        self.status = None;
         let before = self
             .selection
             .take()
@@ -200,18 +234,30 @@ impl Session {
         self.rebuild_view();
         let carried = before.and_then(|(before, selection)| {
             let after = self.scene.as_ref().ok()?;
-            continuity::translated(&self.graph, &before, &after.view, &selection)
+            let carried = continuity::translated(&self.graph, &before, &after.view, &selection)?;
+            let note = carried.piece.as_ref().and_then(|piece| {
+                let Selection::Edge(relation) = &selection else {
+                    return None;
+                };
+                let labels = Labels::of(&before.graph);
+                Some(following_a_piece(
+                    &labels.qualified(&relation.from),
+                    &labels.qualified(&relation.to),
+                    piece,
+                ))
+            });
+            Some((carried.selection, note))
         });
-        if let Some(selection) = carried {
-            let shown = revealed(&selection).clone();
-            self.select(Some(selection));
-            self.reveal(&shown);
+        if let Some((selection, note)) = carried {
+            self.status = note;
+            self.select(Some(selection.clone()));
+            self.reveal(&selection);
         } else {
             // Each detail lays the picture out anew, so the old camera
             // coordinates point at arbitrary new content: without a subject
             // to follow, only a fresh fit shows something meaningful.
             self.select(None);
-            self.camera = None;
+            self.camera.forget();
         }
     }
 
@@ -352,22 +398,21 @@ impl Session {
         self.selection = selection;
     }
 
-    /// Moves the picture until the element is on screen, at the current
-    /// magnification: a selection made beside the picture must be findable
-    /// in it. An element already on screen moves nothing.
-    fn reveal(&mut self, id: &ElementId) {
-        let Some(camera) = self.camera else {
+    /// Travels until the whole subject of a selection stands in front of the
+    /// reader: a selection made beside the picture, or carried into a
+    /// picture cut at another detail, must be findable in it. A subject
+    /// already in comfortable view moves nothing.
+    fn reveal(&mut self, selection: &Selection) {
+        let (Some(at), Ok(scene)) = (self.camera.now(), &self.scene) else {
+            // No camera yet means no frame has fitted the picture, and the
+            // fit that comes shows everything anyway.
             return;
         };
-        let Ok(scene) = &self.scene else {
+        let Some(subject) = subject_of(&scene.layout, selection) else {
             return;
         };
-        let Some(rect) = scene.layout.rects.get(id) else {
-            return;
-        };
-        let shift = canvas::reveal_shift(self.viewport, camera.mul_rect(*rect));
-        if let (Some(shift), Some(camera)) = (shift, self.camera.as_mut()) {
-            camera.translation += shift;
+        if let Some(moved) = camera::revealing(self.viewport, at, subject) {
+            self.camera.fly(moved);
         }
     }
 
@@ -399,8 +444,9 @@ impl Session {
         let Some(found) = focus::boundary_in_view(&scene.view.graph, &self.graph, target) else {
             return;
         };
-        self.select(Some(Selection::Node(found.clone())));
-        self.reveal(&found);
+        let selection = Selection::Node(found);
+        self.select(Some(selection.clone()));
+        self.reveal(&selection);
     }
 
     fn save_plan(&mut self) {
@@ -731,5 +777,96 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
     );
     if let Some(action) = action {
         session.handle(action);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{pos2, vec2};
+
+    use super::*;
+
+    fn id(text: &str) -> ElementId {
+        ElementId::new(text).unwrap()
+    }
+
+    fn depends(from: &str, to: &str) -> Relation {
+        Relation {
+            from: id(from),
+            to: id(to),
+            kind: RelationKind::DependsOn,
+        }
+    }
+
+    /// Two boxes in opposite corners of a world, and nothing else.
+    fn layout() -> Layout {
+        Layout {
+            rects: BTreeMap::from([
+                (
+                    id("a"),
+                    Rect::from_min_size(pos2(0.0, 0.0), vec2(40.0, 20.0)),
+                ),
+                (
+                    id("b"),
+                    Rect::from_min_size(pos2(600.0, 400.0), vec2(40.0, 20.0)),
+                ),
+            ]),
+            containers: Vec::new(),
+            leaves: vec![id("a"), id("b")],
+        }
+    }
+
+    #[test]
+    fn a_selected_boundary_asks_for_its_own_box() {
+        assert_eq!(
+            subject_of(&layout(), &Selection::Node(id("a"))),
+            Some(layout().rects[&id("a")])
+        );
+    }
+
+    #[test]
+    fn a_selected_connection_asks_for_both_of_its_ends() {
+        assert_eq!(
+            subject_of(&layout(), &Selection::Edge(depends("a", "b"))),
+            Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 420.0))),
+            "the run between the boxes is the subject, not either end of it"
+        );
+    }
+
+    #[test]
+    fn a_connection_with_one_end_in_the_picture_asks_for_that_end() {
+        assert_eq!(
+            subject_of(&layout(), &Selection::Edge(depends("a", "elsewhere"))),
+            Some(layout().rects[&id("a")])
+        );
+    }
+
+    #[test]
+    fn nothing_the_picture_draws_asks_for_nothing() {
+        assert_eq!(
+            subject_of(&layout(), &Selection::Node(id("elsewhere"))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_note_about_a_split_connection_names_both_of_its_old_ends() {
+        let note = following_a_piece(
+            "cutaway-gui",
+            "cutaway-architecture",
+            &Piece {
+                carried: 4,
+                whole: 11,
+            },
+        );
+
+        assert_eq!(
+            note,
+            format!(
+                "Following cutaway-gui {} cutaway-architecture: largest piece at this \
+                 detail, 4 of 11 dependencies.",
+                glyph::OUTWARD
+            )
+        );
     }
 }

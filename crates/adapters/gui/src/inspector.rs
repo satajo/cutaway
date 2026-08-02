@@ -18,7 +18,7 @@ use eframe::egui;
 use crate::canvas::{self, EdgeStatus};
 use crate::glyph;
 use crate::label::{self, Labels, kind_name, kind_symbol};
-use crate::{Scene, Selection, Session, detail, focus, revealed};
+use crate::{Scene, Selection, Session, detail, focus};
 
 /// How many rows one list shows before it names the rest. The cap is a
 /// display limit and not a data limit: the count above every list still
@@ -73,7 +73,7 @@ fn nothing_selected(ui: &mut egui::Ui, session: &mut Session) {
         }
     }
     if let Some(target) = chosen {
-        go_to(session, target);
+        go_to(session, &target);
     }
     ui.separator();
     help(ui);
@@ -135,7 +135,7 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
         chosen = list(ui, &panel.connections).or(chosen);
     }
     if let Some(target) = chosen {
-        go_to(session, target);
+        go_to(session, &target);
     }
 }
 
@@ -175,7 +175,7 @@ fn edge(ui: &mut egui::Ui, session: &mut Session, relation: &Relation) {
     ));
     ui.small("Click a row to jump to its source.");
     if let Some(target) = list(ui, &panel.provenance) {
-        go_to(session, target);
+        go_to(session, &target);
     }
 }
 
@@ -215,10 +215,9 @@ fn note_editor(ui: &mut egui::Ui, session: &mut Session) {
 
 /// Selects what a row names and brings it into view, exactly as a click on
 /// the canvas would.
-fn go_to(session: &mut Session, target: Selection) {
-    let shown = revealed(&target).clone();
-    session.select(Some(target));
-    session.reveal(&shown);
+fn go_to(session: &mut Session, target: &Selection) {
+    session.select(Some(target.clone()));
+    session.reveal(target);
 }
 
 /// Paints one list of rows and answers with the selection a click asked

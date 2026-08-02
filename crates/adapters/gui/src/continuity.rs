@@ -19,6 +19,24 @@ use cutaway_lenses::{BoundaryView, is_self_leaf};
 use crate::Selection;
 use crate::focus;
 
+/// What became of one selection: where it reappears, and what it lost on the
+/// way.
+pub(crate) struct Carried {
+    pub(crate) selection: Selection,
+    /// Set only where a rolled-up connection split: the new picture draws
+    /// the concrete dependencies behind the old one as several connections,
+    /// and the selection follows the largest of them alone.
+    pub(crate) piece: Option<Piece>,
+}
+
+/// How much of a split connection came along.
+pub(crate) struct Piece {
+    /// The concrete dependencies the new connection stands for.
+    pub(crate) carried: usize,
+    /// The concrete dependencies the old one stood for.
+    pub(crate) whole: usize,
+}
+
 /// Where one selection made in `before` reappears in `after`. None when the
 /// new picture holds nothing the selection could stand for.
 pub(crate) fn translated(
@@ -26,9 +44,12 @@ pub(crate) fn translated(
     before: &BoundaryView,
     after: &BoundaryView,
     selection: &Selection,
-) -> Option<Selection> {
+) -> Option<Carried> {
     match selection {
-        Selection::Node(id) => node_in(graph, before, after, id).map(Selection::Node),
+        Selection::Node(id) => node_in(graph, before, after, id).map(|id| Carried {
+            selection: Selection::Node(id),
+            piece: None,
+        }),
         Selection::Edge(relation) => edge_in(graph, before, after, relation),
     }
 }
@@ -88,30 +109,43 @@ fn edge_in(
     before: &BoundaryView,
     after: &BoundaryView,
     relation: &Relation,
-) -> Option<Selection> {
+) -> Option<Carried> {
     let carried = match before.provenance.get(relation) {
-        Some(concrete) => most_alike(&after.provenance, concrete).cloned(),
-        None => {
-            (holds(after, &relation.from) && holds(after, &relation.to)).then(|| relation.clone())
-        }
+        Some(concrete) => most_alike(&after.provenance, concrete).map(|(edge, shared)| Carried {
+            selection: Selection::Edge(edge.clone()),
+            // A connection that came along whole says nothing; only a
+            // reader following one piece of it needs telling.
+            piece: (shared < concrete.len()).then_some(Piece {
+                carried: shared,
+                whole: concrete.len(),
+            }),
+        }),
+        None => (holds(after, &relation.from) && holds(after, &relation.to)).then(|| Carried {
+            selection: Selection::Edge(relation.clone()),
+            piece: None,
+        }),
     };
-    carried
-        .map(Selection::Edge)
-        .or_else(|| node_in(graph, before, after, &relation.from).map(Selection::Node))
+    carried.or_else(|| {
+        node_in(graph, before, after, &relation.from).map(|id| Carried {
+            selection: Selection::Node(id),
+            piece: None,
+        })
+    })
 }
 
 fn holds(view: &BoundaryView, id: &ElementId) -> bool {
     view.graph.element(id).is_some()
 }
 
-/// The connection standing for most of the given concrete dependencies, and
-/// None while no connection stands for any of them. Ties go to the heavier
-/// connection - the one answering for more altogether - and an even tie to
-/// the first in id order, so one graph always answers the same way.
+/// The connection standing for most of the given concrete dependencies and
+/// how many of them it stands for, and None while no connection stands for
+/// any of them. Ties go to the heavier connection - the one answering for
+/// more altogether - and an even tie to the first in id order, so one graph
+/// always answers the same way.
 fn most_alike<'a>(
     candidates: &'a BTreeMap<Relation, BTreeSet<Relation>>,
     concrete: &BTreeSet<Relation>,
-) -> Option<&'a Relation> {
+) -> Option<(&'a Relation, usize)> {
     candidates
         .iter()
         .filter_map(|(edge, behind)| {
@@ -125,7 +159,7 @@ fn most_alike<'a>(
                 // The first in id order wins, so it must compare greatest.
                 .then_with(|| right.2.cmp(left.2))
         })
-        .map(|(_, _, edge)| edge)
+        .map(|(shared, _, edge)| (edge, shared))
 }
 
 #[cfg(test)]
@@ -215,9 +249,13 @@ mod tests {
         boundary_view(graph, &Cut::uniform(detail)).unwrap()
     }
 
-    fn carried(from: Detail, to: Detail, selection: &Selection) -> Option<Selection> {
+    fn crossing(from: Detail, to: Detail, selection: &Selection) -> Option<Carried> {
         let graph = graph();
         translated(&graph, &view(&graph, from), &view(&graph, to), selection)
+    }
+
+    fn carried(from: Detail, to: Detail, selection: &Selection) -> Option<Selection> {
+        crossing(from, to, selection).map(|carried| carried.selection)
     }
 
     #[test]
@@ -322,6 +360,35 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_edge_translation_says_so() {
+        let piece = crossing(
+            Detail::Packages,
+            Detail::Modules,
+            &Selection::Edge(depends("package:a", "package:b")),
+        )
+        .expect("the connection reappears between the modules behind it")
+        .piece
+        .expect("one of the three concrete dependencies stayed behind");
+
+        assert_eq!((piece.carried, piece.whole), (2, 3));
+    }
+
+    #[test]
+    fn a_connection_that_came_along_whole_reports_no_piece() {
+        let carried = crossing(
+            Detail::Modules,
+            Detail::Packages,
+            &Selection::Edge(depends("a/one", "b/one")),
+        )
+        .expect("the connection reappears between the packages above it");
+
+        assert!(
+            carried.piece.is_none(),
+            "a coarser picture gathers the whole connection, and gathers more besides"
+        );
+    }
+
+    #[test]
     fn a_connection_the_coarser_picture_swallows_leaves_the_boundary_it_departs_selected() {
         assert_eq!(
             carried(
@@ -359,7 +426,7 @@ mod tests {
         ]);
         assert_eq!(
             most_alike(&candidates, &behind([depends("x", "y")])),
-            Some(&depends("c", "d")),
+            Some((&depends("c", "d"), 1)),
             "both stand for the shared dependency, one stands for more besides"
         );
     }
@@ -372,7 +439,7 @@ mod tests {
         ]);
         assert_eq!(
             most_alike(&candidates, &behind([depends("x", "y")])),
-            Some(&depends("a", "b"))
+            Some((&depends("a", "b"), 1))
         );
     }
 

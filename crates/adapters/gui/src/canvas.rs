@@ -11,11 +11,12 @@ use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
 use cutaway_lenses::is_self_leaf;
 use eframe::egui::emath::TSTransform;
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Response, Sense, Shape,
-    Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
+    self, Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke,
+    StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
 use crate::bundle::{self, Bundle};
+use crate::camera::{self, Camera};
 use crate::focus::{Focus, Selected, Strength, focus_of};
 use crate::glyph;
 use crate::label::{Label, Labels};
@@ -68,8 +69,6 @@ pub struct Content<'a> {
 pub const SEVERED: Color32 = Color32::from_rgb(205, 70, 60);
 pub const DRAWN: Color32 = Color32::from_rgb(70, 165, 80);
 
-const MIN_ZOOM: f32 = 0.1;
-const MAX_ZOOM: f32 = 6.0;
 /// The size a label paints at while the camera stands at 1:1.
 pub(crate) const LABEL_SIZE: f32 = 13.0;
 /// The smallest font that still reads: below this a label paints texture
@@ -141,11 +140,7 @@ const MAP_BOX_BORDER: f32 = 0.45;
 /// Width of the rectangle that marks where the reader stands on the map.
 const HERE_WIDTH: f32 = 1.5;
 
-pub fn show(
-    ui: &mut Ui,
-    content: &Content<'_>,
-    camera: &mut Option<TSTransform>,
-) -> Option<CanvasAction> {
+pub fn show(ui: &mut Ui, content: &Content<'_>, camera: &mut Camera) -> Option<CanvasAction> {
     let viewport = ui.max_rect();
     let world = world_bounds(content.layout);
 
@@ -160,15 +155,17 @@ pub fn show(
     // beneath it. Travel lands here, before anything else this frame reads
     // the camera.
     let (camera, map) = {
-        let current = camera.get_or_insert_with(|| fit(world, viewport));
-        steer(ui, &background, viewport, world, current);
-        let map = Minimap::of(world, viewport, *current);
+        let mut current = camera.advance(ui, world, viewport);
+        current = camera::steer(ui, &background, viewport, world, camera, current);
+        let map = Minimap::of(world, viewport, current);
         if let Some(map) = &map
-            && let Some(travelled) = travel(ui, map, content.layout, viewport, *current)
+            && let Some(travelled) = travel(ui, map, content.layout, viewport, current)
         {
-            *current = travelled;
+            // A grip on the map is the reader's hand on the picture: it
+            // must answer under the finger, never travel behind it.
+            current = camera.hold(travelled);
         }
-        (*current, map)
+        (current, map)
     };
 
     // What the magnification has shrunk past reading decides before anything
@@ -335,34 +332,6 @@ fn describe_edge(ui: &Ui, content: &Content<'_>, bundle: &Bundle) {
     });
 }
 
-/// Applies drag-to-pan, scroll-to-pan, and pinch-or-ctrl-scroll zoom about
-/// the pointer. A double click on the background refits the whole graph.
-fn steer(ui: &Ui, background: &Response, viewport: Rect, world: Rect, camera: &mut TSTransform) {
-    if background.double_clicked() {
-        *camera = fit(world, viewport);
-        return;
-    }
-    if background.dragged() {
-        camera.translation += background.drag_delta();
-    }
-    let Some(pointer) = ui
-        .input(|input| input.pointer.hover_pos())
-        .filter(|position| viewport.contains(*position))
-    else {
-        return;
-    };
-    let zoom = ui.input(egui::InputState::zoom_delta);
-    if (zoom - 1.0).abs() > f32::EPSILON {
-        let allowed = (camera.scaling * zoom).clamp(MIN_ZOOM, MAX_ZOOM) / camera.scaling;
-        *camera = TSTransform::from_translation(pointer.to_vec2())
-            * TSTransform::from_scaling(allowed)
-            * TSTransform::from_translation(-pointer.to_vec2())
-            * *camera;
-    } else {
-        camera.translation += ui.input(|input| input.smooth_scroll_delta);
-    }
-}
-
 /// Paints the corner overview and answers the pointer on it: a click or a
 /// drag anywhere on the map travels there, and the marked rectangle follows
 /// the pointer as a scrollbar thumb does. Returns the camera the map asks
@@ -424,35 +393,6 @@ fn paint_map(ui: &Ui, map: &Minimap, layout: &Layout, viewport: Rect, camera: TS
         Stroke::new(HERE_WIDTH, visuals.selection.stroke.color),
         StrokeKind::Middle,
     );
-}
-
-/// How far the camera must move to bring one box into the viewport, and
-/// None while the box already reads there. A selection made beside the
-/// picture must be findable in it, but a picture that jumps on every click
-/// loses the reader, so the camera stays still whenever it can.
-///
-/// Presence is the center being on screen, not the whole box fitting: a
-/// frame wider than the viewport never fits, and re-centering it on every
-/// click would move the picture for nothing.
-pub(crate) fn reveal_shift(viewport: Rect, on_screen: Rect) -> Option<egui::Vec2> {
-    if !viewport.is_positive() || !on_screen.is_positive() {
-        return None;
-    }
-    (!viewport.contains(on_screen.center())).then(|| viewport.center() - on_screen.center())
-}
-
-/// The transform that centers the world bounds in the viewport, zoomed to
-/// fit but never past 1.25x.
-fn fit(world: Rect, viewport: Rect) -> TSTransform {
-    if !world.is_positive() || !viewport.is_positive() {
-        return TSTransform::IDENTITY;
-    }
-    let available = viewport.shrink(32.0);
-    let scale = (available.width() / world.width())
-        .min(available.height() / world.height())
-        .clamp(MIN_ZOOM, 1.25);
-    TSTransform::from_translation(viewport.center().to_vec2() - world.center().to_vec2() * scale)
-        * TSTransform::from_scaling(scale)
 }
 
 /// What the pointer did to the nodes this frame.
@@ -1031,10 +971,6 @@ mod tests {
     use super::*;
     use crate::layout::Frame;
 
-    fn viewport() -> Rect {
-        Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))
-    }
-
     fn id(text: &str) -> ElementId {
         ElementId::new(text).unwrap()
     }
@@ -1188,32 +1124,5 @@ mod tests {
     #[test]
     fn a_crowd_past_a_full_side_calms_no_further() {
         assert!((crowd_ink(40) - crowd_ink(16)).abs() < 0.001);
-    }
-
-    #[test]
-    fn a_box_already_on_screen_leaves_the_camera_where_it_is() {
-        let on_screen = Rect::from_center_size(pos2(200.0, 150.0), vec2(60.0, 30.0));
-        assert_eq!(reveal_shift(viewport(), on_screen), None);
-    }
-
-    #[test]
-    fn a_box_larger_than_the_viewport_counts_as_on_screen() {
-        let on_screen = Rect::from_center_size(pos2(200.0, 150.0), vec2(4000.0, 3000.0));
-        assert_eq!(reveal_shift(viewport(), on_screen), None);
-    }
-
-    #[test]
-    fn a_box_off_screen_moves_to_the_middle_of_the_viewport() {
-        let on_screen = Rect::from_center_size(pos2(900.0, 700.0), vec2(60.0, 30.0));
-        assert_eq!(
-            reveal_shift(viewport(), on_screen),
-            Some(vec2(-700.0, -550.0))
-        );
-    }
-
-    #[test]
-    fn nothing_moves_before_the_canvas_has_a_viewport() {
-        let on_screen = Rect::from_center_size(pos2(900.0, 700.0), vec2(60.0, 30.0));
-        assert_eq!(reveal_shift(Rect::NOTHING, on_screen), None);
     }
 }
