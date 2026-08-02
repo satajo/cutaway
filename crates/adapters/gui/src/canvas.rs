@@ -7,8 +7,6 @@
 //! which pixelates text; the camera instead picks the font size each frame,
 //! so labels stay sharp at every magnification.
 
-use std::collections::BTreeSet;
-
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
 use eframe::egui::emath::TSTransform;
 use eframe::egui::{
@@ -16,6 +14,7 @@ use eframe::egui::{
     Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
+use crate::focus::{Focus, Selected, Strength, focus_of};
 use crate::layout::{HEADER, Layout};
 
 /// How one dependency edge is drawn.
@@ -65,6 +64,9 @@ const EDGE_REACH: f32 = 8.0;
 const CURVE_SEGMENTS: u16 = 24;
 /// Color strength left to everything outside the selection's neighborhood.
 const FADE: f32 = 0.18;
+/// Color strength left to the frames around the selection's neighborhood:
+/// enough to read their names, little enough to stay background.
+const CONTEXT: f32 = 0.55;
 
 pub fn show(
     ui: &mut Ui,
@@ -219,7 +221,7 @@ struct Paint<'a> {
     camera: TSTransform,
     base: Color32,
     fill: Color32,
-    focus: Option<BTreeSet<&'a ElementId>>,
+    focus: Option<Focus<'a>>,
 }
 
 impl Paint<'_> {
@@ -233,16 +235,24 @@ impl Paint<'_> {
         (width * self.camera.scaling).max(0.75)
     }
 
-    fn faded(&self, id: &ElementId) -> bool {
-        self.focus.as_ref().is_some_and(|focus| !focus.contains(id))
+    fn element(&self, id: &ElementId) -> Strength {
+        self.focus
+            .as_ref()
+            .map_or(Strength::Focused, |focus| focus.element(id))
+    }
+
+    fn edge(&self, relation: &Relation) -> Strength {
+        self.focus
+            .as_ref()
+            .map_or(Strength::Focused, |focus| focus.edge(relation))
     }
 }
 
-fn shade(color: Color32, faded: bool) -> Color32 {
-    if faded {
-        color.gamma_multiply(FADE)
-    } else {
-        color
+fn shade(color: Color32, strength: Strength) -> Color32 {
+    match strength {
+        Strength::Focused => color,
+        Strength::Context => color.gamma_multiply(CONTEXT),
+        Strength::Faded => color.gamma_multiply(FADE),
     }
 }
 
@@ -261,37 +271,32 @@ fn paint(
         camera,
         base: visuals.text_color(),
         fill: visuals.extreme_bg_color,
-        focus: focus_of(content),
+        focus: focus(content),
     };
     paint_containers(&paint, content, hovered_node);
     paint_edges(&paint, content, curves, hovered_edge);
     paint_leaves(&paint, content, hovered_node);
 }
 
-/// The selection's neighborhood: these elements keep full strength while
-/// everything else fades. None fades nothing.
-fn focus_of<'a>(content: &Content<'a>) -> Option<BTreeSet<&'a ElementId>> {
-    if let Some(id) = content.selected_node {
-        let mut set = BTreeSet::from([id]);
-        for edge in content.edges {
-            if edge.relation.from == *id {
-                set.insert(&edge.relation.to);
-            }
-            if edge.relation.to == *id {
-                set.insert(&edge.relation.from);
-            }
-        }
-        return Some(set);
-    }
-    content
-        .selected_edge
-        .map(|relation| BTreeSet::from([&relation.from, &relation.to]))
+/// The selection's neighborhood. None when nothing is selected: then
+/// nothing fades.
+fn focus<'a>(content: &Content<'a>) -> Option<Focus<'a>> {
+    let selected = match (content.selected_node, content.selected_edge) {
+        (Some(id), _) => Selected::Node(id),
+        (None, Some(relation)) => Selected::Edge(relation),
+        (None, None) => return None,
+    };
+    Some(focus_of(
+        content.view,
+        content.edges.iter().map(|edge| &edge.relation),
+        selected,
+    ))
 }
 
 fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&ElementId>) {
     for id in &content.layout.containers {
         let rect = paint.camera.mul_rect(content.layout.rects[id]);
-        let faded = paint.faded(id);
+        let strength = paint.element(id);
         let selected = content.selected_node == Some(id) || content.draw_source == Some(id);
         let width = if selected {
             2.5
@@ -305,7 +310,7 @@ fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&E
             CornerRadius::same(6),
             Stroke::new(
                 paint.stroke_width(width),
-                shade(paint.base.gamma_multiply(0.6), faded),
+                shade(paint.base.gamma_multiply(0.6), strength),
             ),
             StrokeKind::Middle,
         );
@@ -315,7 +320,7 @@ fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&E
                 Align2::LEFT_TOP,
                 name_of(content.view, id),
                 font,
-                shade(paint.base, faded),
+                shade(paint.base, strength),
             );
         }
     }
@@ -331,18 +336,13 @@ fn paint_edges(
         let Some(points) = curve else {
             continue;
         };
-        let faded = match (content.selected_node, content.selected_edge) {
-            (Some(id), _) => edge.relation.from != *id && edge.relation.to != *id,
-            (None, Some(selected)) => edge.relation != *selected,
-            (None, None) => false,
-        };
         let color = shade(
             match edge.status {
                 EdgeStatus::Existing => paint.base,
                 EdgeStatus::Severed => SEVERED,
                 EdgeStatus::Drawn => DRAWN,
             },
-            faded,
+            paint.edge(&edge.relation),
         );
         let selected = content.selected_edge == Some(&edge.relation);
         let width = if selected {
@@ -375,7 +375,7 @@ fn paint_edges(
 fn paint_leaves(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&ElementId>) {
     for id in &content.layout.leaves {
         let rect = paint.camera.mul_rect(content.layout.rects[id]);
-        let faded = paint.faded(id);
+        let strength = paint.element(id);
         let selected = content.selected_node == Some(id) || content.draw_source == Some(id);
         let hover = hovered == Some(id);
         let width = if selected {
@@ -388,12 +388,12 @@ fn paint_leaves(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&Eleme
         paint.painter.rect(
             rect,
             CornerRadius::same(5),
-            shade(paint.fill, faded),
+            shade(paint.fill, strength),
             Stroke::new(
                 paint.stroke_width(width),
                 shade(
                     paint.base.gamma_multiply(if hover { 1.0 } else { 0.8 }),
-                    faded,
+                    strength,
                 ),
             ),
             StrokeKind::Middle,
@@ -404,7 +404,7 @@ fn paint_leaves(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&Eleme
                 Align2::CENTER_CENTER,
                 name_of(content.view, id),
                 font,
-                shade(paint.base, faded),
+                shade(paint.base, strength),
             );
         }
     }

@@ -8,9 +8,10 @@
 //! connections, and every markup lands in the project's plan immediately.
 
 mod canvas;
+mod focus;
 mod layout;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -523,7 +524,7 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
                 }
             }
             ui.separator();
-            ui.label("Select a node or a connection to annotate it. Selecting a node fades everything it does not touch.");
+            ui.label("Select a node or a connection to annotate it. Selecting a boundary keeps everything inside it, and every dependency that crosses its border, at full strength.");
             ui.label("Severed connections turn red, drawn ones green; the plan saves to cutaway.json in the repository.");
             ui.label("Drag or scroll to pan, ctrl+scroll or pinch to zoom, double-click the background to refit.");
         }
@@ -539,6 +540,7 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
             );
             ui.heading(format!("{kind}{name}"));
             note_editor(ui, session);
+            boundary_dependencies(ui, session, &id);
         }
         Some(Selection::Edge(relation)) => {
             ui.heading(format!(
@@ -587,6 +589,81 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
             }
         }
     }
+}
+
+/// What a whole boundary depends on. No drawn edge touches a frame - edges
+/// attach to leaves - so the frame's own answer is the rolled-up edges that
+/// cross its border, gathered by the partner on the other side.
+fn boundary_dependencies(ui: &mut egui::Ui, session: &Session, id: &ElementId) {
+    let Ok(Scene { view, .. }) = &session.scene else {
+        return;
+    };
+    if !focus::is_frame(&view.graph, id) {
+        return;
+    }
+    let crossing = crossings(view, &focus::subtree_of(&view.graph, id));
+    ui.separator();
+    if crossing.outward.is_empty() && crossing.inward.is_empty() {
+        ui.label("Nothing crosses this boundary.");
+        return;
+    }
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for (partner, concrete) in &crossing.outward {
+            ui.label(format!(
+                "Depends on: {} ({concrete} concrete)",
+                partner_name(session, partner)
+            ));
+        }
+        for (partner, concrete) in &crossing.inward {
+            ui.label(format!(
+                "Depended on by: {} ({concrete} concrete)",
+                partner_name(session, partner)
+            ));
+        }
+    });
+}
+
+/// The border-crossing dependencies of one boundary, heaviest first: each
+/// partner outside the boundary with the number of concrete relations the
+/// rolled-up edges to it stand for.
+struct Crossings<'a> {
+    outward: Vec<(&'a ElementId, usize)>,
+    inward: Vec<(&'a ElementId, usize)>,
+}
+
+fn crossings<'a>(view: &'a BoundaryView, inside: &BTreeSet<&ElementId>) -> Crossings<'a> {
+    let mut outward: BTreeMap<&ElementId, usize> = BTreeMap::new();
+    let mut inward: BTreeMap<&ElementId, usize> = BTreeMap::new();
+    for (edge, concrete) in &view.provenance {
+        match (inside.contains(&edge.from), inside.contains(&edge.to)) {
+            (true, false) => *outward.entry(&edge.to).or_default() += concrete.len(),
+            (false, true) => *inward.entry(&edge.from).or_default() += concrete.len(),
+            _ => {}
+        }
+    }
+    Crossings {
+        outward: ranked(outward),
+        inward: ranked(inward),
+    }
+}
+
+fn ranked(counts: BTreeMap<&ElementId, usize>) -> Vec<(&ElementId, usize)> {
+    let mut ranked: Vec<(&ElementId, usize)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    ranked
+}
+
+/// A partner as the picture names it. A frame's `self` leaf carries the
+/// frame's own content, so it reads as the frame it sits in.
+fn partner_name(session: &Session, id: &ElementId) -> String {
+    let name = element_name(session, id);
+    if name != "self" {
+        return name;
+    }
+    let Ok(Scene { view, .. }) = &session.scene else {
+        return name;
+    };
+    focus::frame_of(&view.graph, id).map_or(name, |frame| element_name(session, frame))
 }
 
 fn note_editor(ui: &mut egui::Ui, session: &mut Session) {
