@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
 use cutaway_lenses::is_self_leaf;
 
+use crate::glyph;
+
 /// The text of one box: the name, and the kind glyph in front of it when
 /// the glyph tells the reader something.
 pub(crate) struct Label {
@@ -128,11 +130,11 @@ fn name_character(character: char) -> bool {
 
 pub(crate) fn kind_symbol(kind: ElementKind) -> &'static str {
     match kind {
-        ElementKind::Project => "◈",
-        ElementKind::Package => "▣",
-        ElementKind::Module => "▤",
-        ElementKind::Function => "ƒ",
-        ElementKind::Type => "T",
+        ElementKind::Project => glyph::PROJECT,
+        ElementKind::Package => glyph::PACKAGE,
+        ElementKind::Module => glyph::MODULE,
+        ElementKind::Function => glyph::FUNCTION,
+        ElementKind::Type => glyph::TYPE,
     }
 }
 
@@ -295,6 +297,6 @@ mod tests {
         let view = view();
         let labels = Labels::of(&view);
         let leaf = labels.label(&id("core/ports/source_analyzer.rs#function:analyze"));
-        assert_eq!(leaf.text(), "ƒ analyze");
+        assert_eq!(leaf.text(), format!("{} analyze", glyph::FUNCTION));
     }
 }

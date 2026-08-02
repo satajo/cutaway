@@ -571,6 +571,7 @@ fn label_width(name: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::glyph;
     use cutaway_architecture::{Element, ElementKind, ElementName, Relation};
 
     fn add_package(graph: &mut ArchitectureGraph, name: &str) -> ElementId {
@@ -825,7 +826,7 @@ mod tests {
         let package = add_package(&mut graph, "app");
 
         let layout = compute(&graph, &no_weights());
-        assert!(layout.rects[&package].width() >= label_width("▣ app"));
+        assert!(layout.rects[&package].width() >= label_width(&format!("{} app", glyph::PACKAGE)));
     }
 
     #[test]

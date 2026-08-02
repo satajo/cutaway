@@ -26,14 +26,12 @@ use eframe::egui;
 use eframe::egui::text::{CCursor, CCursorRange};
 
 use crate::focus;
+use crate::glyph;
 use crate::label::kind_symbol;
 
 /// How many results one glance reads. Past this a reader types another
 /// letter rather than looks further down.
 const RESULT_LIMIT: usize = 12;
-
-/// What stands between the containers above a result.
-const CONTAINER_STEP: &str = " › ";
 
 /// How wide the palette floats, in points.
 const WIDTH: f32 = 460.0;
@@ -246,7 +244,7 @@ fn container_of(graph: &ArchitectureGraph, frames: &focus::Frames<'_>, id: &Elem
         current = frames.get(frame).copied();
     }
     names.reverse();
-    names.join(CONTAINER_STEP)
+    names.join(glyph::CONTAINER_STEP)
 }
 
 /// The overrides that open a picture down to one element: every boundary
@@ -449,7 +447,13 @@ fn rows(ui: &mut egui::Ui, palette: &Palette, hits: &[Hit], accept: bool) -> Opt
             accepted = Some(hit.id.clone());
         }
     }
-    ui.small("↑↓ choose · Enter opens · Esc closes");
+    ui.small(format!(
+        "{}{} choose {} Enter opens {} Esc closes",
+        glyph::KEY_UP,
+        glyph::KEY_DOWN,
+        glyph::HINT_STEP,
+        glyph::HINT_STEP
+    ));
     accepted
 }
 
@@ -622,7 +626,8 @@ mod tests {
     fn a_result_names_the_boundaries_above_it() {
         let found = hits(&graph(), "SourceTree");
         assert_eq!(
-            found[0].container, "inspection › ports › ports::source_tree",
+            found[0].container,
+            ["inspection", "ports", "ports::source_tree"].join(glyph::CONTAINER_STEP),
             "the project root names the whole picture and so stays out"
         );
     }

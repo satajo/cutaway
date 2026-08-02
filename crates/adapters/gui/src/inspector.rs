@@ -16,6 +16,7 @@ use cutaway_lenses::{BoundaryView, is_self_leaf};
 use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
+use crate::glyph;
 use crate::label::{Labels, kind_name, kind_symbol};
 use crate::{Scene, Selection, Session, detail, focus, revealed};
 
@@ -233,7 +234,7 @@ fn list(ui: &mut egui::Ui, rows: &[Row]) -> Option<Selection> {
         }
     }
     if held_back > 0 {
-        ui.small(format!("… and {held_back} more"));
+        ui.small(format!("{} and {held_back} more", glyph::ELLIPSIS));
     }
     chosen
 }
@@ -292,8 +293,9 @@ fn edge_panel(session: &Session, relation: &Relation) -> Option<EdgePanel> {
     let labels = Labels::of(&view.graph);
     Some(EdgePanel {
         heading: format!(
-            "{} → {}",
+            "{} {} {}",
             labels.qualified(&relation.from),
+            glyph::OUTWARD,
             labels.qualified(&relation.to)
         ),
         provenance: provenance_rows(view, &session.graph, relation),
@@ -322,9 +324,9 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
 /// border. Outgoing first, heaviest first.
 fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> Vec<Row> {
     let crossing = crossings(view, &focus::subtree_of(&view.graph, id));
-    let row = |arrow: &str, crossing: &Crossing<'_>| Row {
+    let row = |direction: &str, crossing: &Crossing<'_>| Row {
         text: format!(
-            "{arrow} {} ({})",
+            "{direction} {} ({})",
             labels.qualified(crossing.partner),
             crossing.concrete
         ),
@@ -333,8 +335,13 @@ fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> 
     crossing
         .outward
         .iter()
-        .map(|crossing| row("→", crossing))
-        .chain(crossing.inward.iter().map(|crossing| row("←", crossing)))
+        .map(|crossing| row(glyph::OUTWARD, crossing))
+        .chain(
+            crossing
+                .inward
+                .iter()
+                .map(|crossing| row(glyph::INWARD, crossing)),
+        )
         .collect()
 }
 
@@ -351,8 +358,9 @@ fn coarse_rows(view: &BoundaryView, labels: &Labels<'_>) -> Vec<Row> {
         .into_iter()
         .map(|(edge, concrete)| Row {
             text: format!(
-                "{} → {}, {concrete} concrete",
+                "{} {} {}, {concrete} concrete",
                 labels.qualified(&edge.from),
+                glyph::OUTWARD,
                 labels.qualified(&edge.to)
             ),
             target: Some(Selection::Node(edge.to.clone())),
@@ -367,8 +375,9 @@ fn unscoped_rows(view: &BoundaryView, graph: &ArchitectureGraph) -> Vec<Row> {
         .iter()
         .map(|relation| Row {
             text: format!(
-                "{} → {}",
+                "{} {} {}",
                 name_of(graph, &relation.from),
+                glyph::OUTWARD,
                 name_of(graph, &relation.to)
             ),
             target: None,
@@ -389,8 +398,9 @@ fn provenance_rows(
         .flatten()
         .map(|concrete| Row {
             text: format!(
-                "{} → {}",
+                "{} {} {}",
                 name_of(graph, &concrete.from),
+                glyph::OUTWARD,
                 name_of(graph, &concrete.to)
             ),
             target: focus::boundary_in_view(&view.graph, graph, &concrete.from)
@@ -556,7 +566,11 @@ mod tests {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         assert_eq!(
             texts(&rows_of(&view, "package:a")),
-            ["→ b/one (3)", "→ c/one (1)", "← b/one (1)"]
+            [
+                format!("{} b/one (3)", glyph::OUTWARD),
+                format!("{} c/one (1)", glyph::OUTWARD),
+                format!("{} b/one (1)", glyph::INWARD)
+            ]
         );
     }
 
@@ -566,7 +580,7 @@ mod tests {
         let rows = rows_of(&view, "a/two");
         assert_eq!(
             texts(&rows),
-            ["→ b/one (2)"],
+            [format!("{} b/one (2)", glyph::OUTWARD)],
             "the type inside a/two counts toward the module that holds it"
         );
     }
@@ -586,7 +600,14 @@ mod tests {
     fn the_connections_of_a_leaf_are_the_edges_that_touch_it() {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         let rows = rows_of(&view, "a/one");
-        assert_eq!(texts(&rows), ["→ b/one (1)", "→ c/one (1)", "← b/one (1)"]);
+        assert_eq!(
+            texts(&rows),
+            [
+                format!("{} b/one (1)", glyph::OUTWARD),
+                format!("{} c/one (1)", glyph::OUTWARD),
+                format!("{} b/one (1)", glyph::INWARD)
+            ]
+        );
         assert_eq!(
             rows[2].target,
             Some(Selection::Edge(depends("b/one", "a/one")))
@@ -598,7 +619,13 @@ mod tests {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         let labels = Labels::of(&view.graph);
         let rows = contents_rows(&view.graph, &labels, &id("package:a"));
-        assert_eq!(texts(&rows), ["▤ a/one", "▤ a/two"]);
+        assert_eq!(
+            texts(&rows),
+            [
+                format!("{} a/one", glyph::MODULE),
+                format!("{} a/two", glyph::MODULE)
+            ]
+        );
         assert_eq!(rows[0].target, Some(Selection::Node(id("a/one"))));
     }
 
@@ -616,8 +643,8 @@ mod tests {
         assert_eq!(
             texts(&rows),
             [
-                "c/one → package:b, 2 concrete",
-                "package:a → package:b, 1 concrete"
+                format!("c/one {} package:b, 2 concrete", glyph::OUTWARD),
+                format!("package:a {} package:b, 1 concrete", glyph::OUTWARD)
             ]
         );
         assert_eq!(rows[0].target, Some(Selection::Node(id("package:b"))));
@@ -632,7 +659,7 @@ mod tests {
         relate(&mut graph, "stray", "b/one", RelationKind::DependsOn);
         let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
         let rows = unscoped_rows(&view, &graph);
-        assert_eq!(texts(&rows), ["stray → b/one"]);
+        assert_eq!(texts(&rows), [format!("stray {} b/one", glyph::OUTWARD)]);
         assert_eq!(rows[0].target, None);
     }
 
@@ -643,7 +670,11 @@ mod tests {
         let rows = provenance_rows(&view, &graph, &depends("package:a", "package:b"));
         assert_eq!(
             texts(&rows),
-            ["a/one → b/one", "a/two → b/one", "a/two#type:X → b/one"]
+            [
+                format!("a/one {} b/one", glyph::OUTWARD),
+                format!("a/two {} b/one", glyph::OUTWARD),
+                format!("a/two#type:X {} b/one", glyph::OUTWARD)
+            ]
         );
         for row in &rows {
             assert_eq!(row.target, Some(Selection::Node(id("package:a"))));

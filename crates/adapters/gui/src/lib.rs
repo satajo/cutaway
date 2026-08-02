@@ -18,6 +18,7 @@ mod canvas;
 mod continuity;
 mod detail;
 mod focus;
+mod glyph;
 mod inspector;
 mod label;
 mod layout;
@@ -605,7 +606,10 @@ impl eframe::App for CutawayApp {
             ui.horizontal(|ui| {
                 let picking = self.picker.is_some();
                 if ui
-                    .add_enabled(!picking, egui::Button::new("Open repository…"))
+                    .add_enabled(
+                        !picking,
+                        egui::Button::new(format!("Open repository{}", glyph::ELLIPSIS)),
+                    )
                     .clicked()
                 {
                     self.pick_repository(ui.ctx().clone());

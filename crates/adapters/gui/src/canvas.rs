@@ -16,6 +16,7 @@ use eframe::egui::{
 };
 
 use crate::focus::{Focus, Selected, Strength, focus_of};
+use crate::glyph;
 use crate::label::{Label, Labels};
 use crate::layout::{HEADER, Layout};
 use crate::minimap::Minimap;
@@ -248,8 +249,9 @@ fn describe_edge(ui: &Ui, content: &Content<'_>, index: usize) {
     };
     let labels = Labels::of(content.view);
     let joins = format!(
-        "{} → {}",
+        "{} {} {}",
         labels.qualified(&edge.relation.from),
+        glyph::OUTWARD,
         labels.qualified(&edge.relation.to)
     );
     // A planned addition stands for nothing concrete yet, so it counts
