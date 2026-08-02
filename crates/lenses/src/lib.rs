@@ -10,10 +10,10 @@
 //! Dependency edges attach only to boundaries without visible children, so
 //! one picture never mixes two detail levels. A boundary that contains other
 //! boundaries is a frame. Its own content - everything that rolls up to it
-//! without falling into a visible child - appears as a synthetic `self` leaf
-//! inside it (id `<frame>#self`). A dependency that names a frame as a whole
-//! cannot attach to any leaf; it is reported in [`BoundaryView::coarse`] and
-//! shows rolled-up at a coarser detail.
+//! without falling into a visible child - appears as a synthetic leaf inside
+//! it, named [`OWN_CONTENT_NAME`] (id `<frame>#self`). A dependency that
+//! names a frame as a whole cannot attach to any leaf; it is reported in
+//! [`BoundaryView::coarse`] and shows rolled-up at a coarser detail.
 //!
 //! # A cut that is not uniform
 //!
@@ -250,7 +250,7 @@ pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryVie
             .kind;
         view.add_element(Element {
             id: self_leaf_id(frame),
-            name: ElementName::new("self").expect("the self leaf name is never empty"),
+            name: ElementName::new(OWN_CONTENT_NAME).expect("the name is never empty"),
             kind,
         })?;
         nesting.insert(Relation {
@@ -407,6 +407,11 @@ fn attached(
         boundary
     }
 }
+
+/// What a frame's own-content leaf is called. The parentheses say the
+/// boundary is one the lens makes rather than one the sources declare, and
+/// the word is short enough for the box a picture gives it.
+pub const OWN_CONTENT_NAME: &str = "(own)";
 
 /// What a frame's id gains to name the leaf that carries the frame's own
 /// content. No source element ever ends this way: an item id ends in
@@ -601,7 +606,7 @@ mod tests {
             .graph
             .element(&ElementId::new("a/lib#self").unwrap())
             .expect("the frame grows a self leaf");
-        assert_eq!(self_leaf.name.as_str(), "self");
+        assert_eq!(self_leaf.name.as_str(), OWN_CONTENT_NAME);
         assert!(
             view.graph
                 .relations()
@@ -620,7 +625,7 @@ mod tests {
         for element in view.graph.elements() {
             assert_eq!(
                 is_self_leaf(&element.id),
-                element.name.as_str() == "self",
+                element.name.as_str() == OWN_CONTENT_NAME,
                 "{}",
                 element.id
             );

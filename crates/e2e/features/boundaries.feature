@@ -3,8 +3,8 @@ Feature: The boundary lens
   The architecture appears as boundaries at an adjustable level of detail:
   packages, the modules within them, or the individual items within the
   modules. Connections attach only to boundaries without visible children.
-  A boundary that contains other boundaries shows its own content as a
-  "self" boundary, and a dependency that names such a boundary as a whole
+  A boundary that contains other boundaries shows its own content as an
+  "(own)" boundary, and a dependency that names such a boundary as a whole
   waits at a coarser detail. Dependencies inside one boundary stay out of
   sight at that level.
 
@@ -31,7 +31,7 @@ Feature: The boundary lens
     And the boundaries are viewed at "packages" level
     Then a connection goes from "app" to "engine"
 
-  Scenario: Module detail shows a boundary's own code as its self boundary
+  Scenario: Module detail shows a boundary's own code as its own-content boundary
     Given a package "engine" at "crates/engine"
     And a source file "crates/engine/src/lib.rs" containing:
       """
@@ -44,7 +44,7 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "modules" level
-    Then a connection goes from "self" to "physics"
+    Then a connection goes from "(own)" to "physics"
 
   Scenario: A dependency on a whole boundary waits at a coarser detail
     Given a package "app" at "crates/app" depending on "engine"
@@ -115,4 +115,4 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "items" level
-    Then a connection goes from "self" to "step"
+    Then a connection goes from "(own)" to "step"

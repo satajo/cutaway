@@ -17,7 +17,7 @@ use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
 use crate::glyph;
-use crate::label::{Labels, kind_name, kind_symbol};
+use crate::label::{self, Labels, kind_name, kind_symbol};
 use crate::{Scene, Selection, Session, detail, focus, revealed};
 
 /// How many rows one list shows before it names the rest. The cap is a
@@ -69,7 +69,7 @@ fn nothing_selected(ui: &mut egui::Ui, session: &mut Session) {
                 "{} dependencies fall outside every boundary.",
                 view.unscoped.len()
             ));
-            chosen = list(ui, &unscoped_rows(view, &session.graph)).or(chosen);
+            chosen = list(ui, &unscoped_rows(view, &Labels::of(&session.graph))).or(chosen);
         }
     }
     if let Some(target) = chosen {
@@ -86,6 +86,11 @@ fn help(ui: &mut egui::Ui) {
          strength.",
     );
     ui.label("A box grows with the number of concepts inside it.");
+    ui.label(
+        "A boundary that holds other boundaries shows the code it declares itself as \
+         an (own) box. The connections of that box are the dependencies of that code \
+         alone, not of the boundaries beside it.",
+    );
     ui.label(
         "Double-click a boundary to open it one level deeper than the rest of the \
          picture; select it to expand or collapse it from here.",
@@ -298,7 +303,7 @@ fn edge_panel(session: &Session, relation: &Relation) -> Option<EdgePanel> {
             glyph::OUTWARD,
             labels.qualified(&relation.to)
         ),
-        provenance: provenance_rows(view, &session.graph, relation),
+        provenance: provenance_rows(view, &session.graph, &Labels::of(&session.graph), relation),
     })
 }
 
@@ -310,7 +315,7 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
             // A frame's own content needs no name here: the frame it
             // belongs to is the heading right above the list.
             text: if is_self_leaf(child) {
-                "own content".to_owned()
+                label::OWN_CONTENT.to_owned()
             } else {
                 labels.label(child).text()
             },
@@ -324,10 +329,17 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
 /// border. Outgoing first, heaviest first.
 fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> Vec<Row> {
     let crossing = crossings(view, &focus::subtree_of(&view.graph, id));
+    let names = labels.distinct(
+        crossing
+            .outward
+            .iter()
+            .chain(&crossing.inward)
+            .map(|crossing| crossing.partner),
+    );
     let row = |direction: &str, crossing: &Crossing<'_>| Row {
         text: format!(
             "{direction} {} ({})",
-            labels.qualified(crossing.partner),
+            names.name(crossing.partner),
             crossing.concrete
         ),
         target: Some(Selection::Edge(crossing.edge.clone())),
@@ -354,14 +366,15 @@ fn coarse_rows(view: &BoundaryView, labels: &Labels<'_>) -> Vec<Row> {
         .map(|(edge, concrete)| (edge, concrete.len()))
         .collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let names = labels.distinct(ranked.iter().flat_map(|(edge, _)| [&edge.from, &edge.to]));
     ranked
         .into_iter()
         .map(|(edge, concrete)| Row {
             text: format!(
                 "{} {} {}, {concrete} concrete",
-                labels.qualified(&edge.from),
+                names.name(&edge.from),
                 glyph::OUTWARD,
-                labels.qualified(&edge.to)
+                names.name(&edge.to)
             ),
             target: Some(Selection::Node(edge.to.clone())),
         })
@@ -370,15 +383,20 @@ fn coarse_rows(view: &BoundaryView, labels: &Labels<'_>) -> Vec<Row> {
 
 /// The dependencies with an endpoint no boundary holds. They lead nowhere:
 /// the view has no boundary to select for them.
-fn unscoped_rows(view: &BoundaryView, graph: &ArchitectureGraph) -> Vec<Row> {
+fn unscoped_rows(view: &BoundaryView, concrete: &Labels<'_>) -> Vec<Row> {
+    let names = concrete.distinct(
+        view.unscoped
+            .iter()
+            .flat_map(|relation| [&relation.from, &relation.to]),
+    );
     view.unscoped
         .iter()
         .map(|relation| Row {
             text: format!(
                 "{} {} {}",
-                name_of(graph, &relation.from),
+                names.name(&relation.from),
                 glyph::OUTWARD,
-                name_of(graph, &relation.to)
+                names.name(&relation.to)
             ),
             target: None,
         })
@@ -387,35 +405,28 @@ fn unscoped_rows(view: &BoundaryView, graph: &ArchitectureGraph) -> Vec<Row> {
 
 /// The concrete dependencies behind one rolled-up edge, each leading to the
 /// boundary its source shows up as at this detail.
+///
+/// A row names elements below the detail the view cuts at, so it reads them
+/// through the labels of the full graph: only that graph holds them.
 fn provenance_rows(
     view: &BoundaryView,
     graph: &ArchitectureGraph,
+    concrete: &Labels<'_>,
     relation: &Relation,
 ) -> Vec<Row> {
-    view.provenance
-        .get(relation)
-        .into_iter()
-        .flatten()
-        .map(|concrete| Row {
+    let behind = || view.provenance.get(relation).into_iter().flatten();
+    let names = concrete.distinct(behind().flat_map(|edge| [&edge.from, &edge.to]));
+    behind()
+        .map(|edge| Row {
             text: format!(
                 "{} {} {}",
-                name_of(graph, &concrete.from),
+                names.name(&edge.from),
                 glyph::OUTWARD,
-                name_of(graph, &concrete.to)
+                names.name(&edge.to)
             ),
-            target: focus::boundary_in_view(&view.graph, graph, &concrete.from)
-                .map(Selection::Node),
+            target: focus::boundary_in_view(&view.graph, graph, &edge.from).map(Selection::Node),
         })
         .collect()
-}
-
-/// A concrete element as its sources name it. Rows about concrete
-/// dependencies speak of elements below the detail the view cuts at, and
-/// only the full graph knows those.
-fn name_of(graph: &ArchitectureGraph, id: &ElementId) -> String {
-    graph
-        .element(id)
-        .map_or_else(|| id.to_string(), |element| element.name.to_string())
 }
 
 /// The dependencies that cross one boundary's border, gathered by the
@@ -491,10 +502,14 @@ mod tests {
     }
 
     fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: ElementKind) {
+        add_named(graph, id_text, id_text, kind);
+    }
+
+    fn add_named(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: ElementKind) {
         graph
             .add_element(Element {
                 id: id(id_text),
-                name: ElementName::new(id_text).unwrap(),
+                name: ElementName::new(name).unwrap(),
                 kind,
             })
             .unwrap();
@@ -615,6 +630,37 @@ mod tests {
     }
 
     #[test]
+    fn two_partners_of_one_name_carry_the_package_that_holds_them() {
+        let mut graph = ArchitectureGraph::new();
+        for package in ["app", "engine", "store"] {
+            let package_id = format!("package:{package}");
+            let root = format!("{package}/lib.rs");
+            add_named(&mut graph, &package_id, package, ElementKind::Package);
+            add_named(&mut graph, &root, "crate", ElementKind::Module);
+            relate(&mut graph, &package_id, &root, RelationKind::Contains);
+        }
+        for partner in ["engine/lib.rs", "store/lib.rs"] {
+            relate(&mut graph, "app/lib.rs", partner, RelationKind::DependsOn);
+        }
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        assert_eq!(
+            texts(&rows_of(&view, "app/lib.rs")),
+            [
+                format!(
+                    "{} {} (1)",
+                    glyph::OUTWARD,
+                    ["engine", "crate"].join(glyph::CONTAINER_STEP)
+                ),
+                format!(
+                    "{} {} (1)",
+                    glyph::OUTWARD,
+                    ["store", "crate"].join(glyph::CONTAINER_STEP)
+                )
+            ]
+        );
+    }
+
+    #[test]
     fn a_frame_lists_the_boundaries_it_directly_holds() {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         let labels = Labels::of(&view.graph);
@@ -658,7 +704,7 @@ mod tests {
         relate(&mut graph, "project", "stray", RelationKind::Contains);
         relate(&mut graph, "stray", "b/one", RelationKind::DependsOn);
         let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
-        let rows = unscoped_rows(&view, &graph);
+        let rows = unscoped_rows(&view, &Labels::of(&graph));
         assert_eq!(texts(&rows), [format!("stray {} b/one", glyph::OUTWARD)]);
         assert_eq!(rows[0].target, None);
     }
@@ -667,7 +713,12 @@ mod tests {
     fn a_concrete_dependency_leads_to_the_boundary_its_source_shows_up_as() {
         let graph = graph();
         let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
-        let rows = provenance_rows(&view, &graph, &depends("package:a", "package:b"));
+        let rows = provenance_rows(
+            &view,
+            &graph,
+            &Labels::of(&graph),
+            &depends("package:a", "package:b"),
+        );
         assert_eq!(
             texts(&rows),
             [
