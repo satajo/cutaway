@@ -3,19 +3,21 @@
 //! The GUI drives the application core and knows nothing about where
 //! architectures or plans come from: the composition root hands it a
 //! [`ProjectOpener`] and every opened project carries its own
-//! [`PlanStore`]. The boundary canvas shows the architecture at package or
-//! module level; the user severs, draws, and annotates connections, and
-//! every markup lands in the project's plan immediately.
+//! [`PlanStore`]. The boundary canvas shows the architecture at an
+//! adjustable level of detail; the user severs, draws, and annotates
+//! connections, and every markup lands in the project's plan immediately.
 
 mod canvas;
 mod layout;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation, RelationKind};
-use cutaway_lenses::{BoundaryView, boundary_view};
+use cutaway_architecture::{
+    ArchitectureGraph, Element, ElementId, ElementKind, Relation, RelationKind,
+};
+use cutaway_lenses::{BoundaryView, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{Note, Plan, ProposedChange, Subject};
 use eframe::egui::{self, emath::TSTransform};
@@ -51,21 +53,6 @@ pub enum StartupError {
     Gui { reason: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Level {
-    Packages,
-    Modules,
-}
-
-impl Level {
-    fn kinds(self) -> BTreeSet<ElementKind> {
-        match self {
-            Self::Packages => BTreeSet::from([ElementKind::Package]),
-            Self::Modules => BTreeSet::from([ElementKind::Package, ElementKind::Module]),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Selection {
     Node(ElementId),
@@ -76,7 +63,7 @@ struct Session {
     graph: ArchitectureGraph,
     plan: Plan,
     store: Box<dyn PlanStore>,
-    level: Level,
+    detail: Detail,
     view: Result<BoundaryView, String>,
     /// Contained-concept counts from the full graph; they size the boxes.
     weights: BTreeMap<ElementId, usize>,
@@ -96,7 +83,7 @@ impl Session {
             graph: project.graph,
             plan: project.plan,
             store: project.store,
-            level: Level::Packages,
+            detail: Detail::Packages,
             view: Err("not built yet".to_owned()),
             weights,
             camera: None,
@@ -110,9 +97,18 @@ impl Session {
         session
     }
 
+    /// The element behind an id. The view graph answers first: it holds the
+    /// synthetic `self` leaves the full graph never sees.
+    fn element_of(&self, id: &ElementId) -> Option<&Element> {
+        self.view
+            .as_ref()
+            .ok()
+            .and_then(|view| view.graph.element(id))
+            .or_else(|| self.graph.element(id))
+    }
+
     fn rebuild_view(&mut self) {
-        self.view =
-            boundary_view(&self.graph, &self.level.kinds()).map_err(|error| error.to_string());
+        self.view = boundary_view(&self.graph, self.detail).map_err(|error| error.to_string());
         self.selection = None;
         self.note_draft.clear();
         self.draw_source = None;
@@ -401,13 +397,19 @@ impl eframe::App for CutawayApp {
                 }
                 if let Some(Ok(session)) = &mut self.session {
                     ui.separator();
-                    let mut level = session.level;
-                    ui.selectable_value(&mut level, Level::Packages, "Packages");
-                    ui.selectable_value(&mut level, Level::Modules, "Modules");
-                    if level != session.level {
-                        session.level = level;
+                    ui.label("Detail");
+                    let mut position = Detail::ALL
+                        .iter()
+                        .position(|detail| *detail == session.detail)
+                        .unwrap_or(0);
+                    let slider = egui::Slider::new(&mut position, 0..=Detail::ALL.len() - 1)
+                        .show_value(false)
+                        .step_by(1.0);
+                    if ui.add(slider).changed() {
+                        session.detail = Detail::ALL[position];
                         session.rebuild_view();
                     }
+                    ui.label(detail_label(session.detail));
                     ui.separator();
                     let label = if session.drawing {
                         match &session.draw_source {
@@ -491,6 +493,13 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
                     view.graph.elements().count(),
                     view.provenance.len()
                 ));
+                if !view.coarse.is_empty() {
+                    ui.label(format!(
+                        "{} connections name a boundary with visible children as a \
+                         whole; they show at a coarser detail.",
+                        view.coarse.len()
+                    ));
+                }
                 if !view.unscoped.is_empty() {
                     ui.label(format!(
                         "{} dependencies fall outside every boundary.",
@@ -504,7 +513,7 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
             ui.label("Drag or scroll to pan, ctrl+scroll or pinch to zoom, double-click the background to refit.");
         }
         Some(Selection::Node(id)) => {
-            let (name, kind) = session.graph.element(&id).map_or_else(
+            let (name, kind) = session.element_of(&id).map_or_else(
                 || (id.to_string(), String::new()),
                 |element| {
                     (
@@ -519,8 +528,8 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
         Some(Selection::Edge(relation)) => {
             ui.heading(format!(
                 "{} → {}",
-                boundary_name(&session.graph, &relation.from),
-                boundary_name(&session.graph, &relation.to)
+                element_name(session, &relation.from),
+                element_name(session, &relation.to)
             ));
             match session.status_of(&relation) {
                 EdgeStatus::Existing => {
@@ -555,8 +564,8 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
                     for concrete in underlying {
                         ui.small(format!(
                             "{} → {}",
-                            boundary_name(&session.graph, &concrete.from),
-                            boundary_name(&session.graph, &concrete.to)
+                            element_name(session, &concrete.from),
+                            element_name(session, &concrete.to)
                         ));
                     }
                 });
@@ -574,10 +583,18 @@ fn note_editor(ui: &mut egui::Ui, session: &mut Session) {
     }
 }
 
-fn boundary_name(graph: &ArchitectureGraph, id: &ElementId) -> String {
-    graph
-        .element(id)
+fn element_name(session: &Session, id: &ElementId) -> String {
+    session
+        .element_of(id)
         .map_or_else(|| id.to_string(), |element| element.name.to_string())
+}
+
+fn detail_label(detail: Detail) -> &'static str {
+    match detail {
+        Detail::Packages => "Packages",
+        Detail::Modules => "Modules",
+        Detail::Items => "Items",
+    }
 }
 
 fn kind_symbol(kind: ElementKind) -> &'static str {

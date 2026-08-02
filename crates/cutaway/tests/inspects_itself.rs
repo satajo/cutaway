@@ -4,13 +4,11 @@
 //! build sandbox strips from the source. Run it from a checkout with
 //! `cargo test -p cutaway -- --ignored`.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use cutaway_analyzer_rust::RustSourceAnalyzer;
-use cutaway_architecture::ElementKind;
 use cutaway_inspection::inspect;
-use cutaway_lenses::boundary_view;
+use cutaway_lenses::{Detail, boundary_view};
 use cutaway_source_git::GitSourceTree;
 
 #[test]
@@ -24,7 +22,7 @@ fn the_boundary_lens_shows_cutaways_own_packages() {
     let tree = GitSourceTree::open(repository).unwrap();
     let graph = inspect(&tree, &[&RustSourceAnalyzer]).unwrap();
 
-    let view = boundary_view(&graph, &BTreeSet::from([ElementKind::Package])).unwrap();
+    let view = boundary_view(&graph, Detail::Packages).unwrap();
     let packages: Vec<&str> = view
         .graph
         .elements()
@@ -38,4 +36,12 @@ fn the_boundary_lens_shows_cutaways_own_packages() {
         !view.provenance.is_empty(),
         "the workspace crates depend on each other"
     );
+
+    for detail in Detail::ALL {
+        let view = boundary_view(&graph, detail).unwrap();
+        assert!(
+            !view.provenance.is_empty(),
+            "the {detail:?} detail shows connections"
+        );
+    }
 }

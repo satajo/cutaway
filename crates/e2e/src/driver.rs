@@ -1,11 +1,9 @@
 //! The port through which scenarios drive the application.
 
-use std::collections::BTreeSet;
-
 use cutaway_analyzer_rust::RustSourceAnalyzer;
-use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation, RelationKind};
+use cutaway_architecture::{ArchitectureGraph, ElementId, Relation, RelationKind};
 use cutaway_inspection::inspect;
-use cutaway_lenses::{BoundaryView, boundary_view};
+use cutaway_lenses::{BoundaryView, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{Note, Plan, ProposedChange, Subject};
 
@@ -17,7 +15,7 @@ use crate::fakes::{InMemoryPlanStore, InMemorySourceTree};
 pub trait ApplicationDriver {
     fn add_source_file(&mut self, path: &str, contents: &str);
     fn inspect_project(&mut self) -> Result<(), String>;
-    /// `level` is `packages` or `modules`.
+    /// `level` is `packages`, `modules`, or `items`.
     fn view_boundaries(&mut self, level: &str) -> Result<(), String>;
     fn boundary_names(&self) -> Vec<String>;
     fn connections(&self) -> Vec<(String, String)>;
@@ -86,13 +84,14 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn view_boundaries(&mut self, level: &str) -> Result<(), String> {
-        let kinds: BTreeSet<ElementKind> = match level {
-            "packages" => BTreeSet::from([ElementKind::Package]),
-            "modules" => BTreeSet::from([ElementKind::Package, ElementKind::Module]),
-            other => return Err(format!("unknown boundary level {other}")),
+        let detail = match level {
+            "packages" => Detail::Packages,
+            "modules" => Detail::Modules,
+            "items" => Detail::Items,
+            other => return Err(format!("unknown detail level {other}")),
         };
         let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
-        self.view = Some(boundary_view(graph, &kinds).map_err(|error| error.to_string())?);
+        self.view = Some(boundary_view(graph, detail).map_err(|error| error.to_string())?);
         Ok(())
     }
 

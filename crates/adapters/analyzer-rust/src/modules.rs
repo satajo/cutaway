@@ -14,6 +14,7 @@ use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
 use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
+use crate::declarations::DeclarationIndex;
 use crate::manifest::DiscoveredPackage;
 use crate::package_id;
 
@@ -49,7 +50,8 @@ impl Module {
 /// What an import path leads to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedTarget<'a> {
-    Module(ElementId),
+    /// A file module, or a top-level declaration within one.
+    Element(ElementId),
     Package(&'a DiscoveredPackage),
 }
 
@@ -178,6 +180,7 @@ impl ModuleCatalog {
         module: &Module,
         segments: &[String],
         packages: &'a [DiscoveredPackage],
+        declarations: &DeclarationIndex,
     ) -> Option<ResolvedTarget<'a>> {
         let first = segments.first()?;
         match first.as_str() {
@@ -188,11 +191,17 @@ impl ModuleCatalog {
                     Some(_) => self.by_segments.get(&(package, Vec::new())).copied()?,
                     None => self.by_path[&module.path],
                 };
-                Some(ResolvedTarget::Module(self.descend(start, &segments[1..])))
+                Some(ResolvedTarget::Element(self.descend(
+                    start,
+                    &segments[1..],
+                    declarations,
+                )))
             }
-            "self" => Some(ResolvedTarget::Module(
-                self.descend(self.by_path[&module.path], &segments[1..]),
-            )),
+            "self" => Some(ResolvedTarget::Element(self.descend(
+                self.by_path[&module.path],
+                &segments[1..],
+                declarations,
+            ))),
             "super" => {
                 let package = module.package?;
                 let own = module.segments.as_ref()?;
@@ -213,24 +222,32 @@ impl ModuleCatalog {
                     }
                     prefix.pop();
                 };
-                Some(ResolvedTarget::Module(
-                    self.descend(start, &segments[supers..]),
-                ))
+                Some(ResolvedTarget::Element(self.descend(
+                    start,
+                    &segments[supers..],
+                    declarations,
+                )))
             }
             name => {
                 let target = *self.package_by_import_name.get(name)?;
                 match self.by_segments.get(&(target, Vec::new())) {
-                    Some(root) => Some(ResolvedTarget::Module(self.descend(*root, &segments[1..]))),
+                    Some(root) => Some(ResolvedTarget::Element(self.descend(
+                        *root,
+                        &segments[1..],
+                        declarations,
+                    ))),
                     None => Some(ResolvedTarget::Package(&packages[target])),
                 }
             }
         }
     }
 
-    /// Follows `rest` down the module tree from `start`, stopping at the
-    /// deepest file module that exists.
-    fn descend(&self, start: usize, rest: &[String]) -> ElementId {
+    /// Follows `rest` down the module tree from `start` to the deepest file
+    /// module that exists; when the path continues past it, one further
+    /// segment may land on a top-level declaration of that module.
+    fn descend(&self, start: usize, rest: &[String], declarations: &DeclarationIndex) -> ElementId {
         let mut current = start;
+        let mut consumed = 0;
         if let (Some(package), Some(base)) = (
             self.modules[start].package,
             self.modules[start].segments.clone(),
@@ -238,16 +255,26 @@ impl ModuleCatalog {
             let mut prefix = base;
             for segment in rest {
                 if segment == "self" {
+                    consumed += 1;
                     break;
                 }
                 prefix.push(segment.clone());
                 match self.by_segments.get(&(package, prefix.clone())) {
-                    Some(next) => current = *next,
+                    Some(next) => {
+                        current = *next;
+                        consumed += 1;
+                    }
                     None => break,
                 }
             }
         }
-        self.modules[current].id()
+        let module = &self.modules[current];
+        if let Some(next) = rest.get(consumed)
+            && let Some(item) = declarations.declaration(&module.path, next)
+        {
+            return item.clone();
+        }
+        module.id()
     }
 }
 

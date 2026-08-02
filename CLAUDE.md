@@ -36,7 +36,10 @@ crates/
   inspection/          Application core: builds the model from sources.
     src/ports/         SourceTree, SourceAnalyzer. One file per port.
   lenses/              Domain: boundary views - rollups of the graph at a chosen
-                       set of element kinds, with provenance per rolled-up edge.
+                       detail level (packages, modules, items), with provenance
+                       per rolled-up edge. Edges attach only to boundaries
+                       without visible children; a boundary with children shows
+                       its own content as a synthetic self leaf.
   comparison/          Domain: deltas between two architecture versions.
   planning/            Planning core: plans, change sets, notes, annotations.
     src/ports/         PlanStore.

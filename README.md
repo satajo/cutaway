@@ -21,10 +21,14 @@ disk and talks to nothing else.
 
 Early but usable. The application opens a git repository, inspects the Rust
 sources of its `HEAD` commit (Cargo manifests, module structure, imports),
-and draws the boundary lens: packages and modules as nested boxes, with the
-dependencies that cross boundary lines as arrows. Existing connections are
-monochrome; severing one turns it red, drawing a new one turns it green, and
-any connection or boundary can carry a note. All markup saves immediately to
+and draws the boundary lens at an adjustable level of detail: packages, the
+modules within them, or the individual items within the modules, as nested
+boxes with the dependencies that cross boundary lines as arrows. Arrows
+attach only to boxes without visible children; a box that contains others
+shows its own code as a `self` box, and a dependency on a whole box waits at
+a coarser detail. Existing connections are monochrome; severing one turns it
+red, drawing a new one turns it green, and any connection or boundary can
+carry a note. All markup saves immediately to
 `cutaway.json` in the root of the inspected repository — a versioned JSON
 work order ready to hand to an AI agent. The delta view exists as a domain
 model only.

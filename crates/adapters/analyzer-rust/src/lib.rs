@@ -10,8 +10,10 @@
 //! Modules are files: the module tree of a package derives from the `src/`
 //! file layout (`foo.rs` or `foo/mod.rs`), and inline `mod` blocks stay
 //! items of their enclosing file. Imports resolve down to the deepest file
-//! module that exists; targets outside the project (std, third-party
-//! crates) are not part of the architecture and produce no relation.
+//! module that exists, and one segment further onto a top-level declaration
+//! of that module when the path continues; targets outside the project
+//! (std, third-party crates) are not part of the architecture and produce
+//! no relation.
 //!
 //! Nothing outside this crate knows any of this is Rust-specific.
 
@@ -28,10 +30,18 @@ use cutaway_inspection::ports::source_analyzer::{
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
+use crate::declarations::DeclarationIndex;
 use crate::manifest::DiscoveredPackage;
 use crate::modules::{ModuleCatalog, ResolvedTarget};
 
 pub struct RustSourceAnalyzer;
+
+/// What one source file contributes before import resolution.
+struct ParsedFile {
+    path: SourcePath,
+    declarations: Vec<Element>,
+    imports: Vec<Vec<String>>,
+}
 
 impl SourceAnalyzer for RustSourceAnalyzer {
     fn analyze(&self, files: &[SourceFile]) -> Result<SourceStructure, SourceAnalysisError> {
@@ -64,10 +74,15 @@ impl SourceAnalyzer for RustSourceAnalyzer {
             });
         }
 
+        // Two passes over the sources: imports resolve against the
+        // declarations of every file, so all files parse before any import
+        // resolves.
+        let mut parsed = Vec::new();
+        let mut index = DeclarationIndex::default();
         for file in files {
-            let Some(module) = catalog.module_of(&file.path) else {
+            if catalog.module_of(&file.path).is_none() {
                 continue;
-            };
+            }
             let text = std::str::from_utf8(&file.contents).map_err(|_| {
                 SourceAnalysisError::NonUtf8Text {
                     path: file.path.clone(),
@@ -75,20 +90,31 @@ impl SourceAnalyzer for RustSourceAnalyzer {
             })?;
             let tree = parse(text, &file.path)?;
             let root = tree.root_node();
+            let declarations = declarations::top_level(root, text, &file.path);
+            index.add(&file.path, &declarations);
+            parsed.push(ParsedFile {
+                path: file.path.clone(),
+                declarations,
+                imports: imports::use_paths(root, text),
+            });
+        }
 
-            for declaration in declarations::top_level(root, text, &file.path) {
+        for file in parsed {
+            let module = catalog
+                .module_of(&file.path)
+                .expect("the first pass kept only cataloged files");
+            for declaration in file.declarations {
                 elements.push(AnalyzedElement {
                     element: declaration,
                     parent: Some(module.id()),
                 });
             }
-
-            for import in imports::use_paths(root, text) {
-                let Some(target) = catalog.resolve(module, &import, &packages) else {
+            for import in file.imports {
+                let Some(target) = catalog.resolve(module, &import, &packages, &index) else {
                     continue;
                 };
                 let to = match target {
-                    ResolvedTarget::Module(id) => {
+                    ResolvedTarget::Element(id) => {
                         if id == module.id() {
                             continue;
                         }

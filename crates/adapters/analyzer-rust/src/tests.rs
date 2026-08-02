@@ -95,7 +95,7 @@ fn the_module_tree_follows_the_src_file_layout() {
 }
 
 #[test]
-fn use_crate_paths_resolve_to_the_deepest_file_module() {
+fn use_crate_paths_resolve_onto_the_declared_item() {
     let structure = analyze(&[
         MANIFEST_A,
         (
@@ -107,12 +107,48 @@ fn use_crate_paths_resolve_to_the_deepest_file_module() {
     ]);
     assert!(dependencies(&structure).contains(&(
         "crates/a/src/lib.rs".to_owned(),
+        "crates/a/src/foo/bar.rs#type:Baz".to_owned()
+    )));
+}
+
+#[test]
+fn an_import_of_an_undeclared_name_stops_at_the_deepest_file_module() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        (
+            "crates/a/src/lib.rs",
+            "mod foo;\nuse crate::foo::bar::Reexported;\n",
+        ),
+        ("crates/a/src/foo.rs", "pub mod bar;\n"),
+        ("crates/a/src/foo/bar.rs", "pub use other::Reexported;\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs".to_owned(),
         "crates/a/src/foo/bar.rs".to_owned()
     )));
 }
 
 #[test]
-fn use_of_another_workspace_package_resolves_into_its_modules() {
+fn an_import_into_an_inline_module_stops_at_that_module() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        (
+            "crates/a/src/lib.rs",
+            "mod foo;\nuse crate::foo::inner::Deep;\n",
+        ),
+        (
+            "crates/a/src/foo.rs",
+            "pub mod inner { pub struct Deep; }\n",
+        ),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/a/src/foo.rs#module:inner".to_owned()
+    )));
+}
+
+#[test]
+fn use_of_another_workspace_package_resolves_into_its_declarations() {
     let structure = analyze(&[
         MANIFEST_A,
         MANIFEST_B,
@@ -122,7 +158,7 @@ fn use_of_another_workspace_package_resolves_into_its_modules() {
     ]);
     assert!(dependencies(&structure).contains(&(
         "crates/a/src/lib.rs".to_owned(),
-        "crates/b/src/util.rs".to_owned()
+        "crates/b/src/util.rs#type:Thing".to_owned()
     )));
 }
 
@@ -137,7 +173,7 @@ fn super_paths_resolve_within_the_module_tree() {
     ]);
     assert!(dependencies(&structure).contains(&(
         "crates/a/src/foo/bar.rs".to_owned(),
-        "crates/a/src/foo/baz.rs".to_owned()
+        "crates/a/src/foo/baz.rs#type:X".to_owned()
     )));
 }
 
@@ -155,7 +191,7 @@ fn integration_tests_are_their_own_crate_roots_using_the_package_by_name() {
     );
     assert!(dependencies(&structure).contains(&(
         "crates/b/tests/smoke.rs".to_owned(),
-        "crates/b/src/util.rs".to_owned()
+        "crates/b/src/util.rs#type:Thing".to_owned()
     )));
 }
 

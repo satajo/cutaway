@@ -93,6 +93,15 @@ fn a_connection_goes(world: &mut CutawayWorld, from: String, to: String) {
     );
 }
 
+#[then(expr = "no connection goes from {string} to {string}")]
+fn no_connection_goes(world: &mut CutawayWorld, from: String, to: String) {
+    let connections = world.driver.connections();
+    assert!(
+        !connections.contains(&(from.clone(), to.clone())),
+        "expected no connection {from} -> {to}, the view has {connections:?}"
+    );
+}
+
 #[then(expr = "the plan marks the connection from {string} to {string} for removal")]
 fn the_plan_marks_for_removal(world: &mut CutawayWorld, from: String, to: String) {
     assert!(world.driver.removal_is_planned(&from, &to));

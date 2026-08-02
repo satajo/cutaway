@@ -1,7 +1,29 @@
 //! Top-level declarations of one source file.
 
+use std::collections::BTreeMap;
+
 use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
 use cutaway_inspection::ports::source_tree::SourcePath;
+
+/// Looks up a top-level declaration of a file by name, so that the tail of
+/// an import path resolves onto the declared item. When one name declares
+/// several items in a file, the first declaration in source order answers.
+#[derive(Debug, Default)]
+pub struct DeclarationIndex(BTreeMap<(SourcePath, String), ElementId>);
+
+impl DeclarationIndex {
+    pub fn add(&mut self, path: &SourcePath, declarations: &[Element]) {
+        for declaration in declarations {
+            self.0
+                .entry((path.clone(), declaration.name.as_str().to_owned()))
+                .or_insert_with(|| declaration.id.clone());
+        }
+    }
+
+    pub fn declaration(&self, path: &SourcePath, name: &str) -> Option<&ElementId> {
+        self.0.get(&(path.clone(), name.to_owned()))
+    }
+}
 
 /// The top-level functions, types, and inline modules a file declares.
 /// Nested items stay undeclared until the architecture model needs them.
