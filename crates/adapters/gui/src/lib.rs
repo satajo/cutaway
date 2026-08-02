@@ -7,12 +7,16 @@
 //! adjustable level of detail; the user severs, draws, and annotates
 //! connections, and every markup lands in the project's plan immediately.
 //!
-//! The detail slider sets the level of the whole picture, and single
+//! The toolbar's three stops set the detail of the whole picture, and single
 //! boundaries open or close on top of it: a double click on a boundary, or
-//! the inspector's Expand and Collapse, moves that one boundary a step. The
-//! slider clears those decisions, because a new whole is a new question.
+//! the inspector's Expand and Collapse, moves that one boundary a step.
+//! Choosing another stop drops those decisions, because a new whole is a new
+//! question, and carries the selection across, because the subject of the
+//! question stays the reader's.
 
 mod canvas;
+mod continuity;
+mod detail;
 mod focus;
 mod inspector;
 mod label;
@@ -67,6 +71,15 @@ pub enum StartupError {
 enum Selection {
     Node(ElementId),
     Edge(Relation),
+}
+
+/// What a selection asks the camera to show. A connection shows at the end
+/// it leaves: that is where the reader's question started.
+pub(crate) fn revealed(selection: &Selection) -> &ElementId {
+    match selection {
+        Selection::Node(id) => id,
+        Selection::Edge(relation) => &relation.from,
+    }
 }
 
 /// A boundary view with the arrangement that paints it. The arrangement
@@ -164,13 +177,49 @@ impl Session {
 
     /// Cuts the whole picture at one detail again, dropping every boundary
     /// the reader opened or closed: those decisions answered the detail they
-    /// were made in. A new whole is a new picture, so the camera refits and
-    /// nothing stays selected.
+    /// were made in.
+    ///
+    /// The subject of the reading is not dropped with them. Element ids hold
+    /// across details, so whatever stood selected reappears as another box or
+    /// another connection, and the camera moves to where it reappeared.
+    /// Nothing selected leaves the camera where it is, unless the new picture
+    /// no longer meets it at all.
     fn recut(&mut self, detail: Detail) {
+        if self.cut.detail == detail {
+            return;
+        }
+        let before = self
+            .selection
+            .take()
+            .and_then(|selection| Some((self.scene.as_ref().ok()?.view.clone(), selection)));
         self.cut = Cut::uniform(detail);
         self.rebuild_view();
-        self.select(None);
-        self.camera = None;
+        let carried = before.and_then(|(before, selection)| {
+            let after = self.scene.as_ref().ok()?;
+            continuity::translated(&self.graph, &before, &after.view, &selection)
+        });
+        if let Some(selection) = carried {
+            let shown = revealed(&selection).clone();
+            self.select(Some(selection));
+            self.reveal(&shown);
+        } else {
+            self.select(None);
+            self.keep_or_refit();
+        }
+    }
+
+    /// Drops the camera wherever the new picture no longer meets what the
+    /// camera looks at; the canvas then fits the picture into view again.
+    fn keep_or_refit(&mut self) {
+        let Some(camera) = self.camera else {
+            return;
+        };
+        let held = self.scene.as_ref().is_ok_and(|scene| {
+            continuity::camera_holds(camera, self.viewport, canvas::world_bounds(&scene.layout))
+        });
+        if !held {
+            self.camera = None;
+        }
     }
 
     /// Opens the boundary one detail step deeper than what it shows now.
@@ -576,17 +625,15 @@ impl eframe::App for CutawayApp {
                 if let Some(Ok(session)) = &mut self.session {
                     ui.separator();
                     ui.label("Detail");
-                    let mut position = Detail::ALL
-                        .iter()
-                        .position(|detail| *detail == session.cut.detail)
-                        .unwrap_or(0);
-                    let slider = egui::Slider::new(&mut position, 0..=Detail::ALL.len() - 1)
-                        .show_value(false)
-                        .step_by(1.0);
-                    if ui.add(slider).changed() {
-                        session.recut(Detail::ALL[position]);
+                    if let Some(chosen) = detail::stops(ui, session.cut.detail) {
+                        session.recut(chosen);
                     }
-                    ui.label(detail_label(session.cut.detail));
+                    // What the reader opened or closed by hand departs from
+                    // the stop beside it, so the stop alone would misname the
+                    // picture.
+                    if let Some(departures) = detail::departures(&session.cut) {
+                        ui.label(egui::RichText::new(departures).weak().small());
+                    }
                     ui.separator();
                     let label = if session.drawing {
                         match &session.draw_source {
@@ -646,6 +693,14 @@ impl eframe::App for CutawayApp {
             if let Some(target) = found {
                 session.locate(&target);
             }
+            // The digits reach the picture only after the palette had every
+            // key of this frame: an open palette answers to keys of its own,
+            // and a digit typed into its field is part of a name.
+            if !session.palette.is_open()
+                && let Some(detail) = detail::requested(ui.ctx())
+            {
+                session.recut(detail);
+            }
         }
     }
 }
@@ -680,13 +735,5 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
     );
     if let Some(action) = action {
         session.handle(action);
-    }
-}
-
-pub(crate) fn detail_label(detail: Detail) -> &'static str {
-    match detail {
-        Detail::Packages => "Packages",
-        Detail::Modules => "Modules",
-        Detail::Items => "Items",
     }
 }

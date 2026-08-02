@@ -120,7 +120,7 @@ impl ApplicationDriver for InProcessDriver {
             other => return Err(format!("unknown detail level {other}")),
         };
         // A new detail for the whole picture drops the boundaries opened or
-        // closed under the old one, as the detail slider does.
+        // closed under the old one: those decisions answered the old detail.
         self.cut = Some(Cut::uniform(detail));
         self.rebuild_view()
     }

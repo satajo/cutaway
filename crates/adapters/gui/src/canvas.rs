@@ -680,7 +680,8 @@ fn distance_to_segment(point: Pos2, a: Pos2, b: Pos2) -> f32 {
     (point - (a + ab * t)).length()
 }
 
-fn world_bounds(layout: &Layout) -> Rect {
+/// The rectangle the whole picture occupies in world coordinates.
+pub(crate) fn world_bounds(layout: &Layout) -> Rect {
     layout
         .rects
         .values()

@@ -16,9 +16,8 @@ use cutaway_lenses::{BoundaryView, is_self_leaf};
 use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
-use crate::focus;
 use crate::label::{Labels, kind_name, kind_symbol};
-use crate::{Scene, Selection, Session, detail_label};
+use crate::{Scene, Selection, Session, detail, focus, revealed};
 
 /// How many rows one list shows before it names the rest. The cap is a
 /// display limit and not a data limit: the count above every list still
@@ -89,6 +88,10 @@ fn help(ui: &mut egui::Ui) {
     ui.label(
         "Double-click a boundary to open it one level deeper than the rest of the \
          picture; select it to expand or collapse it from here.",
+    );
+    ui.label(
+        "Keys 1, 2 and 3 cut the whole picture at packages, modules or items; \
+         whatever you selected carries over to the new one.",
     );
     ui.label(
         "Press ctrl+F or / to search every element by name, however the picture is \
@@ -178,7 +181,7 @@ fn detail_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
         return;
     };
     ui.separator();
-    ui.label(format!("Shows: {}", detail_label(within).to_lowercase()));
+    ui.label(format!("Shows: {}", detail::name(within).to_lowercase()));
     ui.horizontal(|ui| {
         if ui
             .add_enabled(within.deeper().is_some(), egui::Button::new("Expand"))
@@ -210,15 +213,6 @@ fn go_to(session: &mut Session, target: Selection) {
     let shown = revealed(&target).clone();
     session.select(Some(target));
     session.reveal(&shown);
-}
-
-/// What a selection asks the camera to show. A connection shows at the end
-/// it leaves: that is where the reader's question started.
-fn revealed(selection: &Selection) -> &ElementId {
-    match selection {
-        Selection::Node(id) => id,
-        Selection::Edge(relation) => &relation.from,
-    }
 }
 
 /// Paints one list of rows and answers with the selection a click asked

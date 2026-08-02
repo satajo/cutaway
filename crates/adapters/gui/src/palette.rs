@@ -58,6 +58,12 @@ pub(crate) struct Palette {
 }
 
 impl Palette {
+    /// Whether the palette holds the keyboard. What the shell does with a
+    /// bare key depends on it: an open palette answers every one of them.
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
     pub(crate) fn open(&mut self) {
         self.open = true;
         self.opening = true;
