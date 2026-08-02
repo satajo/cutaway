@@ -9,21 +9,21 @@
 
 mod canvas;
 mod focus;
+mod label;
 mod layout;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use cutaway_architecture::{
-    ArchitectureGraph, Element, ElementId, ElementKind, Relation, RelationKind,
-};
-use cutaway_lenses::{BoundaryView, Detail, boundary_view};
+use cutaway_architecture::{ArchitectureGraph, Element, ElementId, Relation, RelationKind};
+use cutaway_lenses::{BoundaryView, Detail, boundary_view, is_self_leaf};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{Note, Plan, ProposedChange, Subject};
 use eframe::egui::{self, emath::TSTransform};
 
 use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual};
+use crate::label::kind_symbol;
 use crate::layout::Layout;
 
 /// Everything the GUI needs about one opened project. The composition root
@@ -525,6 +525,7 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
             }
             ui.separator();
             ui.label("Select a node or a connection to annotate it. Selecting a boundary keeps everything inside it, and every dependency that crosses its border, at full strength.");
+            ui.label("A box grows with the number of concepts inside it.");
             ui.label("Severed connections turn red, drawn ones green; the plan saves to cutaway.json in the repository.");
             ui.label("Drag or scroll to pan, ctrl+scroll or pinch to zoom, double-click the background to refit.");
         }
@@ -657,7 +658,7 @@ fn ranked(counts: BTreeMap<&ElementId, usize>) -> Vec<(&ElementId, usize)> {
 /// frame's own content, so it reads as the frame it sits in.
 fn partner_name(session: &Session, id: &ElementId) -> String {
     let name = element_name(session, id);
-    if name != "self" {
+    if !is_self_leaf(id) {
         return name;
     }
     let Ok(Scene { view, .. }) = &session.scene else {
@@ -686,15 +687,5 @@ fn detail_label(detail: Detail) -> &'static str {
         Detail::Packages => "Packages",
         Detail::Modules => "Modules",
         Detail::Items => "Items",
-    }
-}
-
-fn kind_symbol(kind: ElementKind) -> &'static str {
-    match kind {
-        ElementKind::Project => "◈",
-        ElementKind::Package => "▣",
-        ElementKind::Module => "▤",
-        ElementKind::Function => "ƒ",
-        ElementKind::Type => "T",
     }
 }

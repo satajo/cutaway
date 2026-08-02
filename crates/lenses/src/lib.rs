@@ -195,8 +195,20 @@ fn attached(
     }
 }
 
+/// What a frame's id gains to name the leaf that carries the frame's own
+/// content. No source element ever ends this way: an item id ends in
+/// `#<kind>:<name>`.
+const SELF_LEAF_MARK: &str = "#self";
+
+/// Whether the id names a frame's own content rather than a boundary the
+/// sources declare. A view holds these synthetic leaves beside the real
+/// boundaries, and a reader deserves to see the difference.
+pub fn is_self_leaf(id: &ElementId) -> bool {
+    id.as_str().ends_with(SELF_LEAF_MARK)
+}
+
 fn self_leaf_id(frame: &ElementId) -> ElementId {
-    ElementId::new(format!("{frame}#self")).expect("the id extends a non-empty id")
+    ElementId::new(format!("{frame}{SELF_LEAF_MARK}")).expect("the id extends a non-empty id")
 }
 
 /// The containment parent of every contained element. Fails when containment
@@ -368,6 +380,24 @@ mod tests {
                 .relations()
                 .any(|r| *r == relation("a/lib", "a/lib#self", RelationKind::Contains))
         );
+    }
+
+    #[test]
+    fn a_frames_own_content_is_recognisable_from_its_id_alone() {
+        let mut graph = fixture();
+        graph
+            .add_relation(relation("a/lib", "b/lib", RelationKind::DependsOn))
+            .unwrap();
+        let view = boundary_view(&graph, Detail::Modules).unwrap();
+
+        for element in view.graph.elements() {
+            assert_eq!(
+                is_self_leaf(&element.id),
+                element.name.as_str() == "self",
+                "{}",
+                element.id
+            );
+        }
     }
 
     #[test]

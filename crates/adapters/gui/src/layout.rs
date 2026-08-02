@@ -14,7 +14,10 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, RelationKind};
+use cutaway_lenses::is_self_leaf;
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
+
+use crate::label::Labels;
 
 const NODE_HEIGHT: f32 = 30.0;
 const PADDING: f32 = 14.0;
@@ -40,9 +43,17 @@ const STACK_LIMIT: usize = 3;
 pub struct Layout {
     pub rects: BTreeMap<ElementId, Rect>,
     /// Boundaries with children, outermost first: paint these as boxes.
-    pub containers: Vec<ElementId>,
+    pub containers: Vec<Frame>,
     /// Boundaries without children: paint these as nodes.
     pub leaves: Vec<ElementId>,
+}
+
+/// A boundary that holds others, and how deep it nests. A boundary on the
+/// canvas itself has depth zero; every frame inside one counts one more.
+/// The canvas shades by depth, so nested frames never share a shade.
+pub struct Frame {
+    pub id: ElementId,
+    pub depth: usize,
 }
 
 /// The number of concepts each element transitively contains in the full
@@ -147,27 +158,27 @@ pub fn compute(view: &ArchitectureGraph, weights: &BTreeMap<ElementId, usize>) -
         .map(|(parent, kids)| (parent.clone(), ordered_by_layer(kids, &depends)))
         .collect();
 
-    let name_of = |id: &ElementId| -> String {
-        view.element(id)
-            .map_or_else(String::new, |e| e.name.to_string())
-    };
+    // A box must fit the label the canvas writes on it, glyph and shortened
+    // name included, so both read the label from the same place.
+    let labels = Labels::of(view);
+    let label_of = |id: &ElementId| -> String { labels.label(id).text() };
 
     // Arrange twice: the first pass reveals where everything lands, the
     // second reorders siblings toward their dependency partners.
-    let first = arrange(&columns, &orders, weights, &name_of);
+    let first = arrange(&columns, &orders, weights, &label_of);
     refine_sibling_orders(&mut orders, &depends, &first);
-    arrange(&columns, &orders, weights, &name_of)
+    arrange(&columns, &orders, weights, &label_of)
 }
 
 fn arrange(
     columns: &[Vec<ElementId>],
     orders: &BTreeMap<ElementId, Vec<ElementId>>,
     weights: &BTreeMap<ElementId, usize>,
-    name_of: &impl Fn(&ElementId) -> String,
+    label_of: &impl Fn(&ElementId) -> String,
 ) -> Layout {
     let mut measures = Measures::default();
     for root in columns.iter().flatten() {
-        measure(root, orders, weights, name_of, &mut measures);
+        measure(root, orders, weights, label_of, &mut measures);
     }
 
     let mut layout = Layout {
@@ -183,7 +194,7 @@ fn arrange(
         // Columns center on a shared axis so edges cross the gap squarely.
         let mut y = -height / 2.0;
         for root in column {
-            place(root, pos2(x, y), orders, &measures, &mut layout);
+            place(root, pos2(x, y), 0, orders, &measures, &mut layout);
             y += sizes[root].y + ROW_GAP;
         }
         x += width + COLUMN_GAP;
@@ -203,10 +214,10 @@ fn measure(
     id: &ElementId,
     orders: &BTreeMap<ElementId, Vec<ElementId>>,
     weights: &BTreeMap<ElementId, usize>,
-    name_of: &impl Fn(&ElementId) -> String,
+    label_of: &impl Fn(&ElementId) -> String,
     measures: &mut Measures,
 ) -> Vec2 {
-    let label = label_width(&name_of(id));
+    let label = label_width(&label_of(id));
     let size = match orders.get(id) {
         None => {
             let growth = growth_of(weights.get(id).copied().unwrap_or(0));
@@ -215,7 +226,7 @@ fn measure(
         Some(inner) => {
             let children: Vec<Vec2> = inner
                 .iter()
-                .map(|child| measure(child, orders, weights, name_of, measures))
+                .map(|child| measure(child, orders, weights, label_of, measures))
                 .collect();
             let grid = pack(&children, label);
             let size = framed(grid.size(), label);
@@ -230,6 +241,7 @@ fn measure(
 fn place(
     id: &ElementId,
     origin: Pos2,
+    depth: usize,
     orders: &BTreeMap<ElementId, Vec<ElementId>>,
     measures: &Measures,
     layout: &mut Layout,
@@ -240,12 +252,15 @@ fn place(
     match orders.get(id) {
         None => layout.leaves.push(id.clone()),
         Some(inner) => {
-            layout.containers.push(id.clone());
+            layout.containers.push(Frame {
+                id: id.clone(),
+                depth,
+            });
             let grid = &measures.grids[id];
             let content = pos2(origin.x + PADDING, origin.y + HEADER + PADDING);
             for (index, child) in inner.iter().enumerate() {
                 let offset = grid.cell(index, measures.sizes[child]);
-                place(child, content + offset, orders, measures, layout);
+                place(child, content + offset, depth + 1, orders, measures, layout);
             }
         }
     }
@@ -425,8 +440,17 @@ fn refine_sibling_orders(
     // The sort is stable, so children whose partners pull them to the same
     // place keep the dependency layering they arrived in.
     for kids in orders.values_mut() {
-        kids.sort_by(|a, b| in_reading_order(keys[a], keys[b]));
+        kids.sort_by(|a, b| {
+            own_content_first(a, b).then_with(|| in_reading_order(keys[a], keys[b]))
+        });
     }
+}
+
+/// A frame reads own code first, then parts: the leaf that carries the
+/// frame's own content opens the group, wherever dependencies would place
+/// it.
+fn own_content_first(a: &ElementId, b: &ElementId) -> Ordering {
+    is_self_leaf(b).cmp(&is_self_leaf(a))
 }
 
 /// Which of two points comes first when a grid is read like text: the
@@ -455,7 +479,8 @@ fn subtree(id: &ElementId, orders: &BTreeMap<ElementId, Vec<ElementId>>) -> BTre
     members
 }
 
-/// Siblings ordered by their dependency layering, ties by id.
+/// Siblings ordered by their dependency layering, ties by id, with the
+/// frame's own content ahead of all of them.
 fn ordered_by_layer(siblings: &[ElementId], depends: &[(ElementId, ElementId)]) -> Vec<ElementId> {
     let set: BTreeSet<&ElementId> = siblings.iter().collect();
     let local: Vec<(ElementId, ElementId)> = depends
@@ -465,7 +490,7 @@ fn ordered_by_layer(siblings: &[ElementId], depends: &[(ElementId, ElementId)]) 
         .collect();
     let layer = layers(siblings, &local);
     let mut result: Vec<ElementId> = siblings.to_vec();
-    result.sort_by_key(|id| (layer[id], id.clone()));
+    result.sort_by(|a, b| own_content_first(a, b).then_with(|| (layer[a], a).cmp(&(layer[b], b))));
     result
 }
 
@@ -559,17 +584,46 @@ mod tests {
     }
 
     fn add_module(graph: &mut ArchitectureGraph, parent: &ElementId, path: &str) -> ElementId {
+        add_named_module(graph, parent, path, path)
+    }
+
+    fn add_named_module(
+        graph: &mut ArchitectureGraph,
+        parent: &ElementId,
+        path: &str,
+        name: &str,
+    ) -> ElementId {
         let id = ElementId::new(path).unwrap();
         graph
             .add_element(Element {
                 id: id.clone(),
-                name: ElementName::new(path).unwrap(),
+                name: ElementName::new(name).unwrap(),
                 kind: ElementKind::Module,
             })
             .unwrap();
         graph
             .add_relation(Relation {
                 from: parent.clone(),
+                to: id.clone(),
+                kind: RelationKind::Contains,
+            })
+            .unwrap();
+        id
+    }
+
+    /// The synthetic leaf a boundary view grows for a frame's own content.
+    fn add_own_content(graph: &mut ArchitectureGraph, frame: &ElementId) -> ElementId {
+        let id = ElementId::new(format!("{frame}#self")).unwrap();
+        graph
+            .add_element(Element {
+                id: id.clone(),
+                name: ElementName::new("self").unwrap(),
+                kind: ElementKind::Package,
+            })
+            .unwrap();
+        graph
+            .add_relation(Relation {
+                from: frame.clone(),
                 to: id.clone(),
                 kind: RelationKind::Contains,
             })
@@ -720,6 +774,56 @@ mod tests {
                 pair[1].as_str()
             );
         }
+    }
+
+    #[test]
+    fn a_frames_own_content_reads_before_its_parts() {
+        let mut graph = ArchitectureGraph::new();
+        let frame = add_package(&mut graph, "alpha");
+        let own = add_own_content(&mut graph, &frame);
+        let one = add_module(&mut graph, &frame, "alpha/one.rs");
+        let two = add_module(&mut graph, &frame, "alpha/two.rs");
+        // The partners pull the parts to the top of the picture and the
+        // own-content leaf to the bottom: nothing but the pin keeps the
+        // frame's own content at the front.
+        let above = add_package(&mut graph, "a-above");
+        let below = add_package(&mut graph, "z-below");
+        depend(&mut graph, &one, &above);
+        depend(&mut graph, &two, &above);
+        depend(&mut graph, &own, &below);
+
+        let layout = compute(&graph, &no_weights());
+        for part in [&one, &two] {
+            assert!(
+                layout.rects[&own].min.y < layout.rects[part].min.y,
+                "{part} reads before the frame's own content"
+            );
+        }
+    }
+
+    #[test]
+    fn a_box_measures_the_name_it_shows_and_not_the_path_it_carries() {
+        let mut graph = ArchitectureGraph::new();
+        let nested_frame = add_package(&mut graph, "alpha");
+        let nested = add_named_module(&mut graph, &nested_frame, "alpha/x.rs", "alpha::x");
+        let plain_frame = add_package(&mut graph, "beta");
+        let plain = add_named_module(&mut graph, &plain_frame, "beta/y.rs", "y");
+
+        let layout = compute(&graph, &no_weights());
+        let difference = (layout.rects[&nested].width() - layout.rects[&plain].width()).abs();
+        assert!(
+            difference < 1.0,
+            "a name inside the frame it repeats measures as the segment it shows"
+        );
+    }
+
+    #[test]
+    fn a_box_leaves_room_for_the_kind_glyph_beside_the_name() {
+        let mut graph = ArchitectureGraph::new();
+        let package = add_package(&mut graph, "app");
+
+        let layout = compute(&graph, &no_weights());
+        assert!(layout.rects[&package].width() >= label_width("▣ app"));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! so labels stay sharp at every magnification.
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
+use cutaway_lenses::is_self_leaf;
 use eframe::egui::emath::TSTransform;
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Response, Sense, Shape,
@@ -15,6 +16,7 @@ use eframe::egui::{
 };
 
 use crate::focus::{Focus, Selected, Strength, focus_of};
+use crate::label::{Label, Labels};
 use crate::layout::{HEADER, Layout};
 
 /// How one dependency edge is drawn.
@@ -67,6 +69,15 @@ const FADE: f32 = 0.18;
 /// Color strength left to the frames around the selection's neighborhood:
 /// enough to read their names, little enough to stay background.
 const CONTEXT: f32 = 0.55;
+/// Color strength of a frame's own-content leaf while nothing touches it:
+/// present beside the parts, never competing with them.
+const OWN_CONTENT: f32 = 0.5;
+/// Color strength of a kind glyph beside the name it marks.
+const GLYPH: f32 = 0.55;
+/// The gap between a kind glyph and its name, in font sizes.
+const GLYPH_GAP: f32 = 0.3;
+/// Opacity of the wash that tints one nesting level of frames.
+const WASH: f32 = 0.06;
 
 pub fn show(
     ui: &mut Ui,
@@ -187,7 +198,7 @@ fn interact_nodes(
     let mut targets: Vec<(&ElementId, Rect)> = layout
         .containers
         .iter()
-        .map(|id| (id, header_of(layout.rects[id])))
+        .map(|frame| (&frame.id, header_of(layout.rects[&frame.id])))
         .collect();
     targets.extend(layout.leaves.iter().map(|id| (id, layout.rects[id])));
 
@@ -221,6 +232,9 @@ struct Paint<'a> {
     camera: TSTransform,
     base: Color32,
     fill: Color32,
+    /// The interior tints of frames, by nesting depth parity.
+    washes: [Color32; 2],
+    labels: Labels<'a>,
     focus: Option<Focus<'a>>,
 }
 
@@ -246,6 +260,24 @@ impl Paint<'_> {
             .as_ref()
             .map_or(Strength::Focused, |focus| focus.edge(relation))
     }
+
+    /// The interior of a frame at this nesting depth.
+    fn wash(&self, depth: usize) -> Color32 {
+        self.washes[depth % 2]
+    }
+}
+
+/// The tints that separate one nesting level from the next: consecutive
+/// depths wash in opposite directions, one toward the text and one toward
+/// the deepest background, so no frame shares the shade of the frame around
+/// it. Both directions come from the theme, so a light and a dark canvas
+/// read alike, and both stay faint enough to leave the boxes and the edges
+/// the picture.
+fn washes(visuals: &egui::Visuals) -> [Color32; 2] {
+    [
+        visuals.text_color().gamma_multiply(WASH),
+        visuals.extreme_bg_color.gamma_multiply(WASH),
+    ]
 }
 
 fn shade(color: Color32, strength: Strength) -> Color32 {
@@ -271,6 +303,8 @@ fn paint(
         camera,
         base: visuals.text_color(),
         fill: visuals.extreme_bg_color,
+        washes: washes(visuals),
+        labels: Labels::of(content.view),
         focus: focus(content),
     };
     paint_containers(&paint, content, hovered_node);
@@ -294,7 +328,8 @@ fn focus<'a>(content: &Content<'a>) -> Option<Focus<'a>> {
 }
 
 fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&ElementId>) {
-    for id in &content.layout.containers {
+    for frame in &content.layout.containers {
+        let id = &frame.id;
         let rect = paint.camera.mul_rect(content.layout.rects[id]);
         let strength = paint.element(id);
         let selected = content.selected_node == Some(id) || content.draw_source == Some(id);
@@ -305,9 +340,10 @@ fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&E
         } else {
             1.0
         };
-        paint.painter.rect_stroke(
+        paint.painter.rect(
             rect,
             CornerRadius::same(6),
+            shade(paint.wash(frame.depth), strength),
             Stroke::new(
                 paint.stroke_width(width),
                 shade(paint.base.gamma_multiply(0.6), strength),
@@ -318,7 +354,7 @@ fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&E
             paint.painter.text(
                 rect.min + vec2(10.0, 6.0) * paint.camera.scaling,
                 Align2::LEFT_TOP,
-                name_of(content.view, id),
+                paint.labels.label(id).text(),
                 font,
                 shade(paint.base, strength),
             );
@@ -385,34 +421,77 @@ fn paint_leaves(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&Eleme
         } else {
             1.0
         };
+        // A frame's own content is not a part beside the parts: it keeps a
+        // dim border and no fill until the pointer or the selection reaches
+        // it.
+        let secondary = is_self_leaf(id) && !hover && !selected;
+        let ink = if secondary {
+            OWN_CONTENT
+        } else if hover {
+            1.0
+        } else {
+            0.8
+        };
         paint.painter.rect(
             rect,
             CornerRadius::same(5),
-            shade(paint.fill, strength),
+            if secondary {
+                Color32::TRANSPARENT
+            } else {
+                shade(paint.fill, strength)
+            },
             Stroke::new(
                 paint.stroke_width(width),
-                shade(
-                    paint.base.gamma_multiply(if hover { 1.0 } else { 0.8 }),
-                    strength,
-                ),
+                shade(paint.base.gamma_multiply(ink), strength),
             ),
             StrokeKind::Middle,
         );
         if let Some(font) = paint.font() {
-            paint.painter.text(
+            let color = shade(
+                paint
+                    .base
+                    .gamma_multiply(if secondary { OWN_CONTENT } else { 1.0 }),
+                strength,
+            );
+            paint_leaf_label(
+                &paint.painter,
                 rect.center(),
-                Align2::CENTER_CENTER,
-                name_of(content.view, id),
-                font,
-                shade(paint.base, strength),
+                &paint.labels.label(id),
+                &font,
+                color,
             );
         }
     }
 }
 
-fn name_of(view: &ArchitectureGraph, id: &ElementId) -> String {
-    view.element(id)
-        .map_or_else(|| id.to_string(), |element| element.name.to_string())
+/// Writes a leaf's label centered in its box. The kind glyph paints dimmer
+/// than the name beside it: the name is the subject, the glyph only says
+/// what kind of thing carries it. Layout measures glyph and name together,
+/// so the pair always fits.
+fn paint_leaf_label(
+    painter: &egui::Painter,
+    center: Pos2,
+    label: &Label,
+    font: &FontId,
+    color: Color32,
+) {
+    let name = painter.layout_no_wrap(label.name.clone(), font.clone(), color);
+    let Some(glyph) = label.glyph else {
+        let size = name.size();
+        painter.galley(center - size / 2.0, name, color);
+        return;
+    };
+    let dim = color.gamma_multiply(GLYPH);
+    let glyph = painter.layout_no_wrap((*glyph).to_owned(), font.clone(), dim);
+    let (glyph_size, name_size) = (glyph.size(), name.size());
+    let gap = font.size * GLYPH_GAP;
+    let left = center.x - (glyph_size.x + gap + name_size.x) / 2.0;
+    painter.galley(pos2(left, center.y - glyph_size.y / 2.0), glyph, dim);
+    painter.galley(
+        pos2(left + glyph_size.x + gap, center.y - name_size.y / 2.0),
+        name,
+        color,
+    );
 }
 
 /// The cubic control points of one dependency curve, in world coordinates.
