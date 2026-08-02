@@ -11,6 +11,7 @@ mod canvas;
 mod focus;
 mod label;
 mod layout;
+mod routing;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -149,6 +150,7 @@ impl Session {
                     EdgeStatus::Existing
                 },
                 annotated: self.note_for(relation, severed).is_some(),
+                weight: concrete_count(view, relation),
             });
         }
         for planned in self.plan.changes() {
@@ -162,6 +164,9 @@ impl Session {
                         relation: relation.clone(),
                         status: EdgeStatus::Drawn,
                         annotated: planned.note.is_some(),
+                        // A planned edge stands for itself alone: nothing
+                        // concrete is behind it yet.
+                        weight: 1,
                     });
                 }
             }
@@ -338,6 +343,14 @@ impl Session {
             }
         }
     }
+}
+
+/// How many concrete dependencies one rolled-up edge stands for. An edge
+/// the view rolled nothing into still stands for the one dependency it is.
+fn concrete_count(view: &BoundaryView, relation: &Relation) -> usize {
+    view.provenance
+        .get(relation)
+        .map_or(1, |concrete| concrete.len().max(1))
 }
 
 fn edge_exists(scene: &Result<Scene, String>, relation: &Relation) -> bool {

@@ -64,6 +64,19 @@ impl<'a> Labels<'a> {
         }
     }
 
+    /// The name a text beside the picture gives a boundary: the whole name,
+    /// nothing shortened, because only a box is short of room. A frame's own
+    /// content answers as the frame it belongs to, which is the boundary the
+    /// reader knows.
+    pub(crate) fn qualified(&self, id: &ElementId) -> String {
+        match self.frame_of.get(id) {
+            Some(frame) if is_self_leaf(id) => {
+                format!("{} (own content)", self.full_name(frame))
+            }
+            _ => self.full_name(id),
+        }
+    }
+
     /// The kind mark a box carries. A frame carries none - the box around
     /// its children already says what it is - and neither does a frame's own
     /// content, whose kind is the frame's own.
@@ -243,6 +256,26 @@ mod tests {
         assert_eq!(own.glyph, None);
         assert_eq!(own.name, "self");
         assert_eq!(own.text(), "self");
+    }
+
+    #[test]
+    fn a_name_beside_the_picture_keeps_the_path_a_box_drops() {
+        let view = view();
+        let labels = Labels::of(&view);
+        assert_eq!(
+            labels.qualified(&id("core/ports/source_analyzer.rs")),
+            "ports::source_analyzer"
+        );
+    }
+
+    #[test]
+    fn a_frames_own_content_is_named_after_the_frame_it_belongs_to() {
+        let view = view();
+        let labels = Labels::of(&view);
+        assert_eq!(
+            labels.qualified(&id("core/ports.rs#self")),
+            "ports (own content)"
+        );
     }
 
     #[test]

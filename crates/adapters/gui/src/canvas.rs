@@ -18,6 +18,7 @@ use eframe::egui::{
 use crate::focus::{Focus, Selected, Strength, focus_of};
 use crate::label::{Label, Labels};
 use crate::layout::{HEADER, Layout};
+use crate::routing::{self, Route, Scope};
 
 /// How one dependency edge is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,9 @@ pub struct EdgeVisual {
     pub relation: Relation,
     pub status: EdgeStatus,
     pub annotated: bool,
+    /// How many concrete dependencies this one edge stands for. A heavier
+    /// edge draws thicker, so the picture says where the traffic is.
+    pub weight: usize,
 }
 
 /// What the user clicked on the canvas.
@@ -78,6 +82,23 @@ const GLYPH: f32 = 0.55;
 const GLYPH_GAP: f32 = 0.3;
 /// Opacity of the wash that tints one nesting level of frames.
 const WASH: f32 = 0.06;
+/// Stroke width of an edge that stands for a single concrete dependency.
+const EDGE_WIDTH: f32 = 1.2;
+/// Width added per square root of the further concrete dependencies a
+/// rolled-up edge stands for.
+const WEIGHT_WIDTH: f32 = 0.7;
+/// The widest an edge draws, however much it stands for: past this the
+/// stroke stops reading as a line and starts hiding the boxes.
+const MAX_EDGE_WIDTH: f32 = 4.0;
+/// Width added while the pointer catches an edge.
+const HOVER_WIDTH: f32 = 0.7;
+/// Width added while an edge is selected.
+const SELECTED_WIDTH: f32 = 1.5;
+/// Width and color strength left to an edge that stays inside one top-level
+/// boundary: a boundary's internal wiring is not the picture's subject, and
+/// a dense boundary would otherwise drown the crossings around it.
+const INTRA_WIDTH: f32 = 0.75;
+const INTRA: f32 = 0.6;
 
 pub fn show(
     ui: &mut Ui,
@@ -101,12 +122,17 @@ pub fn show(
 
     let (hovered_node, clicked_node) = interact_nodes(ui, content.layout, camera, viewport);
 
-    let curves: Vec<Option<Vec<Pos2>>> = content
-        .edges
+    let routes = routing::routes(
+        content.view,
+        content.layout,
+        content.edges.iter().map(|edge| &edge.relation),
+    );
+    let curves: Vec<Option<Vec<Pos2>>> = routes
         .iter()
-        .map(|edge| {
-            curve_between(content.layout, &edge.relation)
-                .map(|controls| flattened(controls.map(|point| camera.mul_pos(point))))
+        .map(|route| {
+            route
+                .as_ref()
+                .map(|route| flattened(route.curve.map(|point| camera.mul_pos(point))))
         })
         .collect();
     let pointer = ui
@@ -116,20 +142,18 @@ pub fn show(
         Some(_) => None,
         None => pointer.and_then(|position| nearest_curve(&curves, position)),
     };
-    if hovered_edge.is_some() {
+    let drawn = Drawn {
+        routes,
+        curves,
+        hovered: hovered_edge,
+    };
+    if let Some(index) = drawn.hovered {
         ui.ctx()
             .output_mut(|output| output.cursor_icon = CursorIcon::PointingHand);
+        describe_edge(ui, content, index);
     }
 
-    paint(
-        ui,
-        content,
-        camera,
-        viewport,
-        &curves,
-        hovered_node.as_ref(),
-        hovered_edge,
-    );
+    paint(ui, content, camera, viewport, &drawn, hovered_node.as_ref());
 
     if let Some(id) = clicked_node {
         return Some(CanvasAction::Node(id));
@@ -137,11 +161,64 @@ pub fn show(
     if background.clicked() {
         return background
             .interact_pointer_pos()
-            .and_then(|position| nearest_curve(&curves, position))
+            .and_then(|position| nearest_curve(&drawn.curves, position))
             .map(|index| CanvasAction::Edge(content.edges[index].relation.clone()))
             .or(Some(CanvasAction::Background));
     }
     None
+}
+
+/// The edges of one frame: where each one runs, the flattened screen curve
+/// that both paints and hit-tests it, and the one the pointer catches. All
+/// three lists index alike with [`Content::edges`].
+struct Drawn {
+    routes: Vec<Option<Route>>,
+    curves: Vec<Option<Vec<Pos2>>>,
+    hovered: Option<usize>,
+}
+
+/// Names the edge under the pointer: which boundaries it joins, how many
+/// concrete dependencies it stands for, and what the plan does to it. The
+/// canvas hit-tests its own edges, so the tooltip follows the pointer
+/// instead of a widget.
+fn describe_edge(ui: &Ui, content: &Content<'_>, index: usize) {
+    let Some(edge) = content.edges.get(index) else {
+        return;
+    };
+    let labels = Labels::of(content.view);
+    let joins = format!(
+        "{} → {}",
+        labels.qualified(&edge.relation.from),
+        labels.qualified(&edge.relation.to)
+    );
+    // A planned addition stands for nothing concrete yet, so it counts
+    // nothing; every edge the architecture already carries does.
+    let stands_for = match (edge.status, edge.weight) {
+        (EdgeStatus::Drawn, _) => None,
+        (_, 1) => Some("1 concrete dependency".to_owned()),
+        (_, many) => Some(format!("{many} concrete dependencies")),
+    };
+    egui::Tooltip::always_open(
+        ui.ctx().clone(),
+        ui.layer_id(),
+        ui.id().with("edge-tooltip"),
+        egui::PopupAnchor::Pointer,
+    )
+    .show(|ui| {
+        ui.label(joins);
+        if let Some(stands_for) = stands_for {
+            ui.label(stands_for);
+        }
+        match edge.status {
+            EdgeStatus::Existing => {}
+            EdgeStatus::Severed => {
+                ui.colored_label(SEVERED, "Planned for removal.");
+            }
+            EdgeStatus::Drawn => {
+                ui.colored_label(DRAWN, "Planned addition.");
+            }
+        }
+    });
 }
 
 /// Applies drag-to-pan, scroll-to-pan, and pinch-or-ctrl-scroll zoom about
@@ -293,9 +370,8 @@ fn paint(
     content: &Content<'_>,
     camera: TSTransform,
     viewport: Rect,
-    curves: &[Option<Vec<Pos2>>],
+    drawn: &Drawn,
     hovered_node: Option<&ElementId>,
-    hovered_edge: Option<usize>,
 ) {
     let visuals = ui.visuals();
     let paint = Paint {
@@ -308,7 +384,7 @@ fn paint(
         focus: focus(content),
     };
     paint_containers(&paint, content, hovered_node);
-    paint_edges(&paint, content, curves, hovered_edge);
+    paint_edges(&paint, content, drawn);
     paint_leaves(&paint, content, hovered_node);
 }
 
@@ -362,32 +438,30 @@ fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&E
     }
 }
 
-fn paint_edges(
-    paint: &Paint<'_>,
-    content: &Content<'_>,
-    curves: &[Option<Vec<Pos2>>],
-    hovered: Option<usize>,
-) {
-    for (index, (edge, curve)) in content.edges.iter().zip(curves).enumerate() {
-        let Some(points) = curve else {
+fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
+    for (index, edge) in content.edges.iter().enumerate() {
+        let (Some(Some(route)), Some(Some(points))) =
+            (drawn.routes.get(index), drawn.curves.get(index))
+        else {
             continue;
         };
-        let color = shade(
-            match edge.status {
-                EdgeStatus::Existing => paint.base,
-                EdgeStatus::Severed => SEVERED,
-                EdgeStatus::Drawn => DRAWN,
-            },
-            paint.edge(&edge.relation),
-        );
-        let selected = content.selected_edge == Some(&edge.relation);
-        let width = if selected {
-            3.0
-        } else if hovered == Some(index) {
-            2.2
-        } else {
-            1.5
+        let ink = match edge.status {
+            EdgeStatus::Existing => paint.base,
+            EdgeStatus::Severed => SEVERED,
+            EdgeStatus::Drawn => DRAWN,
         };
+        // The scope dims before the selection does: an internal edge stays
+        // behind the crossings whether anything is selected or not.
+        let color = shade(dim(ink, route.scope), paint.edge(&edge.relation));
+        let selected = content.selected_edge == Some(&edge.relation);
+        let width = edge_width(edge.weight, route.scope)
+            + if selected {
+                SELECTED_WIDTH
+            } else if drawn.hovered == Some(index) {
+                HOVER_WIDTH
+            } else {
+                0.0
+            };
         let stroke = Stroke::new(paint.stroke_width(width), color);
         if edge.status == EdgeStatus::Existing {
             paint.painter.add(Shape::line(points.clone(), stroke));
@@ -405,6 +479,25 @@ fn paint_edges(
                 color,
             );
         }
+    }
+}
+
+/// How thick an edge draws before selection and hover add to it: the weight
+/// enters as its square root, so a boundary that answers ten dependencies
+/// reads heavier than one that answers two without swallowing the picture.
+fn edge_width(weight: usize, scope: Scope) -> f32 {
+    let further = f32::from(u16::try_from(weight.saturating_sub(1)).unwrap_or(u16::MAX));
+    let width = (EDGE_WIDTH + WEIGHT_WIDTH * further.sqrt()).min(MAX_EDGE_WIDTH);
+    match scope {
+        Scope::Intra => width * INTRA_WIDTH,
+        Scope::Cross => width,
+    }
+}
+
+fn dim(color: Color32, scope: Scope) -> Color32 {
+    match scope {
+        Scope::Intra => color.gamma_multiply(INTRA),
+        Scope::Cross => color,
     }
 }
 
@@ -492,93 +585,6 @@ fn paint_leaf_label(
         name,
         color,
     );
-}
-
-/// The cubic control points of one dependency curve, in world coordinates.
-/// The curve leaves the side of `from` that faces `to` and enters `to`
-/// facing back, with tangents along the travel direction.
-fn curve_between(layout: &Layout, relation: &Relation) -> Option<[Pos2; 4]> {
-    let from = *layout.rects.get(&relation.from)?;
-    let to = *layout.rects.get(&relation.to)?;
-    Some(if to.min.x > from.max.x || from.min.x > to.max.x {
-        horizontal_curve(from, to)
-    } else if to.min.y > from.max.y || from.min.y > to.max.y {
-        vertical_curve(from, to)
-    } else {
-        // Overlapping boxes, e.g. an edge into a surrounding container:
-        // fall back to a straight border-to-border line.
-        let a = border_point(from, to.center());
-        let b = border_point(to, from.center());
-        [a, a.lerp(b, 1.0 / 3.0), a.lerp(b, 2.0 / 3.0), b]
-    })
-}
-
-fn horizontal_curve(from: Rect, to: Rect) -> [Pos2; 4] {
-    let rightward = to.center().x >= from.center().x;
-    let (start_x, end_x) = if rightward {
-        (from.max.x, to.min.x)
-    } else {
-        (from.min.x, to.max.x)
-    };
-    let start = pos2(
-        start_x,
-        anchor(from.center().y, to.center().y, from.height()),
-    );
-    let end = pos2(end_x, anchor(to.center().y, from.center().y, to.height()));
-    let reach = ((end_x - start_x).abs() * 0.4).max(24.0) * if rightward { 1.0 } else { -1.0 };
-    [
-        start,
-        pos2(start.x + reach, start.y),
-        pos2(end.x - reach, end.y),
-        end,
-    ]
-}
-
-fn vertical_curve(from: Rect, to: Rect) -> [Pos2; 4] {
-    let downward = to.center().y >= from.center().y;
-    let (start_y, end_y) = if downward {
-        (from.max.y, to.min.y)
-    } else {
-        (from.min.y, to.max.y)
-    };
-    let start = pos2(
-        anchor(from.center().x, to.center().x, from.width()),
-        start_y,
-    );
-    let end = pos2(anchor(to.center().x, from.center().x, to.width()), end_y);
-    let reach = ((end_y - start_y).abs() * 0.4).max(24.0) * if downward { 1.0 } else { -1.0 };
-    [
-        start,
-        pos2(start.x, start.y + reach),
-        pos2(end.x, end.y - reach),
-        end,
-    ]
-}
-
-/// An attachment point along a box side: near the middle, pulled toward
-/// the far endpoint so that parallel edges fan out instead of stacking.
-fn anchor(own: f32, other: f32, extent: f32) -> f32 {
-    let limit = (extent / 2.0 - 8.0).max(0.0);
-    own + ((other - own) * 0.2).clamp(-limit, limit)
-}
-
-/// Where the line from the rect's center toward `target` leaves the rect.
-fn border_point(rect: Rect, target: Pos2) -> Pos2 {
-    let center = rect.center();
-    let direction = target - center;
-    let half = rect.size() / 2.0;
-    let scale_x = if direction.x == 0.0 {
-        f32::INFINITY
-    } else {
-        (half.x / direction.x).abs()
-    };
-    let scale_y = if direction.y == 0.0 {
-        f32::INFINITY
-    } else {
-        (half.y / direction.y).abs()
-    };
-    let scale = scale_x.min(scale_y).min(1.0);
-    center + direction * scale
 }
 
 fn flattened(controls: [Pos2; 4]) -> Vec<Pos2> {
