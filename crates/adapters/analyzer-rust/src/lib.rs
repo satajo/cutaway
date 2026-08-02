@@ -11,9 +11,11 @@
 //! file layout (`foo.rs` or `foo/mod.rs`), and inline `mod` blocks stay
 //! items of their enclosing file. Imports resolve down to the deepest file
 //! module that exists, and one segment further onto a top-level declaration
-//! of that module when the path continues; targets outside the project
-//! (std, third-party crates) are not part of the architecture and produce
-//! no relation.
+//! of that module when the path continues. A module that re-exports the
+//! named item instead of declaring it forwards the import onwards, so
+//! facades (`pub use element::Element;`) resolve to the item behind them.
+//! Targets outside the project (std, third-party crates) are not part of
+//! the architecture and produce no relation.
 //!
 //! Nothing outside this crate knows any of this is Rust-specific.
 
@@ -21,6 +23,7 @@ mod declarations;
 mod imports;
 mod manifest;
 mod modules;
+mod reexports;
 
 use std::collections::BTreeSet;
 
@@ -31,8 +34,10 @@ use cutaway_inspection::ports::source_analyzer::{
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
 use crate::declarations::DeclarationIndex;
+use crate::imports::Import;
 use crate::manifest::DiscoveredPackage;
-use crate::modules::{ModuleCatalog, ResolvedTarget};
+use crate::modules::{ModuleCatalog, ModuleSurface, ResolvedTarget};
+use crate::reexports::ReexportTable;
 
 pub struct RustSourceAnalyzer;
 
@@ -40,7 +45,7 @@ pub struct RustSourceAnalyzer;
 struct ParsedFile {
     path: SourcePath,
     declarations: Vec<Element>,
-    imports: Vec<Vec<String>>,
+    imports: Vec<Import>,
 }
 
 impl SourceAnalyzer for RustSourceAnalyzer {
@@ -75,10 +80,11 @@ impl SourceAnalyzer for RustSourceAnalyzer {
         }
 
         // Two passes over the sources: imports resolve against the
-        // declarations of every file, so all files parse before any import
-        // resolves.
+        // declarations and re-exports of every file, so all files parse
+        // before any import resolves.
         let mut parsed = Vec::new();
-        let mut index = DeclarationIndex::default();
+        let mut declaration_index = DeclarationIndex::default();
+        let mut reexports = ReexportTable::default();
         for file in files {
             if catalog.module_of(&file.path).is_none() {
                 continue;
@@ -91,14 +97,20 @@ impl SourceAnalyzer for RustSourceAnalyzer {
             let tree = parse(text, &file.path)?;
             let root = tree.root_node();
             let declarations = declarations::top_level(root, text, &file.path);
-            index.add(&file.path, &declarations);
+            declaration_index.add(&file.path, &declarations);
+            let imports = imports::declared(root, text);
+            reexports.add(&file.path, &imports);
             parsed.push(ParsedFile {
                 path: file.path.clone(),
                 declarations,
-                imports: imports::use_paths(root, text),
+                imports,
             });
         }
 
+        let surface = ModuleSurface {
+            declarations: &declaration_index,
+            reexports: &reexports,
+        };
         for file in parsed {
             let module = catalog
                 .module_of(&file.path)
@@ -110,7 +122,7 @@ impl SourceAnalyzer for RustSourceAnalyzer {
                 });
             }
             for import in file.imports {
-                let Some(target) = catalog.resolve(module, &import, &packages, &index) else {
+                let Some(target) = catalog.resolve(module, &import.path, &packages, surface) else {
                     continue;
                 };
                 let to = match target {

@@ -8,7 +8,7 @@
 //! their own, contained directly by the package. Files outside every package
 //! attach to the project root.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
 use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
@@ -17,6 +17,7 @@ use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 use crate::declarations::DeclarationIndex;
 use crate::manifest::DiscoveredPackage;
 use crate::package_id;
+use crate::reexports::ReexportTable;
 
 /// One `.rs` file, placed in the module structure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,43 @@ pub enum ResolvedTarget<'a> {
     Element(ElementId),
     Package(&'a DiscoveredPackage),
 }
+
+/// What every module offers an import that names it: the items it declares
+/// and the names it re-exports. Both are indexed across the whole project
+/// before any import resolves.
+#[derive(Clone, Copy)]
+pub struct ModuleSurface<'a> {
+    pub declarations: &'a DeclarationIndex,
+    pub reexports: &'a ReexportTable,
+}
+
+/// Where a path led, and whether the answering module claims the name the
+/// path ends with. The distinction decides between wildcard re-exports: a
+/// `pub use m::*` is the right forward only when something behind it claims
+/// the name, not when resolution merely stopped at `m`.
+struct Resolution<'a> {
+    target: ResolvedTarget<'a>,
+    claims_name: bool,
+}
+
+impl<'a> Resolution<'a> {
+    fn claimed(target: ResolvedTarget<'a>) -> Self {
+        Self {
+            target,
+            claims_name: true,
+        }
+    }
+
+    fn stopped_at(module: ElementId) -> Self {
+        Self {
+            target: ResolvedTarget::Element(module),
+            claims_name: false,
+        }
+    }
+}
+
+/// The re-export hops taken so far, as (module, name) pairs.
+type FollowedHops = BTreeSet<(SourcePath, String)>;
 
 pub struct ModuleCatalog {
     modules: Vec<Module>,
@@ -180,8 +218,23 @@ impl ModuleCatalog {
         module: &Module,
         segments: &[String],
         packages: &'a [DiscoveredPackage],
-        declarations: &DeclarationIndex,
+        surface: ModuleSurface<'_>,
     ) -> Option<ResolvedTarget<'a>> {
+        let mut followed = FollowedHops::new();
+        Some(
+            self.resolve_path(module, segments, packages, surface, &mut followed)?
+                .target,
+        )
+    }
+
+    fn resolve_path<'a>(
+        &self,
+        module: &Module,
+        segments: &[String],
+        packages: &'a [DiscoveredPackage],
+        surface: ModuleSurface<'_>,
+        followed: &mut FollowedHops,
+    ) -> Option<Resolution<'a>> {
         let first = segments.first()?;
         match first.as_str() {
             "std" | "core" | "alloc" | "proc_macro" => None,
@@ -191,17 +244,15 @@ impl ModuleCatalog {
                     Some(_) => self.by_segments.get(&(package, Vec::new())).copied()?,
                     None => self.by_path[&module.path],
                 };
-                Some(ResolvedTarget::Element(self.descend(
-                    start,
-                    &segments[1..],
-                    declarations,
-                )))
+                Some(self.descend(start, &segments[1..], packages, surface, followed))
             }
-            "self" => Some(ResolvedTarget::Element(self.descend(
+            "self" => Some(self.descend(
                 self.by_path[&module.path],
                 &segments[1..],
-                declarations,
-            ))),
+                packages,
+                surface,
+                followed,
+            )),
             "super" => {
                 let package = module.package?;
                 let own = module.segments.as_ref()?;
@@ -222,30 +273,67 @@ impl ModuleCatalog {
                     }
                     prefix.pop();
                 };
-                Some(ResolvedTarget::Element(self.descend(
-                    start,
-                    &segments[supers..],
-                    declarations,
-                )))
+                Some(self.descend(start, &segments[supers..], packages, surface, followed))
             }
             name => {
-                let target = *self.package_by_import_name.get(name)?;
-                match self.by_segments.get(&(target, Vec::new())) {
-                    Some(root) => Some(ResolvedTarget::Element(self.descend(
-                        *root,
+                if let Some(package) = self.package_by_import_name.get(name).copied() {
+                    return Some(self.enter_package(
+                        package,
                         &segments[1..],
-                        declarations,
-                    ))),
-                    None => Some(ResolvedTarget::Package(&packages[target])),
+                        packages,
+                        surface,
+                        followed,
+                    ));
                 }
+                // A `use` path may also start at an item of the importing
+                // module itself (`use element::Element;` beside `mod
+                // element;`). Only a path that reaches what it names counts
+                // as such, so imports of crates outside the project keep
+                // resolving to nothing.
+                let resolution = self.descend(
+                    self.by_path[&module.path],
+                    segments,
+                    packages,
+                    surface,
+                    followed,
+                );
+                resolution.claims_name.then_some(resolution)
+            }
+        }
+    }
+
+    /// Enters another package of the project by its crate root, or lands on
+    /// the package itself when it has no root in the sources.
+    fn enter_package<'a>(
+        &self,
+        package: usize,
+        rest: &[String],
+        packages: &'a [DiscoveredPackage],
+        surface: ModuleSurface<'_>,
+        followed: &mut FollowedHops,
+    ) -> Resolution<'a> {
+        if let Some(root) = self.by_segments.get(&(package, Vec::new())).copied() {
+            self.descend(root, rest, packages, surface, followed)
+        } else {
+            Resolution {
+                target: ResolvedTarget::Package(&packages[package]),
+                claims_name: rest.is_empty(),
             }
         }
     }
 
     /// Follows `rest` down the module tree from `start` to the deepest file
-    /// module that exists; when the path continues past it, one further
-    /// segment may land on a top-level declaration of that module.
-    fn descend(&self, start: usize, rest: &[String], declarations: &DeclarationIndex) -> ElementId {
+    /// module that exists; when the path continues past it, the next segment
+    /// may name a top-level declaration of that module or a name the module
+    /// re-exports.
+    fn descend<'a>(
+        &self,
+        start: usize,
+        rest: &[String],
+        packages: &'a [DiscoveredPackage],
+        surface: ModuleSurface<'_>,
+        followed: &mut FollowedHops,
+    ) -> Resolution<'a> {
         let mut current = start;
         let mut consumed = 0;
         if let (Some(package), Some(base)) = (
@@ -269,12 +357,72 @@ impl ModuleCatalog {
             }
         }
         let module = &self.modules[current];
-        if let Some(next) = rest.get(consumed)
-            && let Some(item) = declarations.declaration(&module.path, next)
-        {
-            return item.clone();
+        let Some(name) = rest.get(consumed) else {
+            return Resolution::claimed(ResolvedTarget::Element(module.id()));
+        };
+        if let Some(item) = surface.declarations.declaration(&module.path, name) {
+            return Resolution::claimed(ResolvedTarget::Element(item.clone()));
         }
-        module.id()
+        // Re-exports may point at each other, directly or in a ring. Taking
+        // each (module, name) hop at most once along a chain ends such a ring
+        // at the module where it closes instead of recursing forever; the hop
+        // leaves the set again so that a sibling branch may still take it.
+        let hop = (module.path.clone(), name.clone());
+        let forwarded = if followed.insert(hop.clone()) {
+            let found = self.follow_reexport(
+                module,
+                name,
+                &rest[consumed + 1..],
+                packages,
+                surface,
+                followed,
+            );
+            followed.remove(&hop);
+            found
+        } else {
+            None
+        };
+        forwarded.unwrap_or_else(|| Resolution::stopped_at(module.id()))
+    }
+
+    /// Continues an import that named `name` at `module` without finding a
+    /// declaration, through the `pub use` that makes `name` available there.
+    /// A re-export target is written from `module`'s own perspective, so it
+    /// resolves like any other import path, carrying the still unused `tail`
+    /// of the original path.
+    fn follow_reexport<'a>(
+        &self,
+        module: &Module,
+        name: &str,
+        tail: &[String],
+        packages: &'a [DiscoveredPackage],
+        surface: ModuleSurface<'_>,
+        followed: &mut FollowedHops,
+    ) -> Option<Resolution<'a>> {
+        if let Some(forwarded) = surface.reexports.forwarded(&module.path, name) {
+            let mut path = forwarded.to_vec();
+            path.extend_from_slice(tail);
+            if let Some(resolution) = self.resolve_path(module, &path, packages, surface, followed)
+            {
+                // The `pub use` names `name`, so this module claims it even
+                // when the target itself resolves no further than a module.
+                return Some(Resolution::claimed(resolution.target));
+            }
+        }
+        // A `pub use m::*` re-exports whatever `m` holds, so `name` may hide
+        // behind any of them. The first wildcard in source order that leads
+        // to something claiming `name` answers.
+        for wildcard in surface.reexports.wildcards(&module.path) {
+            let mut path = wildcard.clone();
+            path.push(name.to_owned());
+            path.extend_from_slice(tail);
+            if let Some(resolution) = self.resolve_path(module, &path, packages, surface, followed)
+                && resolution.claims_name
+            {
+                return Some(resolution);
+            }
+        }
+        None
     }
 }
 

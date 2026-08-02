@@ -129,6 +129,131 @@ fn an_import_of_an_undeclared_name_stops_at_the_deepest_file_module() {
 }
 
 #[test]
+fn an_import_through_a_facade_reexport_resolves_onto_the_declared_item() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        ("crates/a/src/lib.rs", "use b_lib::Element;\n"),
+        (
+            "crates/b/src/lib.rs",
+            "mod element;\npub use element::{Element, ElementId};\n",
+        ),
+        (
+            "crates/b/src/element.rs",
+            "pub struct Element;\npub struct ElementId;\n",
+        ),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/b/src/element.rs#type:Element".to_owned()
+    )));
+}
+
+#[test]
+fn a_renamed_reexport_resolves_onto_the_item_it_forwards_to() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        ("crates/a/src/lib.rs", "use b_lib::Widget;\n"),
+        (
+            "crates/b/src/lib.rs",
+            "mod inner;\npub use inner::Thing as Widget;\n",
+        ),
+        ("crates/b/src/inner.rs", "pub struct Thing;\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/b/src/inner.rs#type:Thing".to_owned()
+    )));
+}
+
+#[test]
+fn a_chain_of_reexports_resolves_onto_the_item_at_its_end() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        ("crates/a/src/lib.rs", "use b_lib::Thing;\n"),
+        (
+            "crates/b/src/lib.rs",
+            "mod middle;\npub use middle::Thing;\n",
+        ),
+        (
+            "crates/b/src/middle.rs",
+            "mod deep;\npub use deep::Thing;\n",
+        ),
+        ("crates/b/src/middle/deep.rs", "pub struct Thing;\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/b/src/middle/deep.rs#type:Thing".to_owned()
+    )));
+}
+
+#[test]
+fn reexports_pointing_at_each_other_stop_at_the_module_closing_the_cycle() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        ("crates/a/src/lib.rs", "use b_lib::one::Thing;\n"),
+        ("crates/b/src/lib.rs", "mod one;\nmod two;\n"),
+        ("crates/b/src/one.rs", "pub use crate::two::Thing;\n"),
+        ("crates/b/src/two.rs", "pub use crate::one::Thing;\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/b/src/one.rs".to_owned()
+    )));
+}
+
+#[test]
+fn a_wildcard_reexport_forwards_a_name_its_module_does_not_declare() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        ("crates/a/src/lib.rs", "use b_lib::Thing;\n"),
+        ("crates/b/src/lib.rs", "mod inner;\npub use inner::*;\n"),
+        ("crates/b/src/inner.rs", "pub struct Thing;\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/b/src/inner.rs#type:Thing".to_owned()
+    )));
+}
+
+#[test]
+fn a_private_use_keeps_the_name_out_of_the_modules_surface() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        ("crates/a/src/lib.rs", "use b_lib::Thing;\n"),
+        ("crates/b/src/lib.rs", "mod inner;\nuse inner::Thing;\n"),
+        ("crates/b/src/inner.rs", "pub struct Thing;\n"),
+    ]);
+    let dependencies = dependencies(&structure);
+    assert!(dependencies.contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/b/src/lib.rs".to_owned()
+    )));
+    assert!(!dependencies.contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/b/src/inner.rs#type:Thing".to_owned()
+    )));
+}
+
+#[test]
+fn a_path_starting_at_an_item_of_the_importing_module_resolves_onto_it() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        ("crates/a/src/lib.rs", "mod foo;\nuse foo::Bar;\n"),
+        ("crates/a/src/foo.rs", "pub struct Bar;\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs".to_owned(),
+        "crates/a/src/foo.rs#type:Bar".to_owned()
+    )));
+}
+
+#[test]
 fn an_import_into_an_inline_module_stops_at_that_module() {
     let structure = analyze(&[
         MANIFEST_A,
