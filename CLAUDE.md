@@ -39,7 +39,9 @@ crates/
                        detail level (packages, modules, items), with provenance
                        per rolled-up edge. Edges attach only to boundaries
                        without visible children; a boundary with children shows
-                       its own content as a synthetic self leaf.
+                       its own content as a synthetic self leaf. A Cut carries
+                       per-boundary overrides on top of the global detail, so
+                       one boundary opens or collapses while the rest stays put.
   comparison/          Domain: deltas between two architecture versions.
   planning/            Planning core: plans, change sets, notes, annotations.
     src/ports/         PlanStore.

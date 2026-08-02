@@ -45,6 +45,8 @@ pub struct EdgeVisual {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanvasAction {
     Node(ElementId),
+    /// A double-clicked boundary: the reader asks to see inside it.
+    Expand(ElementId),
     Edge(Relation),
     Background,
 }
@@ -120,7 +122,8 @@ pub fn show(
         *current
     };
 
-    let (hovered_node, clicked_node) = interact_nodes(ui, content.layout, camera, viewport);
+    let touched = interact_nodes(ui, content.layout, camera, viewport);
+    let hovered_node = touched.hovered;
 
     let routes = routing::routes(
         content.view,
@@ -155,7 +158,12 @@ pub fn show(
 
     paint(ui, content, camera, viewport, &drawn, hovered_node.as_ref());
 
-    if let Some(id) = clicked_node {
+    // A double click also reports as a click, and its first click already
+    // selected the node; the deeper answer is the one that stands.
+    if let Some(id) = touched.double_clicked {
+        return Some(CanvasAction::Expand(id));
+    }
+    if let Some(id) = touched.clicked {
         return Some(CanvasAction::Node(id));
     }
     if background.clicked() {
@@ -278,15 +286,19 @@ fn fit(world: Rect, viewport: Rect) -> TSTransform {
         * TSTransform::from_scaling(scale)
 }
 
+/// What the pointer did to the nodes this frame.
+struct Touched {
+    hovered: Option<ElementId>,
+    clicked: Option<ElementId>,
+    double_clicked: Option<ElementId>,
+}
+
 /// Registers a click-and-hover area for every node. Leaves register after
 /// containers, so they win overlapping hits; a container answers only on
-/// its header strip.
-fn interact_nodes(
-    ui: &mut Ui,
-    layout: &Layout,
-    camera: TSTransform,
-    viewport: Rect,
-) -> (Option<ElementId>, Option<ElementId>) {
+/// its header strip. The nodes register after the background, so a click
+/// that lands on a node never reaches the background - which is what keeps
+/// a double-clicked node out of the background's refit.
+fn interact_nodes(ui: &mut Ui, layout: &Layout, camera: TSTransform, viewport: Rect) -> Touched {
     let mut targets: Vec<(&ElementId, Rect)> = layout
         .containers
         .iter()
@@ -294,8 +306,11 @@ fn interact_nodes(
         .collect();
     targets.extend(layout.leaves.iter().map(|id| (id, layout.rects[id])));
 
-    let mut hovered = None;
-    let mut clicked = None;
+    let mut touched = Touched {
+        hovered: None,
+        clicked: None,
+        double_clicked: None,
+    };
     for (id, rect) in targets {
         let on_screen = camera.mul_rect(rect).intersect(viewport);
         if !on_screen.is_positive() {
@@ -305,13 +320,16 @@ fn interact_nodes(
             .interact(on_screen, ui.id().with(id.as_str()), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
         if response.hovered() {
-            hovered = Some(id.clone());
+            touched.hovered = Some(id.clone());
         }
         if response.clicked() {
-            clicked = Some(id.clone());
+            touched.clicked = Some(id.clone());
+        }
+        if response.double_clicked() {
+            touched.double_clicked = Some(id.clone());
         }
     }
-    (hovered, clicked)
+    touched
 }
 
 /// The clickable strip along a container's top edge.

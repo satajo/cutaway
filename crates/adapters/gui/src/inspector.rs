@@ -18,7 +18,7 @@ use eframe::egui;
 use crate::canvas::{self, EdgeStatus};
 use crate::focus;
 use crate::label::{Labels, kind_name, kind_symbol};
-use crate::{Scene, Selection, Session};
+use crate::{Scene, Selection, Session, detail_label};
 
 /// How many rows one list shows before it names the rest. The cap is a
 /// display limit and not a data limit: the count above every list still
@@ -87,6 +87,10 @@ fn help(ui: &mut egui::Ui) {
     );
     ui.label("A box grows with the number of concepts inside it.");
     ui.label(
+        "Double-click a boundary to open it one level deeper than the rest of the \
+         picture; select it to expand or collapse it from here.",
+    );
+    ui.label(
         "Severed connections turn red, drawn ones green; the plan saves to \
          cutaway.json in the repository.",
     );
@@ -102,6 +106,7 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     // The id is the element's path through the sources: a reader knows the
     // boundary by it even where two short names read alike.
     ui.small(egui::RichText::new(id.as_str()).monospace());
+    detail_controls(ui, session, id);
     note_editor(ui, session);
     let mut chosen = None;
     if !panel.contents.is_empty() {
@@ -159,6 +164,31 @@ fn edge(ui: &mut egui::Ui, session: &mut Session, relation: &Relation) {
     if let Some(target) = list(ui, &panel.provenance) {
         go_to(session, target);
     }
+}
+
+/// Opens or closes this one boundary on top of the detail the rest of the
+/// picture follows, so the project stays whole while the boundary under
+/// study shows its parts. Double-clicking the boundary expands it too.
+fn detail_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
+    let Some(within) = session.detail_within(id) else {
+        return;
+    };
+    ui.separator();
+    ui.label(format!("Shows: {}", detail_label(within).to_lowercase()));
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(within.deeper().is_some(), egui::Button::new("Expand"))
+            .clicked()
+        {
+            session.expand(id);
+        }
+        if ui
+            .add_enabled(within.shallower().is_some(), egui::Button::new("Collapse"))
+            .clicked()
+        {
+            session.collapse(id);
+        }
+    });
 }
 
 fn note_editor(ui: &mut egui::Ui, session: &mut Session) {
@@ -468,7 +498,7 @@ fn ranked(tally: Tally<'_>) -> Vec<Crossing<'_>> {
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{Element, ElementKind, ElementName, RelationKind};
-    use cutaway_lenses::{Detail, boundary_view};
+    use cutaway_lenses::{Cut, Detail, boundary_view};
 
     use super::*;
 
@@ -549,7 +579,7 @@ mod tests {
 
     #[test]
     fn a_boundary_lists_what_it_depends_on_before_what_depends_on_it() {
-        let view = boundary_view(&graph(), Detail::Modules).unwrap();
+        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         assert_eq!(
             texts(&rows_of(&view, "package:a")),
             ["→ b/one (3)", "→ c/one (1)", "← b/one (1)"]
@@ -558,7 +588,7 @@ mod tests {
 
     #[test]
     fn a_connection_row_counts_every_concrete_dependency_behind_it() {
-        let view = boundary_view(&graph(), Detail::Modules).unwrap();
+        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         let rows = rows_of(&view, "a/two");
         assert_eq!(
             texts(&rows),
@@ -569,7 +599,7 @@ mod tests {
 
     #[test]
     fn a_connection_row_selects_the_heaviest_edge_to_its_partner() {
-        let view = boundary_view(&graph(), Detail::Modules).unwrap();
+        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         let rows = rows_of(&view, "package:a");
         assert_eq!(
             rows[0].target,
@@ -580,7 +610,7 @@ mod tests {
 
     #[test]
     fn the_connections_of_a_leaf_are_the_edges_that_touch_it() {
-        let view = boundary_view(&graph(), Detail::Modules).unwrap();
+        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         let rows = rows_of(&view, "a/one");
         assert_eq!(texts(&rows), ["→ b/one (1)", "→ c/one (1)", "← b/one (1)"]);
         assert_eq!(
@@ -591,7 +621,7 @@ mod tests {
 
     #[test]
     fn a_frame_lists_the_boundaries_it_directly_holds() {
-        let view = boundary_view(&graph(), Detail::Modules).unwrap();
+        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         let labels = Labels::of(&view.graph);
         let rows = contents_rows(&view.graph, &labels, &id("package:a"));
         assert_eq!(texts(&rows), ["▤ a/one", "▤ a/two"]);
@@ -606,7 +636,7 @@ mod tests {
         for from in ["package:a", "c/one", "c/one#type:Y"] {
             relate(&mut graph, from, "package:b", RelationKind::DependsOn);
         }
-        let view = boundary_view(&graph, Detail::Modules).unwrap();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
         let labels = Labels::of(&view.graph);
         let rows = coarse_rows(&view, &labels);
         assert_eq!(
@@ -626,7 +656,7 @@ mod tests {
         add(&mut graph, "stray", ElementKind::Module);
         relate(&mut graph, "project", "stray", RelationKind::Contains);
         relate(&mut graph, "stray", "b/one", RelationKind::DependsOn);
-        let view = boundary_view(&graph, Detail::Packages).unwrap();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
         let rows = unscoped_rows(&view, &graph);
         assert_eq!(texts(&rows), ["stray → b/one"]);
         assert_eq!(rows[0].target, None);
@@ -635,7 +665,7 @@ mod tests {
     #[test]
     fn a_concrete_dependency_leads_to_the_boundary_its_source_shows_up_as() {
         let graph = graph();
-        let view = boundary_view(&graph, Detail::Packages).unwrap();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
         let rows = provenance_rows(&view, &graph, &depends("package:a", "package:b"));
         assert_eq!(
             texts(&rows),
@@ -649,7 +679,7 @@ mod tests {
     #[test]
     fn an_element_the_view_already_holds_maps_to_itself() {
         let graph = graph();
-        let view = boundary_view(&graph, Detail::Modules).unwrap();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
         assert_eq!(
             boundary_in_view(&view.graph, &graph, &id("a/two")),
             Some(id("a/two"))
@@ -659,7 +689,7 @@ mod tests {
     #[test]
     fn an_element_below_the_view_maps_to_the_boundary_that_holds_it() {
         let graph = graph();
-        let view = boundary_view(&graph, Detail::Packages).unwrap();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
         assert_eq!(
             boundary_in_view(&view.graph, &graph, &id("a/two#type:X")),
             Some(id("package:a")),
@@ -671,7 +701,7 @@ mod tests {
     fn an_element_no_boundary_holds_maps_nowhere() {
         let mut graph = graph();
         add(&mut graph, "stray", ElementKind::Module);
-        let view = boundary_view(&graph, Detail::Packages).unwrap();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
         assert_eq!(boundary_in_view(&view.graph, &graph, &id("stray")), None);
     }
 

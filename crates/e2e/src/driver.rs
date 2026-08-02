@@ -3,7 +3,7 @@
 use cutaway_analyzer_rust::RustSourceAnalyzer;
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation, RelationKind};
 use cutaway_inspection::inspect;
-use cutaway_lenses::{BoundaryView, Detail, boundary_view};
+use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{Note, Plan, ProposedChange, Subject};
 
@@ -17,6 +17,10 @@ pub trait ApplicationDriver {
     fn inspect_project(&mut self) -> Result<(), String>;
     /// `level` is `packages`, `modules`, or `items`.
     fn view_boundaries(&mut self, level: &str) -> Result<(), String>;
+    /// Opens one boundary a step deeper than the rest of the picture.
+    fn expand_boundary(&mut self, name: &str) -> Result<(), String>;
+    /// Closes one boundary a step back toward a single box.
+    fn collapse_boundary(&mut self, name: &str) -> Result<(), String>;
     fn boundary_names(&self) -> Vec<String>;
     fn connections(&self) -> Vec<(String, String)>;
     fn sever_connection(&mut self, from: &str, to: &str) -> Result<(), String>;
@@ -35,6 +39,7 @@ pub trait ApplicationDriver {
 pub struct InProcessDriver {
     sources: InMemorySourceTree,
     graph: Option<ArchitectureGraph>,
+    cut: Option<Cut>,
     view: Option<BoundaryView>,
     plan: Plan,
     store: InMemoryPlanStore,
@@ -43,6 +48,30 @@ pub struct InProcessDriver {
 impl InProcessDriver {
     fn view(&self) -> &BoundaryView {
         self.view.as_ref().expect("a boundary view is active")
+    }
+
+    /// Paints the current cut anew, exactly as the GUI does after the reader
+    /// opens or closes a boundary.
+    fn rebuild_view(&mut self) -> Result<(), String> {
+        let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
+        let cut = self.cut.as_ref().ok_or("no boundary view yet")?;
+        let view = boundary_view(graph, cut).map_err(|error| error.to_string())?;
+        self.view = Some(view);
+        Ok(())
+    }
+
+    fn step_boundary(
+        &mut self,
+        name: &str,
+        step: fn(&mut Cut, &BoundaryView, &ElementId) -> bool,
+    ) -> Result<(), String> {
+        let id = self.boundary_id(name)?;
+        let view = self.view.as_ref().ok_or("no boundary view yet")?;
+        let cut = self.cut.as_mut().ok_or("no boundary view yet")?;
+        if !step(cut, view, &id) {
+            return Err(format!("the detail inside {name} cannot go any further"));
+        }
+        self.rebuild_view()
     }
 
     fn boundary_id(&self, name: &str) -> Result<ElementId, String> {
@@ -90,9 +119,18 @@ impl ApplicationDriver for InProcessDriver {
             "items" => Detail::Items,
             other => return Err(format!("unknown detail level {other}")),
         };
-        let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
-        self.view = Some(boundary_view(graph, detail).map_err(|error| error.to_string())?);
-        Ok(())
+        // A new detail for the whole picture drops the boundaries opened or
+        // closed under the old one, as the detail slider does.
+        self.cut = Some(Cut::uniform(detail));
+        self.rebuild_view()
+    }
+
+    fn expand_boundary(&mut self, name: &str) -> Result<(), String> {
+        self.step_boundary(name, Cut::expand)
+    }
+
+    fn collapse_boundary(&mut self, name: &str) -> Result<(), String> {
+        self.step_boundary(name, Cut::collapse)
     }
 
     fn boundary_names(&self) -> Vec<String> {

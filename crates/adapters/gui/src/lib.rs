@@ -6,6 +6,11 @@
 //! [`PlanStore`]. The boundary canvas shows the architecture at an
 //! adjustable level of detail; the user severs, draws, and annotates
 //! connections, and every markup lands in the project's plan immediately.
+//!
+//! The detail slider sets the level of the whole picture, and single
+//! boundaries open or close on top of it: a double click on a boundary, or
+//! the inspector's Expand and Collapse, moves that one boundary a step. The
+//! slider clears those decisions, because a new whole is a new question.
 
 mod canvas;
 mod focus;
@@ -19,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use cutaway_architecture::{ArchitectureGraph, Element, ElementId, Relation, RelationKind};
-use cutaway_lenses::{BoundaryView, Detail, boundary_view};
+use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{Note, Plan, ProposedChange, Subject};
 use eframe::egui::{self, Rect, emath::TSTransform};
@@ -74,7 +79,9 @@ struct Session {
     graph: ArchitectureGraph,
     plan: Plan,
     store: Box<dyn PlanStore>,
-    detail: Detail,
+    /// Where the picture cuts the hierarchy: the detail of the whole, and
+    /// the boundaries the reader opened or closed on top of it.
+    cut: Cut,
     scene: Result<Scene, String>,
     /// Contained-concept counts from the full graph; they size the boxes.
     weights: BTreeMap<ElementId, usize>,
@@ -101,7 +108,7 @@ impl Session {
             graph: project.graph,
             plan: project.plan,
             store: project.store,
-            detail: Detail::Packages,
+            cut: Cut::uniform(Detail::Packages),
             scene: Err("not built yet".to_owned()),
             weights,
             camera: None,
@@ -126,17 +133,86 @@ impl Session {
             .or_else(|| self.graph.element(id))
     }
 
+    /// Paints the cut anew, leaving the camera where it is: opening or
+    /// closing one boundary changes what the picture holds, not what the
+    /// reader looks at. Whatever the new cut no longer shows is dropped.
     fn rebuild_view(&mut self) {
-        self.scene = boundary_view(&self.graph, self.detail)
+        self.scene = boundary_view(&self.graph, &self.cut)
             .map_err(|error| error.to_string())
             .map(|view| {
                 let layout = layout::compute(&view.graph, &self.weights);
                 Scene { view, layout }
             });
-        self.selection = None;
-        self.note_draft.clear();
-        self.draw_source = None;
+        if let Some(source) = &self.draw_source
+            && !self.shows(source)
+        {
+            self.draw_source = None;
+        }
+        let dropped = self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| !self.shows_selection(selection));
+        if dropped {
+            self.select(None);
+        }
+    }
+
+    /// Cuts the whole picture at one detail again, dropping every boundary
+    /// the reader opened or closed: those decisions answered the detail they
+    /// were made in. A new whole is a new picture, so the camera refits and
+    /// nothing stays selected.
+    fn recut(&mut self, detail: Detail) {
+        self.cut = Cut::uniform(detail);
+        self.rebuild_view();
+        self.select(None);
         self.camera = None;
+    }
+
+    /// Opens the boundary one detail step deeper than what it shows now.
+    fn expand(&mut self, id: &ElementId) {
+        self.step_detail(id, Cut::expand);
+    }
+
+    /// Closes the boundary one detail step back toward a single box.
+    fn collapse(&mut self, id: &ElementId) {
+        self.step_detail(id, Cut::collapse);
+    }
+
+    fn step_detail(
+        &mut self,
+        id: &ElementId,
+        step: fn(&mut Cut, &BoundaryView, &ElementId) -> bool,
+    ) {
+        let Ok(scene) = &self.scene else {
+            return;
+        };
+        if step(&mut self.cut, &scene.view, id) {
+            self.rebuild_view();
+        }
+    }
+
+    /// The detail governing what a boundary shows inside it; None while the
+    /// picture holds no such boundary.
+    fn detail_within(&self, id: &ElementId) -> Option<Detail> {
+        self.scene
+            .as_ref()
+            .ok()
+            .and_then(|scene| scene.view.detail_within.get(id).copied())
+    }
+
+    fn shows(&self, id: &ElementId) -> bool {
+        self.scene
+            .as_ref()
+            .is_ok_and(|scene| scene.view.graph.element(id).is_some())
+    }
+
+    fn shows_selection(&self, selection: &Selection) -> bool {
+        match selection {
+            Selection::Node(id) => self.shows(id),
+            // A connection reads only where both of its ends do, planned
+            // ones included.
+            Selection::Edge(relation) => self.shows(&relation.from) && self.shows(&relation.to),
+        }
     }
 
     fn edges(&self) -> Vec<EdgeVisual> {
@@ -361,6 +437,14 @@ impl Session {
                     self.select(Some(Selection::Node(id)));
                 }
             }
+            // Opening a boundary answers the question the reader just asked
+            // of it, so the boundary stays selected under the new picture.
+            CanvasAction::Expand(id) => {
+                if !self.drawing {
+                    self.select(Some(Selection::Node(id.clone())));
+                    self.expand(&id);
+                }
+            }
             CanvasAction::Edge(relation) => {
                 self.select(Some(Selection::Edge(relation)));
             }
@@ -457,16 +541,15 @@ impl eframe::App for CutawayApp {
                     ui.label("Detail");
                     let mut position = Detail::ALL
                         .iter()
-                        .position(|detail| *detail == session.detail)
+                        .position(|detail| *detail == session.cut.detail)
                         .unwrap_or(0);
                     let slider = egui::Slider::new(&mut position, 0..=Detail::ALL.len() - 1)
                         .show_value(false)
                         .step_by(1.0);
                     if ui.add(slider).changed() {
-                        session.detail = Detail::ALL[position];
-                        session.rebuild_view();
+                        session.recut(Detail::ALL[position]);
                     }
-                    ui.label(detail_label(session.detail));
+                    ui.label(detail_label(session.cut.detail));
                     ui.separator();
                     let label = if session.drawing {
                         match &session.draw_source {
@@ -540,7 +623,7 @@ impl eframe::App for CutawayApp {
     }
 }
 
-fn detail_label(detail: Detail) -> &'static str {
+pub(crate) fn detail_label(detail: Detail) -> &'static str {
     match detail {
         Detail::Packages => "Packages",
         Detail::Modules => "Modules",

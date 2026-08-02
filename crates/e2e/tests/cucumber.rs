@@ -52,6 +52,22 @@ fn the_boundaries_are_viewed(world: &mut CutawayWorld, level: String) {
         .expect("the boundary view builds");
 }
 
+#[when(expr = "the boundary {string} is expanded")]
+fn the_boundary_is_expanded(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .expand_boundary(&name)
+        .expect("the boundary expands");
+}
+
+#[when(expr = "the boundary {string} is collapsed")]
+fn the_boundary_is_collapsed(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .collapse_boundary(&name)
+        .expect("the boundary collapses");
+}
+
 #[when(expr = "the connection from {string} to {string} is severed")]
 fn the_connection_is_severed(world: &mut CutawayWorld, from: String, to: String) {
     world
@@ -82,6 +98,24 @@ fn the_boundaries_are(world: &mut CutawayWorld, expected: String) {
     names.sort();
     let expected: Vec<String> = expected.split(", ").map(str::to_owned).collect();
     assert_eq!(names, expected);
+}
+
+#[then(expr = "the boundaries include {string}")]
+fn the_boundaries_include(world: &mut CutawayWorld, expected: String) {
+    let names = world.driver.boundary_names();
+    assert!(
+        names.contains(&expected),
+        "expected a boundary {expected}, the view has {names:?}"
+    );
+}
+
+#[then(expr = "the boundaries do not include {string}")]
+fn the_boundaries_do_not_include(world: &mut CutawayWorld, expected: String) {
+    let names = world.driver.boundary_names();
+    assert!(
+        !names.contains(&expected),
+        "expected no boundary {expected}, the view has {names:?}"
+    );
 }
 
 #[then(expr = "a connection goes from {string} to {string}")]
