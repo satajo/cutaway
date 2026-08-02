@@ -2,16 +2,19 @@
 //!
 //! Top-level boundaries form columns: a boundary sits one column right of
 //! the boundaries that depend on it, so dependencies read left to right.
-//! Within a column, and within every container, boundaries order by the
-//! average position of their dependency partners, which keeps edges short
-//! and crossings few. A leaf's box grows with the number of concepts the
-//! full graph places inside it, so a busy boundary reads as a big one.
+//! Inside a container the children wrap into a grid that reads like text,
+//! left to right and then down, so a container of twenty children stays a
+//! readable box instead of a tower. Within a column, and within every
+//! container, boundaries order by the average position of their dependency
+//! partners, which keeps edges short and crossings few. A leaf's box grows
+//! with the number of concepts the full graph places inside it, so a busy
+//! boundary reads as a big one.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, RelationKind};
-use eframe::egui::{Rect, Vec2, pos2, vec2};
+use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 const NODE_HEIGHT: f32 = 30.0;
 const PADDING: f32 = 14.0;
@@ -24,6 +27,15 @@ const ROW_GAP: f32 = 40.0;
 const WEIGHT_GROWTH: f32 = 7.0;
 /// Barycenter passes over the columns; a handful settles the order.
 const ORDERING_SWEEPS: usize = 4;
+/// The width-to-height ratio a packed container aims for: a box slightly
+/// wider than tall fits both the canvas and the eye.
+const TARGET_ASPECT: f32 = 1.6;
+/// How much the space a grid wastes counts against the shape it reaches.
+/// Below one, shape leads and area only breaks near ties.
+const AREA_COST: f32 = 0.35;
+/// Up to this many children stay in one column: a short list reads as a
+/// list, and wrapping it gains nothing.
+const STACK_LIMIT: usize = 3;
 
 pub struct Layout {
     pub rects: BTreeMap<ElementId, Rect>,
@@ -153,9 +165,9 @@ fn arrange(
     weights: &BTreeMap<ElementId, usize>,
     name_of: &impl Fn(&ElementId) -> String,
 ) -> Layout {
-    let mut sizes: BTreeMap<ElementId, Vec2> = BTreeMap::new();
+    let mut measures = Measures::default();
     for root in columns.iter().flatten() {
-        measure(root, orders, weights, name_of, &mut sizes);
+        measure(root, orders, weights, name_of, &mut measures);
     }
 
     let mut layout = Layout {
@@ -163,6 +175,7 @@ fn arrange(
         containers: Vec::new(),
         leaves: Vec::new(),
     };
+    let sizes = &measures.sizes;
     let mut x = 0.0;
     for column in columns {
         let width = column.iter().map(|id| sizes[id].x).fold(0.0_f32, f32::max);
@@ -170,7 +183,7 @@ fn arrange(
         // Columns center on a shared axis so edges cross the gap squarely.
         let mut y = -height / 2.0;
         for root in column {
-            place(root, pos2(x, y), orders, &sizes, &mut layout);
+            place(root, pos2(x, y), orders, &measures, &mut layout);
             y += sizes[root].y + ROW_GAP;
         }
         x += width + COLUMN_GAP;
@@ -178,12 +191,20 @@ fn arrange(
     layout
 }
 
+/// What one arrangement pass measured: the extent of every box, and how
+/// each container packs its children.
+#[derive(Default)]
+struct Measures {
+    sizes: BTreeMap<ElementId, Vec2>,
+    grids: BTreeMap<ElementId, Grid>,
+}
+
 fn measure(
     id: &ElementId,
     orders: &BTreeMap<ElementId, Vec<ElementId>>,
     weights: &BTreeMap<ElementId, usize>,
     name_of: &impl Fn(&ElementId) -> String,
-    sizes: &mut BTreeMap<ElementId, Vec2>,
+    measures: &mut Measures,
 ) -> Vec2 {
     let label = label_width(&name_of(id));
     let size = match orders.get(id) {
@@ -192,41 +213,134 @@ fn measure(
             vec2(label + growth, NODE_HEIGHT + growth * 0.6)
         }
         Some(inner) => {
-            let mut width = label;
-            let mut height = HEADER + PADDING;
-            for child in inner {
-                let child_size = measure(child, orders, weights, name_of, sizes);
-                width = width.max(child_size.x + 2.0 * PADDING);
-                height += child_size.y + GAP;
-            }
-            vec2(width, height - GAP + PADDING)
+            let children: Vec<Vec2> = inner
+                .iter()
+                .map(|child| measure(child, orders, weights, name_of, measures))
+                .collect();
+            let grid = pack(&children, label);
+            let size = framed(grid.size(), label);
+            measures.grids.insert(id.clone(), grid);
+            size
         }
     };
-    sizes.insert(id.clone(), size);
+    measures.sizes.insert(id.clone(), size);
     size
 }
 
 fn place(
     id: &ElementId,
-    origin: eframe::egui::Pos2,
+    origin: Pos2,
     orders: &BTreeMap<ElementId, Vec<ElementId>>,
-    sizes: &BTreeMap<ElementId, Vec2>,
+    measures: &Measures,
     layout: &mut Layout,
 ) {
     layout
         .rects
-        .insert(id.clone(), Rect::from_min_size(origin, sizes[id]));
+        .insert(id.clone(), Rect::from_min_size(origin, measures.sizes[id]));
     match orders.get(id) {
         None => layout.leaves.push(id.clone()),
         Some(inner) => {
             layout.containers.push(id.clone());
-            let mut y = origin.y + HEADER + PADDING;
-            for child in inner {
-                place(child, pos2(origin.x + PADDING, y), orders, sizes, layout);
-                y += sizes[child].y + GAP;
+            let grid = &measures.grids[id];
+            let content = pos2(origin.x + PADDING, origin.y + HEADER + PADDING);
+            for (index, child) in inner.iter().enumerate() {
+                let offset = grid.cell(index, measures.sizes[child]);
+                place(child, content + offset, orders, measures, layout);
             }
         }
     }
+}
+
+/// A container's children wrapped into rows: a row fills left to right,
+/// then the next row starts, so the order the caller established still
+/// reads like text. A column is as wide as its widest member and a row as
+/// tall as its tallest, which keeps boxes of mixed size apart.
+struct Grid {
+    column_widths: Vec<f32>,
+    row_heights: Vec<f32>,
+}
+
+impl Grid {
+    fn new(children: &[Vec2], columns: usize) -> Self {
+        let columns = columns.clamp(1, children.len().max(1));
+        let mut grid = Self {
+            column_widths: vec![0.0; columns],
+            row_heights: vec![0.0; children.len().div_ceil(columns).max(1)],
+        };
+        for (index, child) in children.iter().enumerate() {
+            let (row, column) = grid.cell_of(index);
+            grid.column_widths[column] = grid.column_widths[column].max(child.x);
+            grid.row_heights[row] = grid.row_heights[row].max(child.y);
+        }
+        grid
+    }
+
+    fn cell_of(&self, index: usize) -> (usize, usize) {
+        let columns = self.column_widths.len();
+        (index / columns, index % columns)
+    }
+
+    fn size(&self) -> Vec2 {
+        vec2(span(&self.column_widths), span(&self.row_heights))
+    }
+
+    /// Where the child at `index` sits relative to the content's top left.
+    /// Every child of a row shares the row's middle line, so the sibling
+    /// refinement reads one row as one position.
+    fn cell(&self, index: usize, size: Vec2) -> Vec2 {
+        let (row, column) = self.cell_of(index);
+        vec2(
+            after(&self.column_widths[..column]),
+            after(&self.row_heights[..row]) + (self.row_heights[row] - size.y) / 2.0,
+        )
+    }
+}
+
+/// Wraps the children into the grid that reads best: the shape closest to
+/// [`TARGET_ASPECT`] for the least wasted space. Ties go to the fewest
+/// columns, so equal candidates always resolve the same way.
+fn pack(children: &[Vec2], label: f32) -> Grid {
+    if children.len() <= STACK_LIMIT {
+        return Grid::new(children, 1);
+    }
+    let content: f32 = children.iter().map(|child| child.x * child.y).sum();
+    (1..=children.len())
+        .map(|columns| Grid::new(children, columns))
+        .min_by(|a, b| {
+            cost(a, label, content)
+                .partial_cmp(&cost(b, label, content))
+                .unwrap_or(Ordering::Equal)
+        })
+        .unwrap_or_else(|| Grid::new(children, 1))
+}
+
+/// How badly a grid reads: how far its box departs from the target ratio,
+/// plus the space it wastes around the children. Both terms are ratios in
+/// logarithmic form, so they compare across containers of any size.
+fn cost(grid: &Grid, label: f32, content: f32) -> f32 {
+    let size = framed(grid.size(), label);
+    let shape = (size.x / (size.y * TARGET_ASPECT)).ln().abs();
+    let waste = (size.x * size.y / content.max(1.0)).max(1.0).ln();
+    shape + AREA_COST * waste
+}
+
+/// The container box around packed content: room for the header, the
+/// padding, and at least the container's own label.
+fn framed(content: Vec2, label: f32) -> Vec2 {
+    vec2(
+        (content.x + 2.0 * PADDING).max(label),
+        content.y + HEADER + 2.0 * PADDING,
+    )
+}
+
+/// The extent of a run of grid tracks, gaps included.
+fn span(track: &[f32]) -> f32 {
+    (after(track) - GAP).max(0.0)
+}
+
+/// Where the track after this run begins.
+fn after(track: &[f32]) -> f32 {
+    track.iter().sum::<f32>() + GAP * ordinal(track.len())
 }
 
 /// Orders every column by the average position of each member's dependency
@@ -273,8 +387,10 @@ fn reduce_crossings(columns: &mut [Vec<ElementId>], edges: &[(ElementId, Element
 }
 
 /// Reorders every sibling group by where the members' dependency partners
-/// landed in a previous arrangement: a child moves toward the vertical
-/// position its partners occupy, so its edges travel the shortest way.
+/// landed in a previous arrangement: a child moves toward the place its
+/// partners occupy, so its edges travel the shortest way. The sibling
+/// group reads as a grid, so the move is two-dimensional: the partners'
+/// centroid ranks in reading order, rows before positions along a row.
 /// Members without partners keep their place.
 fn refine_sibling_orders(
     orders: &mut BTreeMap<ElementId, Vec<ElementId>>,
@@ -287,7 +403,7 @@ fn refine_sibling_orders(
         partners.entry(to).or_default().push(from);
     }
 
-    let mut keys: BTreeMap<ElementId, f32> = BTreeMap::new();
+    let mut keys: BTreeMap<ElementId, Pos2> = BTreeMap::new();
     for kids in orders.values() {
         for kid in kids {
             // A container follows its whole subtree's partners: the edges
@@ -300,20 +416,30 @@ fn refine_sibling_orders(
                     .flatten()
                     .filter(|partner| !members.contains(**partner))
                     .filter_map(|partner| previous.rects.get(*partner))
-                    .map(|rect| rect.center().y)
+                    .map(Rect::center)
             });
-            let key = average(centers).unwrap_or_else(|| previous.rects[kid].center().y);
+            let key = centroid(centers).unwrap_or_else(|| previous.rects[kid].center());
             keys.insert(kid.clone(), key);
         }
     }
+    // The sort is stable, so children whose partners pull them to the same
+    // place keep the dependency layering they arrived in.
     for kids in orders.values_mut() {
-        kids.sort_by(|a, b| {
-            keys[a]
-                .partial_cmp(&keys[b])
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.cmp(b))
-        });
+        kids.sort_by(|a, b| in_reading_order(keys[a], keys[b]));
     }
+}
+
+/// Which of two points comes first when a grid is read like text: the
+/// higher one, and among points of one row the one further left. Positions
+/// count in whole steps of [`GAP`], the closest two boxes ever come, so a
+/// centroid that misses a row's middle line by rounding still ranks with
+/// that row.
+fn in_reading_order(a: Pos2, b: Pos2) -> Ordering {
+    let step = |value: f32| (value / GAP).round();
+    step(a.y)
+        .partial_cmp(&step(b.y))
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| step(a.x).partial_cmp(&step(b.x)).unwrap_or(Ordering::Equal))
 }
 
 fn subtree(id: &ElementId, orders: &BTreeMap<ElementId, Vec<ElementId>>) -> BTreeSet<ElementId> {
@@ -380,6 +506,16 @@ fn layers(nodes: &[ElementId], edges: &[(ElementId, ElementId)]) -> BTreeMap<Ele
         visit(node, &incoming, &mut memo, &mut visiting);
     }
     memo
+}
+
+fn centroid(points: impl Iterator<Item = Pos2>) -> Option<Pos2> {
+    let mut sum = Vec2::ZERO;
+    let mut count = 0.0_f32;
+    for point in points {
+        sum += point.to_vec2();
+        count += 1.0;
+    }
+    (count > 0.0).then(|| (sum / count).to_pos2())
 }
 
 fn average(values: impl Iterator<Item = f32>) -> Option<f32> {
@@ -503,6 +639,87 @@ mod tests {
         let weights = BTreeMap::from([(heavy.clone(), 49), (light.clone(), 0)]);
         let layout = compute(&graph, &weights);
         assert!(layout.rects[&heavy].area() > layout.rects[&light].area());
+    }
+
+    #[test]
+    fn a_crowded_container_grows_wide_instead_of_tall() {
+        let mut graph = ArchitectureGraph::new();
+        let package = add_package(&mut graph, "crowded");
+        for index in 0..16 {
+            add_module(&mut graph, &package, &format!("crowded/m{index:02}.rs"));
+        }
+
+        let layout = compute(&graph, &no_weights());
+        let box_of = layout.rects[&package];
+        let aspect = box_of.width() / box_of.height();
+        assert!(
+            (0.34..=3.0).contains(&aspect),
+            "a container of 16 children reads at {aspect}:1"
+        );
+    }
+
+    #[test]
+    fn packed_children_never_overlap() {
+        let mut graph = ArchitectureGraph::new();
+        let package = add_package(&mut graph, "mixed");
+        let mut children = Vec::new();
+        for index in 0..12 {
+            let child = add_module(&mut graph, &package, &format!("mixed/m{index:02}.rs"));
+            // Every third child holds two of its own, so rows meet boxes of
+            // very different heights.
+            if index % 3 == 0 {
+                for inner in 0..2 {
+                    add_module(
+                        &mut graph,
+                        &child,
+                        &format!("mixed/m{index:02}/i{inner}.rs"),
+                    );
+                }
+            }
+            children.push(child);
+        }
+
+        let layout = compute(&graph, &no_weights());
+        for (index, a) in children.iter().enumerate() {
+            assert!(
+                layout.rects[&package].contains_rect(layout.rects[a]),
+                "{a} escapes its container"
+            );
+            for b in &children[index + 1..] {
+                assert!(
+                    !layout.rects[a]
+                        .shrink(1.0)
+                        .intersects(layout.rects[b].shrink(1.0)),
+                    "{a} and {b} overlap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packing_keeps_the_dependency_reading_order() {
+        let mut graph = ArchitectureGraph::new();
+        let package = add_package(&mut graph, "chain");
+        let chain: Vec<ElementId> = (0..9)
+            .map(|index| add_module(&mut graph, &package, &format!("chain/m{index}.rs")))
+            .collect();
+        for pair in chain.windows(2) {
+            depend(&mut graph, &pair[0], &pair[1]);
+        }
+
+        let layout = compute(&graph, &no_weights());
+        for pair in chain.windows(2) {
+            let (dependent, dependency) = (layout.rects[&pair[0]], layout.rects[&pair[1]]);
+            let reads_first = dependent.center().y < dependency.center().y
+                || (dependent.center().y - dependency.center().y).abs() < 1.0
+                    && dependent.center().x < dependency.center().x;
+            assert!(
+                reads_first,
+                "{} does not read before {}",
+                pair[0].as_str(),
+                pair[1].as_str()
+            );
+        }
     }
 
     #[test]

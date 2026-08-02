@@ -23,6 +23,7 @@ use cutaway_planning::{Note, Plan, ProposedChange, Subject};
 use eframe::egui::{self, emath::TSTransform};
 
 use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual};
+use crate::layout::Layout;
 
 /// Everything the GUI needs about one opened project. The composition root
 /// builds this from the real adapters.
@@ -59,12 +60,20 @@ enum Selection {
     Edge(Relation),
 }
 
+/// A boundary view with the arrangement that paints it. The arrangement
+/// follows from the view graph and the concept weights alone, so it is
+/// computed once per rebuild instead of once per frame.
+struct Scene {
+    view: BoundaryView,
+    layout: Layout,
+}
+
 struct Session {
     graph: ArchitectureGraph,
     plan: Plan,
     store: Box<dyn PlanStore>,
     detail: Detail,
-    view: Result<BoundaryView, String>,
+    scene: Result<Scene, String>,
     /// Contained-concept counts from the full graph; they size the boxes.
     weights: BTreeMap<ElementId, usize>,
     /// World-to-screen camera; None until a frame fits the graph into view.
@@ -84,7 +93,7 @@ impl Session {
             plan: project.plan,
             store: project.store,
             detail: Detail::Packages,
-            view: Err("not built yet".to_owned()),
+            scene: Err("not built yet".to_owned()),
             weights,
             camera: None,
             selection: None,
@@ -100,15 +109,20 @@ impl Session {
     /// The element behind an id. The view graph answers first: it holds the
     /// synthetic `self` leaves the full graph never sees.
     fn element_of(&self, id: &ElementId) -> Option<&Element> {
-        self.view
+        self.scene
             .as_ref()
             .ok()
-            .and_then(|view| view.graph.element(id))
+            .and_then(|scene| scene.view.graph.element(id))
             .or_else(|| self.graph.element(id))
     }
 
     fn rebuild_view(&mut self) {
-        self.view = boundary_view(&self.graph, self.detail).map_err(|error| error.to_string());
+        self.scene = boundary_view(&self.graph, self.detail)
+            .map_err(|error| error.to_string())
+            .map(|view| {
+                let layout = layout::compute(&view.graph, &self.weights);
+                Scene { view, layout }
+            });
         self.selection = None;
         self.note_draft.clear();
         self.draw_source = None;
@@ -116,9 +130,10 @@ impl Session {
     }
 
     fn edges(&self) -> Vec<EdgeVisual> {
-        let Ok(view) = &self.view else {
+        let Ok(scene) = &self.scene else {
             return Vec::new();
         };
+        let view = &scene.view;
         let mut edges = Vec::new();
         for relation in view.graph.relations() {
             if relation.kind != RelationKind::DependsOn {
@@ -259,7 +274,7 @@ impl Session {
             Ok(()) => self.save_plan(),
             Err(error) => self.status = Some(error.to_string()),
         }
-        if self.plan.plans_addition_of(relation) || !edge_exists(&self.view, relation) {
+        if self.plan.plans_addition_of(relation) || !edge_exists(&self.scene, relation) {
             self.select(None);
         }
     }
@@ -280,7 +295,7 @@ impl Session {
             to,
             kind: RelationKind::DependsOn,
         };
-        if edge_exists(&self.view, &relation) {
+        if edge_exists(&self.scene, &relation) {
             self.status = Some("that dependency already exists".to_owned());
             return;
         }
@@ -324,9 +339,10 @@ impl Session {
     }
 }
 
-fn edge_exists(view: &Result<BoundaryView, String>, relation: &Relation) -> bool {
-    view.as_ref()
-        .is_ok_and(|view| view.graph.relations().any(|r| r == relation))
+fn edge_exists(scene: &Result<Scene, String>, relation: &Relation) -> bool {
+    scene
+        .as_ref()
+        .is_ok_and(|scene| scene.view.graph.relations().any(|r| r == relation))
 }
 
 struct CutawayApp {
@@ -449,12 +465,11 @@ impl eframe::App for CutawayApp {
 
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(Ok(session)) = &mut self.session {
-                match &session.view {
+                match &session.scene {
                     Err(reason) => {
                         ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
                     }
-                    Ok(view) => {
-                        let computed = layout::compute(&view.graph, &session.weights);
+                    Ok(scene) => {
                         let edges = session.edges();
                         let (selected_edge, selected_node) = match &session.selection {
                             Some(Selection::Edge(relation)) => (Some(relation), None),
@@ -464,8 +479,8 @@ impl eframe::App for CutawayApp {
                         let action = canvas::show(
                             ui,
                             &Content {
-                                view: &view.graph,
-                                layout: &computed,
+                                view: &scene.view.graph,
+                                layout: &scene.layout,
                                 edges: &edges,
                                 selected_edge,
                                 selected_node,
@@ -487,7 +502,7 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
     match session.selection.clone() {
         None => {
             ui.heading("Boundaries");
-            if let Ok(view) = &session.view {
+            if let Ok(Scene { view, .. }) = &session.scene {
                 ui.label(format!(
                     "{} boundaries, {} connections.",
                     view.graph.elements().count(),
@@ -552,7 +567,7 @@ fn inspector(ui: &mut egui::Ui, session: &mut Session) {
                 }
             }
             note_editor(ui, session);
-            if let Ok(view) = &session.view
+            if let Ok(Scene { view, .. }) = &session.scene
                 && let Some(underlying) = view.provenance.get(&relation)
             {
                 ui.separator();
