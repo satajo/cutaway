@@ -79,7 +79,8 @@ pub(crate) const LEGIBLE_FONT: f32 = 4.0;
 pub(crate) const HAIRLINE: f32 = 0.75;
 /// Screen-pixel distance within which a pointer catches an edge.
 const EDGE_REACH: f32 = 8.0;
-/// Straight segments a curve flattens into for drawing and hit-testing.
+/// Straight segments each cubic of a route flattens into for drawing and
+/// hit-testing.
 const CURVE_SEGMENTS: u16 = 24;
 /// Color strength left to everything outside the selection's neighborhood.
 const FADE: f32 = 0.18;
@@ -112,6 +113,15 @@ const SELECTED_WIDTH: f32 = 1.5;
 /// a dense boundary would otherwise drown the crossings around it.
 const INTRA_WIDTH: f32 = 0.75;
 const INTRA: f32 = 0.6;
+/// How many edges must share one side before their ink is at its calmest. A
+/// popular module receives fifteen to twenty arrows; past that the picture
+/// says "many", and the count itself is the panel's answer, not the paint's.
+const CROWD_FULL: f32 = 16.0;
+/// The ink a stroke keeps in a full crowd: enough to follow one stroke with
+/// the eye, little enough that twenty arrivals read as a calm mass instead
+/// of a thicket over the box they reach. A stroke that runs alone keeps all
+/// of its ink.
+const CROWD_INK: f32 = 0.45;
 /// Color strength of a summary block's fill: far past the wash of a frame
 /// that shows its parts, so a block reads as the one solid thing it is.
 const BLOCK: f32 = 0.22;
@@ -184,9 +194,12 @@ pub fn show(
         .into_iter()
         .zip(routes)
         .map(|(bundle, route)| DrawnEdge {
-            curve: route
-                .as_ref()
-                .map(|route| flattened(route.curve.map(|point| camera.mul_pos(point)))),
+            curve: route.as_ref().map(|route| {
+                route
+                    .path
+                    .transformed(|point| camera.mul_pos(point))
+                    .points(CURVE_SEGMENTS)
+            }),
             route,
             bundle,
         })
@@ -789,17 +802,26 @@ fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
             EdgeStatus::Severed => SEVERED,
             EdgeStatus::Drawn => DRAWN,
         };
-        // The scope dims before the selection does: an internal edge stays
-        // behind the crossings whether anything is selected or not.
+        let selected = bundle.any(|edge| content.selected_edge == Some(&visual(edge).relation));
+        let hovered = drawn.hovered == Some(index);
+        // The scope and the crowd dim before the selection does: an internal
+        // edge stays behind the crossings, and a stroke among many stays
+        // behind a stroke that runs alone, whether anything is selected or
+        // not. The one stroke the reader asks about keeps all of its ink,
+        // however much company it has.
+        let asked_about = selected || hovered;
         let color = shade(
-            dim(ink, route.scope),
+            dim(ink, route.scope).gamma_multiply(if asked_about {
+                1.0
+            } else {
+                crowd_ink(route.crowd)
+            }),
             bundle.strength(|edge| paint.edge(&visual(edge).relation)),
         );
-        let selected = bundle.any(|edge| content.selected_edge == Some(&visual(edge).relation));
         let width = edge_width(bundle.weight, route.scope)
             + if selected {
                 SELECTED_WIDTH
-            } else if drawn.hovered == Some(index) {
+            } else if hovered {
                 HOVER_WIDTH
             } else {
                 0.0
@@ -841,6 +863,16 @@ fn dim(color: Color32, scope: Scope) -> Color32 {
         Scope::Intra => color.gamma_multiply(INTRA),
         Scope::Cross => color,
     }
+}
+
+/// How much of its ink a stroke keeps among the strokes that share its
+/// busiest side. Thickness already carries what an edge stands for; this
+/// carries how much company it keeps, so the two never speak over each
+/// other. The fall is even from one stroke to a full side, so a side that
+/// gains one more arrival never jumps.
+fn crowd_ink(crowd: usize) -> f32 {
+    let company = f32::from(u16::try_from(crowd.saturating_sub(1)).unwrap_or(u16::MAX));
+    1.0 - (1.0 - CROWD_INK) * (company / (CROWD_FULL - 1.0)).min(1.0)
 }
 
 fn paint_leaves(
@@ -935,21 +967,6 @@ fn paint_leaf_label(
         name,
         color,
     );
-}
-
-fn flattened(controls: [Pos2; 4]) -> Vec<Pos2> {
-    (0..=CURVE_SEGMENTS)
-        .map(|segment| cubic_point(controls, f32::from(segment) / f32::from(CURVE_SEGMENTS)))
-        .collect()
-}
-
-fn cubic_point(c: [Pos2; 4], t: f32) -> Pos2 {
-    let u = 1.0 - t;
-    (c[0].to_vec2() * (u * u * u)
-        + c[1].to_vec2() * (3.0 * u * u * t)
-        + c[2].to_vec2() * (3.0 * u * t * t)
-        + c[3].to_vec2() * (t * t * t))
-        .to_pos2()
 }
 
 fn arrow_head(painter: &egui::Painter, points: &[Pos2], color: Color32, zoom: f32) {
@@ -1149,6 +1166,28 @@ mod tests {
             far_out, close_in,
             "the block's screen box decides the size, and nothing else does"
         );
+    }
+
+    #[test]
+    fn a_stroke_that_runs_alone_keeps_all_of_its_ink() {
+        assert!((crowd_ink(1) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn strokes_that_share_a_side_calm_down_as_they_gather() {
+        let ink: Vec<f32> = [1, 4, 8, 16].into_iter().map(crowd_ink).collect();
+        for pair in ink.windows(2) {
+            assert!(pair[1] < pair[0], "more company, less ink: {ink:?}");
+        }
+        assert!(
+            (ink[3] - CROWD_INK).abs() < 0.001,
+            "a full side reaches the calmest the paint goes: {ink:?}"
+        );
+    }
+
+    #[test]
+    fn a_crowd_past_a_full_side_calms_no_further() {
+        assert!((crowd_ink(40) - crowd_ink(16)).abs() < 0.001);
     }
 
     #[test]
