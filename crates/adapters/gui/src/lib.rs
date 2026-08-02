@@ -416,6 +416,19 @@ impl Session {
         }
     }
 
+    /// Puts the whole picture back in front of the reader, exactly as a
+    /// double click on the background does: the same fit, travelled to over
+    /// the same flight, so the two ways of asking answer alike.
+    fn refit(&mut self) {
+        let (Some(_), Ok(scene)) = (self.camera.now(), &self.scene) else {
+            // No camera yet means no frame has fitted the picture, and the
+            // fit that comes shows everything anyway.
+            return;
+        };
+        let world = canvas::world_bounds(&scene.layout);
+        self.camera.fly(camera::fit(world, self.viewport));
+    }
+
     /// Puts one element of the full architecture in front of the reader.
     ///
     /// A search reaches past the picture, so the element found is often
@@ -692,6 +705,16 @@ impl eframe::App for CutawayApp {
                     if ui.button("Search (Ctrl+F)").clicked() {
                         session.palette.open();
                     }
+                    if ui
+                        .button("Fit (Home)")
+                        .on_hover_text(
+                            "Bring the whole picture back into the canvas. \
+                             Home, or a double click on the background.",
+                        )
+                        .clicked()
+                    {
+                        session.refit();
+                    }
                     if let Some(status) = &session.status {
                         ui.separator();
                         ui.colored_label(ui.visuals().warn_fg_color, status);
@@ -700,27 +723,31 @@ impl eframe::App for CutawayApp {
             });
         });
 
-        egui::Panel::right("inspector")
-            .default_size(280.0)
-            .show(ui, |ui| match &mut self.session {
-                None => {
-                    ui.heading("Cutaway");
-                    ui.label(
-                        "Open a git repository to see its architecture as \
-                         boundaries and the dependencies that cross them.",
-                    );
-                }
-                Some(Err(reason)) => {
-                    ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
-                }
-                Some(Ok(session)) => inspector::show(ui, session),
-            });
+        // Nothing opened yet leaves the inspector nothing to inspect, and an
+        // empty panel beside an empty canvas reads as a broken window: the
+        // invitation in the middle carries the whole of it instead.
+        if let Some(session) = &mut self.session {
+            egui::Panel::right("inspector")
+                .default_size(280.0)
+                .show(ui, |ui| match session {
+                    Err(reason) => {
+                        ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
+                    }
+                    Ok(session) => inspector::show(ui, session),
+                });
+        }
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(Ok(session)) = &mut self.session {
-                picture(ui, session);
-            }
+        let mut asked_to_open = false;
+        egui::CentralPanel::default().show(ui, |ui| match &mut self.session {
+            Some(Ok(session)) => picture(ui, session),
+            // A repository that failed to open leaves the invitation
+            // standing: the reader reads the reason beside it and picks
+            // another one from here.
+            None | Some(Err(_)) => asked_to_open = invitation(ui, self.picker.is_some()),
         });
+        if asked_to_open {
+            self.pick_repository(ui.ctx().clone());
+        }
 
         // The palette floats over everything and takes its keys before any
         // widget of the next frame reads them, so it paints after the panels
@@ -735,16 +762,48 @@ impl eframe::App for CutawayApp {
             if let Some(target) = found {
                 session.locate(&target);
             }
-            // The digits reach the picture only after the palette had every
-            // key of this frame: an open palette answers to keys of its own,
+            // The keys reach the picture only after the palette had every
+            // one of this frame: an open palette answers to keys of its own,
             // and a digit typed into its field is part of a name.
-            if !session.palette.is_open()
-                && let Some(detail) = detail::requested(ui.ctx())
-            {
-                session.recut(detail);
+            if !session.palette.is_open() {
+                if let Some(detail) = detail::requested(ui.ctx()) {
+                    session.recut(detail);
+                }
+                if camera::refit_requested(ui.ctx()) {
+                    session.refit();
+                }
             }
         }
     }
+}
+
+/// The empty canvas, before an architecture stands on it. A dark expanse
+/// with a small button in the corner says neither what the window is for nor
+/// where to begin, so the middle of the canvas names the tool, says what it
+/// does, and offers the one act that starts the work. Answers whether the
+/// reader asked for the repository picker.
+fn invitation(ui: &mut egui::Ui, picking: bool) -> bool {
+    let mut asked = false;
+    ui.vertical_centered(|ui| {
+        // The invitation sits above the middle, where the eye lands before
+        // it searches.
+        ui.add_space(ui.available_height() * 0.3);
+        ui.heading("Cutaway");
+        ui.label(
+            egui::RichText::new(
+                "See a repository as boundaries and the dependencies that cross them.",
+            )
+            .weak(),
+        );
+        ui.add_space(ui.spacing().item_spacing.y * 2.0);
+        asked = ui
+            .add_enabled(
+                !picking,
+                egui::Button::new(format!("Open a repository{}", glyph::ELLIPSIS)),
+            )
+            .clicked();
+    });
+    asked
 }
 
 /// The boundary canvas, and what a click on it does.

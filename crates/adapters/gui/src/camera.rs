@@ -194,6 +194,18 @@ pub(crate) fn steer(
     camera.hold(steered)
 }
 
+/// Whether this frame's keys ask for the whole picture again.
+///
+/// Home is the key that goes back to the beginning, and the beginning of a
+/// picture is all of it. It commands only while no text field holds the
+/// keyboard: in a note or a search field, Home moves the caret.
+pub(crate) fn refit_requested(ctx: &egui::Context) -> bool {
+    if ctx.text_edit_focused() {
+        return false;
+    }
+    ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Home))
+}
+
 /// Where the camera must stand to put a subject in front of the reader, and
 /// None while it already does.
 ///

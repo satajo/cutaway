@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
-use cutaway_lenses::{BoundaryView, is_self_leaf};
+use cutaway_lenses::{BoundaryView, Detail, is_self_leaf};
 use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
@@ -42,6 +42,19 @@ struct Row {
     target: Option<Selection>,
 }
 
+/// How loudly a list speaks.
+///
+/// A list that answers what the reader selected carries the panel and reads
+/// as the way onward it is. A list that stands there whatever the reader
+/// does, such as what waits at a coarser detail or what falls outside every
+/// boundary, is background: dozens of loud rows drown the panel they only
+/// annotate. Both stay clickable; only their voice differs.
+#[derive(Clone, Copy)]
+enum Prominence {
+    Primary,
+    Quiet,
+}
+
 fn nothing_selected(ui: &mut egui::Ui, session: &mut Session) {
     ui.heading("Boundaries");
     let mut chosen = None;
@@ -60,7 +73,7 @@ fn nothing_selected(ui: &mut egui::Ui, session: &mut Session) {
                  They show at a coarser detail.",
                 view.coarse.len()
             ));
-            chosen = list(ui, &coarse_rows(view, &labels)).or(chosen);
+            chosen = list(ui, &coarse_rows(view, &labels), Prominence::Quiet).or(chosen);
         }
         if !view.unscoped.is_empty() {
             ui.separator();
@@ -69,7 +82,12 @@ fn nothing_selected(ui: &mut egui::Ui, session: &mut Session) {
                 "{} dependencies fall outside every boundary.",
                 view.unscoped.len()
             ));
-            chosen = list(ui, &unscoped_rows(view, &Labels::of(&session.graph))).or(chosen);
+            chosen = list(
+                ui,
+                &unscoped_rows(view, &Labels::of(&session.graph)),
+                Prominence::Quiet,
+            )
+            .or(chosen);
         }
     }
     if let Some(target) = chosen {
@@ -107,7 +125,10 @@ fn help(ui: &mut egui::Ui) {
         "Severed connections turn red, drawn ones green; the plan saves to \
          cutaway.json in the repository.",
     );
-    ui.label("Drag or scroll to pan, ctrl+scroll or pinch to zoom, double-click the background to refit.");
+    ui.label(
+        "Drag or scroll to pan, ctrl+scroll or pinch to zoom; press Home, click Fit, \
+         or double-click the background to bring the whole picture back.",
+    );
 }
 
 fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
@@ -125,14 +146,14 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     if !panel.contents.is_empty() {
         ui.separator();
         ui.label("Contains:");
-        chosen = list(ui, &panel.contents).or(chosen);
+        chosen = list(ui, &panel.contents, Prominence::Primary).or(chosen);
     }
     ui.separator();
     ui.label("Connections:");
     if panel.connections.is_empty() {
         ui.label("Nothing crosses this boundary.");
     } else {
-        chosen = list(ui, &panel.connections).or(chosen);
+        chosen = list(ui, &panel.connections, Prominence::Primary).or(chosen);
     }
     if let Some(target) = chosen {
         go_to(session, &target);
@@ -174,7 +195,7 @@ fn edge(ui: &mut egui::Ui, session: &mut Session, relation: &Relation) {
         panel.provenance.len()
     ));
     ui.small("Click a row to jump to its source.");
-    if let Some(target) = list(ui, &panel.provenance) {
+    if let Some(target) = list(ui, &panel.provenance, Prominence::Primary) {
         go_to(session, &target);
     }
 }
@@ -183,11 +204,12 @@ fn edge(ui: &mut egui::Ui, session: &mut Session, relation: &Relation) {
 /// picture follows, so the project stays whole while the boundary under
 /// study shows its parts. Double-clicking the boundary expands it too.
 fn detail_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
-    let Some(within) = session.detail_within(id) else {
+    let (Some(within), Ok(Scene { view, .. })) = (session.detail_within(id), &session.scene) else {
         return;
     };
+    let line = inside(&view.graph, &session.graph, id, within);
     ui.separator();
-    ui.label(format!("Shows: {}", detail::name(within).to_lowercase()));
+    ui.label(line);
     ui.horizontal(|ui| {
         if ui
             .add_enabled(within.deeper().is_some(), egui::Button::new("Expand"))
@@ -202,6 +224,30 @@ fn detail_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
             session.collapse(id);
         }
     });
+}
+
+/// What a boundary shows inside itself, in one line.
+///
+/// The detail governing a boundary answers what its contents would stand at,
+/// not whether the picture draws them: a package cut at packages "shows
+/// packages" and draws nothing within, which tells the reader nothing.
+/// Naming the detail is therefore reserved for a boundary the picture opens.
+/// A closed one says it is closed, and one holding nothing anywhere says
+/// that instead, because there is nothing for Expand to reach.
+fn inside(
+    view: &ArchitectureGraph,
+    graph: &ArchitectureGraph,
+    id: &ElementId,
+    within: Detail,
+) -> String {
+    if !focus::contents_of(view, id).is_empty() {
+        return format!("Shows: {}", detail::name(within).to_lowercase());
+    }
+    if focus::contents_of(graph, id).is_empty() {
+        "Nothing inside.".to_owned()
+    } else {
+        "Contents hidden. Expand to open.".to_owned()
+    }
 }
 
 fn note_editor(ui: &mut egui::Ui, session: &mut Session) {
@@ -222,13 +268,13 @@ fn go_to(session: &mut Session, target: &Selection) {
 
 /// Paints one list of rows and answers with the selection a click asked
 /// for. Rows past the cap collapse into a line that counts them.
-fn list(ui: &mut egui::Ui, rows: &[Row]) -> Option<Selection> {
+fn list(ui: &mut egui::Ui, rows: &[Row], prominence: Prominence) -> Option<Selection> {
     let (shown, held_back) = capped(rows);
     let mut chosen = None;
     for row in shown {
         match &row.target {
             Some(target) => {
-                if link(ui, &row.text).clicked() {
+                if link(ui, &row.text, prominence).clicked() {
                     chosen = Some(target.clone());
                 }
             }
@@ -252,14 +298,39 @@ fn capped<T>(rows: &[T]) -> (&[T], usize) {
 /// One clickable row. A boundary name can be long, and a wrapped row reads
 /// as two entries, so the row truncates instead and shows its whole text
 /// when the pointer rests on it.
-fn link(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let color = ui.visuals().hyperlink_color;
-    ui.add(
-        egui::Label::new(egui::RichText::new(text).color(color))
-            .truncate()
-            .sense(egui::Sense::click()),
-    )
-    .on_hover_cursor(egui::CursorIcon::PointingHand)
+///
+/// A quiet row reads in the colour of an aside until the pointer reaches it,
+/// and answers it with the link colour and an underline: the row must sit in
+/// the background and still promise it leads somewhere.
+fn link(ui: &mut egui::Ui, text: &str, prominence: Prominence) -> egui::Response {
+    let written = match prominence {
+        Prominence::Primary => egui::RichText::new(text),
+        Prominence::Quiet => egui::RichText::new(text).small(),
+    };
+    // The row decides its colour from its own hover, so it is laid out and
+    // sensed first and painted after, rather than added as a whole.
+    let (position, galley, response) = egui::Label::new(written)
+        .truncate()
+        .sense(egui::Sense::click())
+        .layout_in_ui(ui);
+    let linked = ui.visuals().hyperlink_color;
+    let (color, underline) = match prominence {
+        Prominence::Primary => (linked, egui::Stroke::NONE),
+        Prominence::Quiet if response.hovered() => (
+            linked,
+            egui::Stroke::new(ui.style().interact(&response).fg_stroke.width, linked),
+        ),
+        Prominence::Quiet => (ui.visuals().weak_text_color(), egui::Stroke::NONE),
+    };
+    let elided = galley.elided;
+    ui.painter()
+        .add(egui::epaint::TextShape::new(position, galley, color).with_underline(underline));
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if elided {
+        response.on_hover_text(text)
+    } else {
+        response
+    }
 }
 
 /// What the panel says about a selected boundary.
@@ -729,6 +800,37 @@ mod tests {
         for row in &rows {
             assert_eq!(row.target, Some(Selection::Node(id("package:a"))));
         }
+    }
+
+    #[test]
+    fn an_opened_boundary_names_the_detail_its_contents_stand_at() {
+        let graph = graph();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        assert_eq!(
+            inside(&view.graph, &graph, &id("package:a"), Detail::Modules),
+            "Shows: modules"
+        );
+    }
+
+    #[test]
+    fn a_boundary_drawing_nothing_of_what_it_holds_says_it_is_closed() {
+        let graph = graph();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
+        assert_eq!(
+            inside(&view.graph, &graph, &id("package:a"), Detail::Packages),
+            "Contents hidden. Expand to open.",
+            "a package cut at packages holds modules the picture does not draw"
+        );
+    }
+
+    #[test]
+    fn a_boundary_holding_nothing_anywhere_says_so() {
+        let graph = graph();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Items)).unwrap();
+        assert_eq!(
+            inside(&view.graph, &graph, &id("a/two#type:X"), Detail::Items),
+            "Nothing inside."
+        );
     }
 
     #[test]
