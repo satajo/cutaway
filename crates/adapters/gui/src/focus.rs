@@ -22,15 +22,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation, RelationKind};
 
-/// How strongly one element or edge paints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How strongly one element or edge paints, ordered weakest to strongest: a
+/// box that stands for several elements paints as the strongest of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Strength {
-    /// The selection and what it reaches: full color.
-    Focused,
+    /// Everything the selection does not reach.
+    Faded,
     /// The frames around focused elements: readable, but not a subject.
     Context,
-    /// Everything else.
-    Faded,
+    /// The selection and what it reaches: full color.
+    Focused,
 }
 
 /// What the user selected.
@@ -206,7 +207,10 @@ fn ancestors_of<'a>(
     context
 }
 
-fn children_of(view: &ArchitectureGraph) -> BTreeMap<&ElementId, Vec<&ElementId>> {
+/// Boundary -> the boundaries it directly contains. A walk that descends the
+/// containment of a whole graph asks this once instead of asking
+/// [`contents_of`] per step.
+pub(crate) fn children_of(view: &ArchitectureGraph) -> BTreeMap<&ElementId, Vec<&ElementId>> {
     let mut children: BTreeMap<&ElementId, Vec<&ElementId>> = BTreeMap::new();
     for relation in view.relations() {
         if relation.kind == RelationKind::Contains {

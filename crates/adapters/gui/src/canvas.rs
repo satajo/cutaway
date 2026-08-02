@@ -12,13 +12,14 @@ use cutaway_lenses::is_self_leaf;
 use eframe::egui::emath::TSTransform;
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Response, Sense, Shape,
-    Stroke, StrokeKind, Ui, pos2, vec2,
+    Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
 use crate::focus::{Focus, Selected, Strength, focus_of};
 use crate::label::{Label, Labels};
 use crate::layout::{HEADER, Layout};
 use crate::routing::{self, Route, Scope};
+use crate::summary::{Block, Summary, summarize};
 
 /// How one dependency edge is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +67,13 @@ pub const DRAWN: Color32 = Color32::from_rgb(70, 165, 80);
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 6.0;
+/// The size a label paints at while the camera stands at 1:1.
+pub(crate) const LABEL_SIZE: f32 = 13.0;
+/// The smallest font that still reads: below this a label paints texture
+/// instead of a name, so it paints nothing at all.
+pub(crate) const LEGIBLE_FONT: f32 = 4.0;
+/// The thinnest a stroke ever draws, however far the camera pulls back.
+pub(crate) const HAIRLINE: f32 = 0.75;
 /// Screen-pixel distance within which a pointer catches an edge.
 const EDGE_REACH: f32 = 8.0;
 /// Straight segments a curve flattens into for drawing and hit-testing.
@@ -101,6 +109,13 @@ const SELECTED_WIDTH: f32 = 1.5;
 /// a dense boundary would otherwise drown the crossings around it.
 const INTRA_WIDTH: f32 = 0.75;
 const INTRA: f32 = 0.6;
+/// Color strength of a summary block's fill: far past the wash of a frame
+/// that shows its parts, so a block reads as the one solid thing it is.
+const BLOCK: f32 = 0.22;
+/// The size of a block's count line, in shares of the name above it.
+const COUNT_SIZE: f32 = 0.8;
+/// The margin a summary block keeps around its text.
+const BLOCK_MARGIN: f32 = 6.0;
 
 pub fn show(
     ui: &mut Ui,
@@ -122,12 +137,17 @@ pub fn show(
         *current
     };
 
-    let touched = interact_nodes(ui, content.layout, camera, viewport);
+    // What the magnification has shrunk past reading decides before anything
+    // paints, hit-tests, or routes: the picture that follows is the one that
+    // stands, boxes and edges alike.
+    let summary = summarize(content.view, content.layout, camera.scaling);
+    let touched = interact_nodes(ui, content.layout, &summary, camera, viewport);
     let hovered_node = touched.hovered;
 
     let routes = routing::routes(
         content.view,
         content.layout,
+        summary.stands_for(),
         content.edges.iter().map(|edge| &edge.relation),
     );
     let curves: Vec<Option<Vec<Pos2>>> = routes
@@ -156,7 +176,15 @@ pub fn show(
         describe_edge(ui, content, index);
     }
 
-    paint(ui, content, camera, viewport, &drawn, hovered_node.as_ref());
+    paint(
+        ui,
+        content,
+        camera,
+        viewport,
+        &drawn,
+        &summary,
+        hovered_node.as_ref(),
+    );
 
     // A double click also reports as a click, and its first click already
     // selected the node; the deeper answer is the one that stands.
@@ -293,18 +321,18 @@ struct Touched {
     double_clicked: Option<ElementId>,
 }
 
-/// Registers a click-and-hover area for every node. Leaves register after
-/// containers, so they win overlapping hits; a container answers only on
-/// its header strip. The nodes register after the background, so a click
-/// that lands on a node never reaches the background - which is what keeps
-/// a double-clicked node out of the background's refit.
-fn interact_nodes(ui: &mut Ui, layout: &Layout, camera: TSTransform, viewport: Rect) -> Touched {
-    let mut targets: Vec<(&ElementId, Rect)> = layout
-        .containers
-        .iter()
-        .map(|frame| (&frame.id, header_of(layout.rects[&frame.id])))
-        .collect();
-    targets.extend(layout.leaves.iter().map(|id| (id, layout.rects[id])));
+/// Registers a click-and-hover area for every node the picture paints. The
+/// nodes register after the background, so a click that lands on a node
+/// never reaches the background - which is what keeps a double-clicked node
+/// out of the background's refit.
+fn interact_nodes(
+    ui: &mut Ui,
+    layout: &Layout,
+    summary: &Summary,
+    camera: TSTransform,
+    viewport: Rect,
+) -> Touched {
+    let targets = targets(layout, summary);
 
     let mut touched = Touched {
         hovered: None,
@@ -332,6 +360,36 @@ fn interact_nodes(ui: &mut Ui, layout: &Layout, camera: TSTransform, viewport: R
     touched
 }
 
+/// What the pointer can touch, in the order the areas register: containers
+/// first, so a leaf inside one wins the overlapping hit. A container answers
+/// on its header strip alone, because its interior belongs to its children;
+/// a summary block has no interior to give away, so it answers over its
+/// whole box, exactly as a leaf does. Nothing a block stands for offers the
+/// pointer anything at all.
+fn targets<'a>(layout: &'a Layout, summary: &Summary) -> Vec<(&'a ElementId, Rect)> {
+    let mut targets: Vec<(&ElementId, Rect)> = layout
+        .containers
+        .iter()
+        .filter(|frame| !summary.hides(&frame.id))
+        .map(|frame| {
+            let rect = layout.rects[&frame.id];
+            let touchable = match summary.block(&frame.id) {
+                Some(_) => rect,
+                None => header_of(rect),
+            };
+            (&frame.id, touchable)
+        })
+        .collect();
+    targets.extend(
+        layout
+            .leaves
+            .iter()
+            .filter(|id| !summary.hides(id))
+            .map(|id| (id, layout.rects[id])),
+    );
+    targets
+}
+
 /// The clickable strip along a container's top edge.
 fn header_of(rect: Rect) -> Rect {
     Rect::from_min_size(rect.min, vec2(rect.width(), HEADER))
@@ -351,12 +409,12 @@ struct Paint<'a> {
 impl Paint<'_> {
     /// The label font at the current zoom; None when too small to read.
     fn font(&self) -> Option<FontId> {
-        let size = 13.0 * self.camera.scaling;
-        (size >= 4.0).then(|| FontId::proportional(size))
+        let size = LABEL_SIZE * self.camera.scaling;
+        (size >= LEGIBLE_FONT).then(|| FontId::proportional(size))
     }
 
     fn stroke_width(&self, width: f32) -> f32 {
-        (width * self.camera.scaling).max(0.75)
+        (width * self.camera.scaling).max(HAIRLINE)
     }
 
     fn element(&self, id: &ElementId) -> Strength {
@@ -404,6 +462,7 @@ fn paint(
     camera: TSTransform,
     viewport: Rect,
     drawn: &Drawn,
+    summary: &Summary,
     hovered_node: Option<&ElementId>,
 ) {
     let visuals = ui.visuals();
@@ -416,9 +475,9 @@ fn paint(
         labels: Labels::of(content.view),
         focus: focus(content),
     };
-    paint_containers(&paint, content, hovered_node);
+    paint_containers(&paint, content, summary, hovered_node);
     paint_edges(&paint, content, drawn);
-    paint_leaves(&paint, content, hovered_node);
+    paint_leaves(&paint, content, summary, hovered_node);
 }
 
 /// The selection's neighborhood. None when nothing is selected: then
@@ -436,11 +495,25 @@ fn focus<'a>(content: &Content<'a>) -> Option<Focus<'a>> {
     ))
 }
 
-fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&ElementId>) {
+fn paint_containers(
+    paint: &Paint<'_>,
+    content: &Content<'_>,
+    summary: &Summary,
+    hovered: Option<&ElementId>,
+) {
     for frame in &content.layout.containers {
         let id = &frame.id;
+        if summary.hides(id) {
+            continue;
+        }
         let rect = paint.camera.mul_rect(content.layout.rects[id]);
-        let strength = paint.element(id);
+        let block = summary.block(id);
+        // A block is the only mark its contents have left, so it paints as
+        // strongly as the strongest thing it stands for.
+        let strength = match block {
+            Some(block) => block.strength(|inside| paint.element(inside)),
+            None => paint.element(id),
+        };
         let selected = content.selected_node == Some(id) || content.draw_source == Some(id);
         let width = if selected {
             2.5
@@ -449,26 +522,88 @@ fn paint_containers(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&E
         } else {
             1.0
         };
+        let border = Stroke::new(
+            paint.stroke_width(width),
+            shade(paint.base.gamma_multiply(0.6), strength),
+        );
+        let fill = match block {
+            Some(_) => paint.base.gamma_multiply(BLOCK),
+            None => paint.wash(frame.depth),
+        };
         paint.painter.rect(
             rect,
             CornerRadius::same(6),
-            shade(paint.wash(frame.depth), strength),
-            Stroke::new(
-                paint.stroke_width(width),
-                shade(paint.base.gamma_multiply(0.6), strength),
-            ),
+            shade(fill, strength),
+            border,
             StrokeKind::Middle,
         );
-        if let Some(font) = paint.font() {
-            paint.painter.text(
-                rect.min + vec2(10.0, 6.0) * paint.camera.scaling,
-                Align2::LEFT_TOP,
-                paint.labels.label(id).text(),
-                font,
-                shade(paint.base, strength),
-            );
+        match block {
+            Some(block) => paint_block_text(paint, rect, id, block, strength),
+            None => {
+                if let Some(font) = paint.font() {
+                    paint.painter.text(
+                        rect.min + vec2(10.0, 6.0) * paint.camera.scaling,
+                        Align2::LEFT_TOP,
+                        paint.labels.label(id).text(),
+                        font,
+                        shade(paint.base, strength),
+                    );
+                }
+            }
         }
     }
+}
+
+/// What a summary block says: the frame's name across the middle, and under
+/// it how many boundaries the block hides. Each line paints only while the
+/// block has room for it, so a block too small even for its name reads as a
+/// solid mass - which still tells the reader that something sits there.
+fn paint_block_text(
+    paint: &Paint<'_>,
+    rect: Rect,
+    id: &ElementId,
+    block: &Block,
+    strength: Strength,
+) {
+    let Some(font) = paint.font() else {
+        return;
+    };
+    let named = shade(paint.base, strength);
+    let name = paint
+        .painter
+        .layout_no_wrap(paint.labels.label(id).text(), font.clone(), named);
+    if !fits(name.size(), rect) {
+        return;
+    }
+    let center = rect.center();
+    let counted = shade(paint.base.gamma_multiply(GLYPH), strength);
+    let count = (block.inside > 0).then(|| {
+        paint.painter.layout_no_wrap(
+            format!("{} inside", block.inside),
+            FontId::proportional(font.size * COUNT_SIZE),
+            counted,
+        )
+    });
+    let (name_size, count_size) = (name.size(), count.as_ref().map_or(Vec2::ZERO, |c| c.size()));
+    let both = vec2(name_size.x.max(count_size.x), name_size.y + count_size.y);
+    let Some(count) = count.filter(|_| fits(both, rect)) else {
+        paint.painter.galley(center - name_size / 2.0, name, named);
+        return;
+    };
+    let top = center.y - both.y / 2.0;
+    paint
+        .painter
+        .galley(pos2(center.x - name_size.x / 2.0, top), name, named);
+    paint.painter.galley(
+        pos2(center.x - count_size.x / 2.0, top + name_size.y),
+        count,
+        counted,
+    );
+}
+
+/// Whether a run of text fits inside a summary block, its margin included.
+fn fits(text: Vec2, rect: Rect) -> bool {
+    text.x + 2.0 * BLOCK_MARGIN <= rect.width() && text.y + 2.0 * BLOCK_MARGIN <= rect.height()
 }
 
 fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
@@ -534,8 +669,16 @@ fn dim(color: Color32, scope: Scope) -> Color32 {
     }
 }
 
-fn paint_leaves(paint: &Paint<'_>, content: &Content<'_>, hovered: Option<&ElementId>) {
+fn paint_leaves(
+    paint: &Paint<'_>,
+    content: &Content<'_>,
+    summary: &Summary,
+    hovered: Option<&ElementId>,
+) {
     for id in &content.layout.leaves {
+        if summary.hides(id) {
+            continue;
+        }
         let rect = paint.camera.mul_rect(content.layout.rects[id]);
         let strength = paint.element(id);
         let selected = content.selected_node == Some(id) || content.draw_source == Some(id);
@@ -690,10 +833,98 @@ pub(crate) fn world_bounds(layout: &Layout) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use cutaway_architecture::{Element, ElementKind, ElementName, RelationKind};
+
     use super::*;
+    use crate::layout::Frame;
 
     fn viewport() -> Rect {
         Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))
+    }
+
+    fn id(text: &str) -> ElementId {
+        ElementId::new(text).unwrap()
+    }
+
+    /// One frame around two leaves, with the boxes the layout would give
+    /// them.
+    fn frame_of_leaves() -> (ArchitectureGraph, Layout) {
+        let mut graph = ArchitectureGraph::new();
+        for element in ["package:a", "a/one", "a/two"] {
+            graph
+                .add_element(Element {
+                    id: id(element),
+                    name: ElementName::new(element).unwrap(),
+                    kind: ElementKind::Module,
+                })
+                .unwrap();
+        }
+        for inner in ["a/one", "a/two"] {
+            graph
+                .add_relation(Relation {
+                    from: id("package:a"),
+                    to: id(inner),
+                    kind: RelationKind::Contains,
+                })
+                .unwrap();
+        }
+        let layout = Layout {
+            rects: BTreeMap::from([
+                (
+                    id("package:a"),
+                    Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 160.0)),
+                ),
+                (
+                    id("a/one"),
+                    Rect::from_min_size(pos2(20.0, 40.0), vec2(100.0, 30.0)),
+                ),
+                (
+                    id("a/two"),
+                    Rect::from_min_size(pos2(20.0, 100.0), vec2(100.0, 30.0)),
+                ),
+            ]),
+            containers: vec![Frame {
+                id: id("package:a"),
+                depth: 0,
+            }],
+            leaves: vec![id("a/one"), id("a/two")],
+        };
+        (graph, layout)
+    }
+
+    #[test]
+    fn no_interaction_target_hides_under_a_summary_block() {
+        let (view, layout) = frame_of_leaves();
+        let summary = summarize(&view, &layout, 0.1);
+
+        let targets = targets(&layout, &summary);
+        assert_eq!(
+            targets.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![&id("package:a")],
+            "the block alone answers the pointer"
+        );
+        assert_eq!(
+            targets[0].1,
+            layout.rects[&id("package:a")],
+            "a block answers over its whole box, as a leaf does"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_shows_its_parts_answers_on_its_header_alone() {
+        let (view, layout) = frame_of_leaves();
+        let summary = summarize(&view, &layout, 1.0);
+
+        let targets = targets(&layout, &summary);
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].0, &id("package:a"));
+        assert_eq!(
+            targets[0].1,
+            header_of(layout.rects[&id("package:a")]),
+            "a frame around its parts answers on its header strip alone"
+        );
     }
 
     #[test]

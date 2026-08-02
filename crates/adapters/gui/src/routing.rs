@@ -50,15 +50,22 @@ const REACH: f32 = 0.4;
 const MIN_REACH: f32 = 24.0;
 
 /// The route of every edge, in the order the edges arrive. An edge whose
-/// endpoints the layout does not place has no route.
+/// endpoints the layout does not place has no route, and neither has one
+/// whose ends attach to the same box.
+///
+/// `stands_for` names, for every element the picture does not paint, the box
+/// that stands for it: an edge into such an element lands on that box
+/// instead. The routing does not ask why an element is unpainted, and an
+/// empty map draws every edge to the box it names.
 pub(crate) fn routes<'a>(
     view: &ArchitectureGraph,
     layout: &Layout,
+    stands_for: &'a BTreeMap<ElementId, ElementId>,
     edges: impl IntoIterator<Item = &'a Relation>,
 ) -> Vec<Option<Route>> {
-    let edges: Vec<&Relation> = edges.into_iter().collect();
+    let edges: Vec<&'a Relation> = edges.into_iter().collect();
     let scopes = scopes(view, &edges);
-    curves(layout, &edges)
+    curves(layout, stands_for, &edges)
         .into_iter()
         .zip(scopes)
         .map(|(curve, scope)| curve.map(|curve| Route { curve, scope }))
@@ -109,28 +116,37 @@ struct Slot {
     end: End,
 }
 
-fn curves(layout: &Layout, edges: &[&Relation]) -> Vec<Option<[Pos2; 4]>> {
+fn curves<'a>(
+    layout: &Layout,
+    stands_for: &'a BTreeMap<ElementId, ElementId>,
+    edges: &[&'a Relation],
+) -> Vec<Option<[Pos2; 4]>> {
     let mut plans: Vec<Option<Plan>> = Vec::with_capacity(edges.len());
-    let mut claims: BTreeMap<(&ElementId, Side), Vec<Slot>> = BTreeMap::new();
+    let mut claims: BTreeMap<(&'a ElementId, Side), Vec<Slot>> = BTreeMap::new();
     for (index, edge) in edges.iter().enumerate() {
-        let (Some(from), Some(to)) = (layout.rects.get(&edge.from), layout.rects.get(&edge.to))
-        else {
+        let (Some((tail, from)), Some((head, to))) = (
+            attachment(layout, stands_for, &edge.from),
+            attachment(layout, stands_for, &edge.to),
+        ) else {
             plans.push(None);
             continue;
         };
-        let Some(sides) = facing_sides(*from, *to) else {
-            plans.push(Some(Plan::Straight(straight(*from, *to))));
+        // One box carrying both ends already stands for the whole
+        // dependency, and a line from a box to itself says nothing.
+        if tail == head {
+            plans.push(None);
+            continue;
+        }
+        let Some(sides) = facing_sides(from, to) else {
+            plans.push(Some(Plan::Straight(straight(from, to))));
             continue;
         };
-        claims
-            .entry((&edge.from, sides.from))
-            .or_default()
-            .push(Slot {
-                key: sides.from_key,
-                edge: index,
-                end: End::From,
-            });
-        claims.entry((&edge.to, sides.to)).or_default().push(Slot {
+        claims.entry((tail, sides.from)).or_default().push(Slot {
+            key: sides.from_key,
+            edge: index,
+            end: End::From,
+        });
+        claims.entry((head, sides.to)).or_default().push(Slot {
             key: sides.to_key,
             edge: index,
             end: End::To,
@@ -151,6 +167,18 @@ fn curves(layout: &Layout, edges: &[&Relation]) -> Vec<Option<[Pos2; 4]>> {
             }
         })
         .collect()
+}
+
+/// The box one end of an edge attaches to, and where that box sits: the
+/// element's own box, or the one that stands for it while the picture leaves
+/// it unpainted. None while no box of either name is placed.
+fn attachment<'a>(
+    layout: &Layout,
+    stands_for: &'a BTreeMap<ElementId, ElementId>,
+    end: &'a ElementId,
+) -> Option<(&'a ElementId, Rect)> {
+    let attached = stands_for.get(end).unwrap_or(end);
+    Some((attached, *layout.rects.get(attached)?))
 }
 
 /// Places the edges that claim one side of one box evenly along it. The
@@ -353,12 +381,76 @@ mod tests {
         }
     }
 
+    /// A picture that paints every box it names.
+    fn nothing_stands_for_anything() -> BTreeMap<ElementId, ElementId> {
+        BTreeMap::new()
+    }
+
     fn drawn(layout: &Layout, edges: &[Relation]) -> Vec<[Pos2; 4]> {
         let edges: Vec<&Relation> = edges.iter().collect();
-        curves(layout, &edges)
+        curves(layout, &nothing_stands_for_anything(), &edges)
             .into_iter()
             .map(|curve| curve.expect("every box in this layout is placed"))
             .collect()
+    }
+
+    /// A wide box with two small boxes inside it, and one box to the left of
+    /// all three.
+    fn frame_and_neighbor() -> Layout {
+        boxes(&[
+            (
+                "neighbor",
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 40.0)),
+            ),
+            (
+                "frame",
+                Rect::from_min_max(pos2(300.0, 0.0), pos2(400.0, 200.0)),
+            ),
+            (
+                "inside",
+                Rect::from_min_max(pos2(320.0, 20.0), pos2(380.0, 60.0)),
+            ),
+            (
+                "beside",
+                Rect::from_min_max(pos2(320.0, 120.0), pos2(380.0, 160.0)),
+            ),
+        ])
+    }
+
+    fn hidden_in_the_frame() -> BTreeMap<ElementId, ElementId> {
+        BTreeMap::from([(id("inside"), id("frame")), (id("beside"), id("frame"))])
+    }
+
+    #[test]
+    fn an_edge_into_a_summarized_frame_lands_on_its_border() {
+        let layout = frame_and_neighbor();
+        let edges = [depends("neighbor", "inside")];
+        let borrowed: Vec<&Relation> = edges.iter().collect();
+
+        let curve = curves(&layout, &hidden_in_the_frame(), &borrowed)[0]
+            .expect("the frame that stands for the endpoint is placed");
+        let arrival = curve[3];
+        assert!(
+            (arrival.x - 300.0).abs() < 0.1,
+            "the edge lands on the left border of the frame, not on the box it hides: {arrival:?}"
+        );
+        assert!(
+            (0.0..=200.0).contains(&arrival.y),
+            "the arrival sits along that border: {arrival:?}"
+        );
+    }
+
+    #[test]
+    fn an_edge_between_two_boxes_of_one_summarized_frame_is_not_drawn() {
+        let layout = frame_and_neighbor();
+        let edges = [depends("inside", "beside")];
+        let borrowed: Vec<&Relation> = edges.iter().collect();
+
+        assert_eq!(
+            curves(&layout, &hidden_in_the_frame(), &borrowed)[0],
+            None,
+            "the frame already stands for both ends"
+        );
     }
 
     /// Three boxes on the left, stacked top to bottom, and one tall box to

@@ -23,6 +23,7 @@ mod label;
 mod layout;
 mod palette;
 mod routing;
+mod summary;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

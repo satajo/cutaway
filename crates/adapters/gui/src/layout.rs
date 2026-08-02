@@ -19,7 +19,9 @@ use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 use crate::label::Labels;
 
-const NODE_HEIGHT: f32 = 30.0;
+/// The height of the smallest box a leaf ever gets: room for one label and
+/// the space around it.
+pub(crate) const NODE_HEIGHT: f32 = 30.0;
 const PADDING: f32 = 14.0;
 pub(crate) const HEADER: f32 = 26.0;
 const GAP: f32 = 16.0;
