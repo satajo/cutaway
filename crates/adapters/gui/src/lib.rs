@@ -205,21 +205,10 @@ impl Session {
             self.select(Some(selection));
             self.reveal(&shown);
         } else {
+            // Each detail lays the picture out anew, so the old camera
+            // coordinates point at arbitrary new content: without a subject
+            // to follow, only a fresh fit shows something meaningful.
             self.select(None);
-            self.keep_or_refit();
-        }
-    }
-
-    /// Drops the camera wherever the new picture no longer meets what the
-    /// camera looks at; the canvas then fits the picture into view again.
-    fn keep_or_refit(&mut self) {
-        let Some(camera) = self.camera else {
-            return;
-        };
-        let held = self.scene.as_ref().is_ok_and(|scene| {
-            continuity::camera_holds(camera, self.viewport, canvas::world_bounds(&scene.layout))
-        });
-        if !held {
             self.camera = None;
         }
     }

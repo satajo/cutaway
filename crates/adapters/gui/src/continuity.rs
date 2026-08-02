@@ -7,16 +7,14 @@
 //! a rolled-up connection remembers the concrete relations behind it, so
 //! both subjects can be followed from one cut into the next.
 //!
-//! This module answers where a selection reappears, and whether the camera
-//! still looks at the picture at all. Every answer is a pure function of the
-//! two views and the full graph; the shell only applies them.
+//! This module answers where a selection reappears. Every answer is a pure
+//! function of the two views and the full graph; the shell only applies
+//! them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
 use cutaway_lenses::{BoundaryView, is_self_leaf};
-use eframe::egui::Rect;
-use eframe::egui::emath::TSTransform;
 
 use crate::Selection;
 use crate::focus;
@@ -130,39 +128,10 @@ fn most_alike<'a>(
         .map(|(_, _, edge)| edge)
 }
 
-/// How much of the smaller of the two rectangles the camera and the picture
-/// must share for the camera to have kept its subject.
-const MEANINGFUL_OVERLAP: f32 = 0.1;
-
-/// Whether the camera still looks at the picture.
-///
-/// A picture changes size with its detail: the items of a project dwarf the
-/// packages of the same project. A camera left where it stood can therefore
-/// end up over empty space, and a reader who asked for more detail would get
-/// a blank canvas. The camera keeps its place while what it shows and what
-/// the picture occupies still share a tenth of the smaller of the two, and
-/// gives way to a fresh fit otherwise.
-pub(crate) fn camera_holds(camera: TSTransform, viewport: Rect, world: Rect) -> bool {
-    if !camera.is_valid() || !viewport.is_positive() || !world.is_positive() {
-        return false;
-    }
-    let looked_at = camera.inverse().mul_rect(viewport);
-    let shared = looked_at.intersect(world);
-    if !shared.is_positive() {
-        return false;
-    }
-    area(shared) >= MEANINGFUL_OVERLAP * area(looked_at).min(area(world))
-}
-
-fn area(rect: Rect) -> f32 {
-    rect.width() * rect.height()
-}
-
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{Element, ElementKind, ElementName, RelationKind};
     use cutaway_lenses::{Cut, Detail, boundary_view};
-    use eframe::egui::{pos2, vec2};
 
     use super::*;
 
@@ -411,56 +380,5 @@ mod tests {
     fn a_connection_sharing_nothing_answers_nothing() {
         let candidates = BTreeMap::from([(depends("a", "b"), behind([depends("x", "y")]))]);
         assert_eq!(most_alike(&candidates, &behind([depends("p", "q")])), None);
-    }
-
-    fn viewport() -> Rect {
-        Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))
-    }
-
-    #[test]
-    fn the_camera_refits_only_when_it_would_stare_at_nothing() {
-        let camera = TSTransform::IDENTITY;
-        let met = Rect::from_min_size(pos2(100.0, 100.0), vec2(600.0, 600.0));
-        assert!(camera_holds(camera, viewport(), met));
-
-        let far_away = Rect::from_min_size(pos2(5000.0, 5000.0), vec2(600.0, 600.0));
-        assert!(!camera_holds(camera, viewport(), far_away));
-    }
-
-    #[test]
-    fn a_camera_grazing_the_corner_of_a_picture_refits() {
-        let grazed = Rect::from_min_size(pos2(390.0, 290.0), vec2(600.0, 600.0));
-        assert!(!camera_holds(TSTransform::IDENTITY, viewport(), grazed));
-    }
-
-    #[test]
-    fn a_camera_showing_the_whole_of_a_small_picture_keeps_its_place() {
-        let small = Rect::from_min_size(pos2(150.0, 120.0), vec2(40.0, 30.0));
-        assert!(camera_holds(TSTransform::IDENTITY, viewport(), small));
-    }
-
-    #[test]
-    fn a_zoomed_camera_reads_the_world_it_magnifies() {
-        // Twice magnified, the screen shows a quarter of the world it did.
-        let camera = TSTransform::from_scaling(2.0);
-        let inside = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 150.0));
-        assert!(camera_holds(camera, viewport(), inside));
-
-        let beyond = Rect::from_min_size(pos2(1000.0, 1000.0), vec2(200.0, 150.0));
-        assert!(!camera_holds(camera, viewport(), beyond));
-    }
-
-    #[test]
-    fn a_camera_without_a_viewport_or_a_picture_refits() {
-        assert!(!camera_holds(
-            TSTransform::IDENTITY,
-            Rect::NOTHING,
-            viewport()
-        ));
-        assert!(!camera_holds(
-            TSTransform::IDENTITY,
-            viewport(),
-            Rect::NOTHING
-        ));
     }
 }
