@@ -9,22 +9,22 @@
 
 mod canvas;
 mod focus;
+mod inspector;
 mod label;
 mod layout;
 mod routing;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use cutaway_architecture::{ArchitectureGraph, Element, ElementId, Relation, RelationKind};
-use cutaway_lenses::{BoundaryView, Detail, boundary_view, is_self_leaf};
+use cutaway_lenses::{BoundaryView, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{Note, Plan, ProposedChange, Subject};
-use eframe::egui::{self, emath::TSTransform};
+use eframe::egui::{self, Rect, emath::TSTransform};
 
 use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual};
-use crate::label::kind_symbol;
 use crate::layout::Layout;
 
 /// Everything the GUI needs about one opened project. The composition root
@@ -80,6 +80,13 @@ struct Session {
     weights: BTreeMap<ElementId, usize>,
     /// World-to-screen camera; None until a frame fits the graph into view.
     camera: Option<TSTransform>,
+    /// The screen rectangle the canvas painted into last. The canvas knows
+    /// the viewport and the inspector does not, yet a selection made in the
+    /// inspector must land inside it; the canvas therefore records the
+    /// rectangle here every frame. The inspector paints before the canvas,
+    /// so it reveals with the rectangle of the previous frame - the same
+    /// one, unless the window resized in between.
+    viewport: Rect,
     selection: Option<Selection>,
     note_draft: String,
     drawing: bool,
@@ -98,6 +105,7 @@ impl Session {
             scene: Err("not built yet".to_owned()),
             weights,
             camera: None,
+            viewport: Rect::NOTHING,
             selection: None,
             note_draft: String::new(),
             drawing: false,
@@ -219,6 +227,25 @@ impl Session {
             .map(|s| self.current_note_text(s))
             .unwrap_or_default();
         self.selection = selection;
+    }
+
+    /// Moves the picture until the element is on screen, at the current
+    /// magnification: a selection made beside the picture must be findable
+    /// in it. An element already on screen moves nothing.
+    fn reveal(&mut self, id: &ElementId) {
+        let Some(camera) = self.camera else {
+            return;
+        };
+        let Ok(scene) = &self.scene else {
+            return;
+        };
+        let Some(rect) = scene.layout.rects.get(id) else {
+            return;
+        };
+        let shift = canvas::reveal_shift(self.viewport, camera.mul_rect(*rect));
+        if let (Some(shift), Some(camera)) = (shift, self.camera.as_mut()) {
+            camera.translation += shift;
+        }
     }
 
     fn save_plan(&mut self) {
@@ -474,11 +501,12 @@ impl eframe::App for CutawayApp {
                 Some(Err(reason)) => {
                     ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
                 }
-                Some(Ok(session)) => inspector(ui, session),
+                Some(Ok(session)) => inspector::show(ui, session),
             });
 
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(Ok(session)) = &mut self.session {
+                session.viewport = ui.max_rect();
                 match &session.scene {
                     Err(reason) => {
                         ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
@@ -510,189 +538,6 @@ impl eframe::App for CutawayApp {
             }
         });
     }
-}
-
-fn inspector(ui: &mut egui::Ui, session: &mut Session) {
-    match session.selection.clone() {
-        None => {
-            ui.heading("Boundaries");
-            if let Ok(Scene { view, .. }) = &session.scene {
-                ui.label(format!(
-                    "{} boundaries, {} connections.",
-                    view.graph.elements().count(),
-                    view.provenance.len()
-                ));
-                if !view.coarse.is_empty() {
-                    ui.label(format!(
-                        "{} connections name a boundary with visible children as a \
-                         whole; they show at a coarser detail.",
-                        view.coarse.len()
-                    ));
-                }
-                if !view.unscoped.is_empty() {
-                    ui.label(format!(
-                        "{} dependencies fall outside every boundary.",
-                        view.unscoped.len()
-                    ));
-                }
-            }
-            ui.separator();
-            ui.label("Select a node or a connection to annotate it. Selecting a boundary keeps everything inside it, and every dependency that crosses its border, at full strength.");
-            ui.label("A box grows with the number of concepts inside it.");
-            ui.label("Severed connections turn red, drawn ones green; the plan saves to cutaway.json in the repository.");
-            ui.label("Drag or scroll to pan, ctrl+scroll or pinch to zoom, double-click the background to refit.");
-        }
-        Some(Selection::Node(id)) => {
-            let (name, kind) = session.element_of(&id).map_or_else(
-                || (id.to_string(), String::new()),
-                |element| {
-                    (
-                        element.name.to_string(),
-                        format!("{} ", kind_symbol(element.kind)),
-                    )
-                },
-            );
-            ui.heading(format!("{kind}{name}"));
-            note_editor(ui, session);
-            boundary_dependencies(ui, session, &id);
-        }
-        Some(Selection::Edge(relation)) => {
-            ui.heading(format!(
-                "{} → {}",
-                element_name(session, &relation.from),
-                element_name(session, &relation.to)
-            ));
-            match session.status_of(&relation) {
-                EdgeStatus::Existing => {
-                    ui.label("Existing dependency.");
-                    if ui.button("Sever").clicked() {
-                        session.sever(&relation);
-                    }
-                }
-                EdgeStatus::Severed => {
-                    ui.colored_label(canvas::SEVERED, "Planned for removal.");
-                    if ui.button("Restore").clicked() {
-                        session.restore(&relation);
-                    }
-                }
-                EdgeStatus::Drawn => {
-                    ui.colored_label(canvas::DRAWN, "Planned addition.");
-                    if ui.button("Erase").clicked() {
-                        session.sever(&relation);
-                    }
-                }
-            }
-            note_editor(ui, session);
-            if let Ok(Scene { view, .. }) = &session.scene
-                && let Some(underlying) = view.provenance.get(&relation)
-            {
-                ui.separator();
-                ui.label(format!(
-                    "Stands for {} concrete dependencies:",
-                    underlying.len()
-                ));
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for concrete in underlying {
-                        ui.small(format!(
-                            "{} → {}",
-                            element_name(session, &concrete.from),
-                            element_name(session, &concrete.to)
-                        ));
-                    }
-                });
-            }
-        }
-    }
-}
-
-/// What a whole boundary depends on. No drawn edge touches a frame - edges
-/// attach to leaves - so the frame's own answer is the rolled-up edges that
-/// cross its border, gathered by the partner on the other side.
-fn boundary_dependencies(ui: &mut egui::Ui, session: &Session, id: &ElementId) {
-    let Ok(Scene { view, .. }) = &session.scene else {
-        return;
-    };
-    if !focus::is_frame(&view.graph, id) {
-        return;
-    }
-    let crossing = crossings(view, &focus::subtree_of(&view.graph, id));
-    ui.separator();
-    if crossing.outward.is_empty() && crossing.inward.is_empty() {
-        ui.label("Nothing crosses this boundary.");
-        return;
-    }
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for (partner, concrete) in &crossing.outward {
-            ui.label(format!(
-                "Depends on: {} ({concrete} concrete)",
-                partner_name(session, partner)
-            ));
-        }
-        for (partner, concrete) in &crossing.inward {
-            ui.label(format!(
-                "Depended on by: {} ({concrete} concrete)",
-                partner_name(session, partner)
-            ));
-        }
-    });
-}
-
-/// The border-crossing dependencies of one boundary, heaviest first: each
-/// partner outside the boundary with the number of concrete relations the
-/// rolled-up edges to it stand for.
-struct Crossings<'a> {
-    outward: Vec<(&'a ElementId, usize)>,
-    inward: Vec<(&'a ElementId, usize)>,
-}
-
-fn crossings<'a>(view: &'a BoundaryView, inside: &BTreeSet<&ElementId>) -> Crossings<'a> {
-    let mut outward: BTreeMap<&ElementId, usize> = BTreeMap::new();
-    let mut inward: BTreeMap<&ElementId, usize> = BTreeMap::new();
-    for (edge, concrete) in &view.provenance {
-        match (inside.contains(&edge.from), inside.contains(&edge.to)) {
-            (true, false) => *outward.entry(&edge.to).or_default() += concrete.len(),
-            (false, true) => *inward.entry(&edge.from).or_default() += concrete.len(),
-            _ => {}
-        }
-    }
-    Crossings {
-        outward: ranked(outward),
-        inward: ranked(inward),
-    }
-}
-
-fn ranked(counts: BTreeMap<&ElementId, usize>) -> Vec<(&ElementId, usize)> {
-    let mut ranked: Vec<(&ElementId, usize)> = counts.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    ranked
-}
-
-/// A partner as the picture names it. A frame's `self` leaf carries the
-/// frame's own content, so it reads as the frame it sits in.
-fn partner_name(session: &Session, id: &ElementId) -> String {
-    let name = element_name(session, id);
-    if !is_self_leaf(id) {
-        return name;
-    }
-    let Ok(Scene { view, .. }) = &session.scene else {
-        return name;
-    };
-    focus::frame_of(&view.graph, id).map_or(name, |frame| element_name(session, frame))
-}
-
-fn note_editor(ui: &mut egui::Ui, session: &mut Session) {
-    ui.separator();
-    ui.label("Note:");
-    ui.text_edit_multiline(&mut session.note_draft);
-    if ui.button("Save note").clicked() {
-        session.save_note();
-    }
-}
-
-fn element_name(session: &Session, id: &ElementId) -> String {
-    session
-        .element_of(id)
-        .map_or_else(|| id.to_string(), |element| element.name.to_string())
 }
 
 fn detail_label(detail: Detail) -> &'static str {

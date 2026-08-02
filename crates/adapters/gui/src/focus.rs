@@ -115,11 +115,17 @@ pub(crate) fn subtree_of<'a>(
     inside
 }
 
-/// Whether the boundary contains other boundaries, and so paints as a frame
-/// no dependency edge can touch.
-pub(crate) fn is_frame(view: &ArchitectureGraph, id: &ElementId) -> bool {
+/// The boundaries one boundary directly contains, in id order. A boundary
+/// with contents paints as a frame, and no dependency edge touches a frame:
+/// an empty answer names a leaf.
+pub(crate) fn contents_of<'a>(
+    view: &'a ArchitectureGraph,
+    frame: &ElementId,
+) -> Vec<&'a ElementId> {
     view.relations()
-        .any(|relation| relation.kind == RelationKind::Contains && relation.from == *id)
+        .filter(|relation| relation.kind == RelationKind::Contains && relation.from == *frame)
+        .map(|relation| &relation.to)
+        .collect()
 }
 
 /// The boundary that directly contains this one, if any.

@@ -249,6 +249,21 @@ fn steer(ui: &Ui, background: &Response, viewport: Rect, world: Rect, camera: &m
     }
 }
 
+/// How far the camera must move to bring one box into the viewport, and
+/// None while the box already reads there. A selection made beside the
+/// picture must be findable in it, but a picture that jumps on every click
+/// loses the reader, so the camera stays still whenever it can.
+///
+/// Presence is the center being on screen, not the whole box fitting: a
+/// frame wider than the viewport never fits, and re-centering it on every
+/// click would move the picture for nothing.
+pub(crate) fn reveal_shift(viewport: Rect, on_screen: Rect) -> Option<egui::Vec2> {
+    if !viewport.is_positive() || !on_screen.is_positive() {
+        return None;
+    }
+    (!viewport.contains(on_screen.center())).then(|| viewport.center() - on_screen.center())
+}
+
 /// The transform that centers the world bounds in the viewport, zoomed to
 /// fit but never past 1.25x.
 fn fit(world: Rect, viewport: Rect) -> TSTransform {
@@ -652,4 +667,40 @@ fn world_bounds(layout: &Layout) -> Rect {
         .rects
         .values()
         .fold(Rect::NOTHING, |acc, rect| acc.union(*rect))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn viewport() -> Rect {
+        Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0))
+    }
+
+    #[test]
+    fn a_box_already_on_screen_leaves_the_camera_where_it_is() {
+        let on_screen = Rect::from_center_size(pos2(200.0, 150.0), vec2(60.0, 30.0));
+        assert_eq!(reveal_shift(viewport(), on_screen), None);
+    }
+
+    #[test]
+    fn a_box_larger_than_the_viewport_counts_as_on_screen() {
+        let on_screen = Rect::from_center_size(pos2(200.0, 150.0), vec2(4000.0, 3000.0));
+        assert_eq!(reveal_shift(viewport(), on_screen), None);
+    }
+
+    #[test]
+    fn a_box_off_screen_moves_to_the_middle_of_the_viewport() {
+        let on_screen = Rect::from_center_size(pos2(900.0, 700.0), vec2(60.0, 30.0));
+        assert_eq!(
+            reveal_shift(viewport(), on_screen),
+            Some(vec2(-700.0, -550.0))
+        );
+    }
+
+    #[test]
+    fn nothing_moves_before_the_canvas_has_a_viewport() {
+        let on_screen = Rect::from_center_size(pos2(900.0, 700.0), vec2(60.0, 30.0));
+        assert_eq!(reveal_shift(Rect::NOTHING, on_screen), None);
+    }
 }

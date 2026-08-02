@@ -136,6 +136,18 @@ pub(crate) fn kind_symbol(kind: ElementKind) -> &'static str {
     }
 }
 
+/// What the glyph stands for, in words. A picture has room for a mark
+/// alone; a panel beside it has room to say the kind outright.
+pub(crate) fn kind_name(kind: ElementKind) -> &'static str {
+    match kind {
+        ElementKind::Project => "Project",
+        ElementKind::Package => "Package",
+        ElementKind::Module => "Module",
+        ElementKind::Function => "Function",
+        ElementKind::Type => "Type",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{Element, ElementName, Relation};
