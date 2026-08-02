@@ -7,11 +7,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use cutaway_analyzer_rust::RustSourceAnalyzer;
 use cutaway_architecture::ElementKind;
-use cutaway_git::GitSourceTree;
 use cutaway_inspection::inspect;
 use cutaway_lenses::boundary_view;
-use cutaway_rust::RustSourceAnalyzer;
+use cutaway_source_git::GitSourceTree;
 
 #[test]
 #[ignore = "needs the .git directory, absent in the nix build sandbox"]

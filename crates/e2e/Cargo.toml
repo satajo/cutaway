@@ -12,7 +12,7 @@ cutaway-architecture.workspace = true
 cutaway-inspection.workspace = true
 cutaway-lenses.workspace = true
 cutaway-planning.workspace = true
-cutaway-rust.workspace = true
+cutaway-analyzer-rust.workspace = true
 
 [dev-dependencies]
 cucumber.workspace = true

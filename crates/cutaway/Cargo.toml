@@ -8,12 +8,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-cutaway-git.workspace = true
+cutaway-source-git.workspace = true
 cutaway-gui.workspace = true
 cutaway-inspection.workspace = true
-cutaway-plan-json.workspace = true
+cutaway-plan-file.workspace = true
 cutaway-planning.workspace = true
-cutaway-rust.workspace = true
+cutaway-analyzer-rust.workspace = true
 
 [dev-dependencies]
 cutaway-architecture.workspace = true

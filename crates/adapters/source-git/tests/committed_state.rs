@@ -4,8 +4,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use cutaway_git::GitSourceTree;
 use cutaway_inspection::ports::source_tree::SourceTree;
+use cutaway_source_git::GitSourceTree;
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")

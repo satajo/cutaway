@@ -5,12 +5,12 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use cutaway_git::GitSourceTree;
+use cutaway_analyzer_rust::RustSourceAnalyzer;
 use cutaway_gui::OpenedProject;
 use cutaway_inspection::inspect;
-use cutaway_plan_json::JsonPlanStore;
+use cutaway_plan_file::JsonPlanStore;
 use cutaway_planning::ports::plan_store::PlanStore;
-use cutaway_rust::RustSourceAnalyzer;
+use cutaway_source_git::GitSourceTree;
 
 fn main() -> ExitCode {
     let opener = Box::new(|path: &Path| {

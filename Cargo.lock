@@ -1068,14 +1068,26 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 name = "cutaway"
 version = "0.1.0"
 dependencies = [
+ "cutaway-analyzer-rust",
  "cutaway-architecture",
- "cutaway-git",
  "cutaway-gui",
  "cutaway-inspection",
  "cutaway-lenses",
- "cutaway-plan-json",
+ "cutaway-plan-file",
  "cutaway-planning",
- "cutaway-rust",
+ "cutaway-source-git",
+]
+
+[[package]]
+name = "cutaway-analyzer-rust"
+version = "0.1.0"
+dependencies = [
+ "cutaway-architecture",
+ "cutaway-inspection",
+ "thiserror 2.0.19",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-rust",
 ]
 
 [[package]]
@@ -1097,22 +1109,12 @@ name = "cutaway-e2e"
 version = "0.1.0"
 dependencies = [
  "cucumber",
+ "cutaway-analyzer-rust",
  "cutaway-architecture",
  "cutaway-inspection",
  "cutaway-lenses",
  "cutaway-planning",
- "cutaway-rust",
  "tokio",
-]
-
-[[package]]
-name = "cutaway-git"
-version = "0.1.0"
-dependencies = [
- "cutaway-inspection",
- "gix",
- "tempfile",
- "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1145,7 +1147,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cutaway-plan-json"
+name = "cutaway-plan-file"
 version = "0.1.0"
 dependencies = [
  "cutaway-architecture",
@@ -1165,15 +1167,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "cutaway-rust"
+name = "cutaway-source-git"
 version = "0.1.0"
 dependencies = [
- "cutaway-architecture",
  "cutaway-inspection",
+ "gix",
+ "tempfile",
  "thiserror 2.0.19",
- "toml",
- "tree-sitter",
- "tree-sitter-rust",
 ]
 
 [[package]]

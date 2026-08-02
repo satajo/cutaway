@@ -2,12 +2,12 @@
 
 use std::collections::BTreeSet;
 
+use cutaway_analyzer_rust::RustSourceAnalyzer;
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation, RelationKind};
 use cutaway_inspection::inspect;
 use cutaway_lenses::{BoundaryView, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{Note, Plan, ProposedChange, Subject};
-use cutaway_rust::RustSourceAnalyzer;
 
 use crate::fakes::{InMemoryPlanStore, InMemorySourceTree};
 

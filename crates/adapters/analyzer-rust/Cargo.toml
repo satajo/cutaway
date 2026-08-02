@@ -1,5 +1,5 @@
 [package]
-name = "cutaway-git"
+name = "cutaway-analyzer-rust"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -8,9 +8,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+cutaway-architecture.workspace = true
 cutaway-inspection.workspace = true
-gix.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
+toml.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true

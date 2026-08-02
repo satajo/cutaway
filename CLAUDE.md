@@ -40,12 +40,13 @@ crates/
   comparison/          Domain: deltas between two architecture versions.
   planning/            Planning core: plans, change sets, notes, annotations.
     src/ports/         PlanStore.
-  adapters/
-    git/               Driven adapter: git repository as a SourceTree (gix).
-    rust/              Driven adapter: Rust ecosystem as a SourceAnalyzer
+  adapters/            Named role-first (<port concept>-<technology>), so the
+                       adapters of one port sit together in any sorted listing.
+    analyzer-rust/     Driven adapter: Rust ecosystem as a SourceAnalyzer
                        (Cargo manifests via toml, sources via tree-sitter).
-    plan-json/         Driven adapter: PlanStore as cutaway.json in the root of
+    plan-file/         Driven adapter: PlanStore as cutaway.json in the root of
                        the planned repository. The format is the agent contract.
+    source-git/        Driven adapter: git repository as a SourceTree (gix).
     gui/               Driving adapter: eframe/egui shell with the boundary canvas.
   cutaway/             Composition root: wires adapters to the cores, starts the GUI.
   e2e/                 Cucumber suite + the ApplicationDriver port it drives.
@@ -64,7 +65,7 @@ crates/
 - The GUI receives capabilities (`ProjectOpener`, the opened project's
   `PlanStore`) from the composition root; it never constructs adapters
   itself.
-- Nothing outside `crates/adapters/rust` knows which languages exist. A new
+- Nothing outside `crates/adapters/analyzer-rust` knows which languages exist. A new
   language = a new analyzer crate under `crates/adapters/` + wiring in the
   composition root.
 - Element ids are deterministic and derive only from source paths, kinds,

@@ -6,10 +6,10 @@ members = [
   "crates/comparison",
   "crates/lenses",
   "crates/planning",
-  "crates/adapters/git",
+  "crates/adapters/analyzer-rust",
   "crates/adapters/gui",
-  "crates/adapters/plan-json",
-  "crates/adapters/rust",
+  "crates/adapters/plan-file",
+  "crates/adapters/source-git",
   "crates/cutaway",
   "crates/e2e",
 ]
@@ -25,10 +25,10 @@ cutaway-inspection = { path = "crates/inspection" }
 cutaway-comparison = { path = "crates/comparison" }
 cutaway-lenses = { path = "crates/lenses" }
 cutaway-planning = { path = "crates/planning" }
-cutaway-git = { path = "crates/adapters/git" }
+cutaway-analyzer-rust = { path = "crates/adapters/analyzer-rust" }
 cutaway-gui = { path = "crates/adapters/gui" }
-cutaway-plan-json = { path = "crates/adapters/plan-json" }
-cutaway-rust = { path = "crates/adapters/rust" }
+cutaway-plan-file = { path = "crates/adapters/plan-file" }
+cutaway-source-git = { path = "crates/adapters/source-git" }
 
 cucumber = "0.23"
 eframe = "0.35"

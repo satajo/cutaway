@@ -1,5 +1,5 @@
 [package]
-name = "cutaway-plan-json"
+name = "cutaway-plan-file"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
