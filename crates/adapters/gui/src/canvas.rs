@@ -15,6 +15,7 @@ use eframe::egui::{
     Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
+use crate::bundle::{self, Bundle};
 use crate::focus::{Focus, Selected, Strength, focus_of};
 use crate::glyph;
 use crate::label::{Label, Labels};
@@ -167,18 +168,27 @@ pub fn show(
     let touched = interact_nodes(ui, content.layout, &summary, camera, viewport);
     let hovered_node = touched.hovered;
 
+    // The edges gather into strokes before anything is routed: the routing
+    // spreads one anchor per edge along a side, so a pile the picture draws
+    // as one line must arrive there as one line.
+    let bundles = bundle::bundles(content.edges, summary.stands_for());
     let routes = routing::routes(
         content.view,
         content.layout,
         summary.stands_for(),
-        content.edges.iter().map(|edge| &edge.relation),
+        bundles
+            .iter()
+            .map(|stroke| &content.edges[stroke.lead].relation),
     );
-    let curves: Vec<Option<Vec<Pos2>>> = routes
-        .iter()
-        .map(|route| {
-            route
+    let strokes: Vec<DrawnEdge> = bundles
+        .into_iter()
+        .zip(routes)
+        .map(|(bundle, route)| DrawnEdge {
+            curve: route
                 .as_ref()
-                .map(|route| flattened(route.curve.map(|point| camera.mul_pos(point))))
+                .map(|route| flattened(route.curve.map(|point| camera.mul_pos(point)))),
+            route,
+            bundle,
         })
         .collect();
     // The map is opaque to the picture beneath it: an edge that runs under
@@ -189,17 +199,16 @@ pub fn show(
         .filter(|position| !map.as_ref().is_some_and(|map| map.rect.contains(*position)));
     let hovered_edge = match &hovered_node {
         Some(_) => None,
-        None => pointer.and_then(|position| nearest_curve(&curves, position)),
+        None => pointer.and_then(|position| nearest_curve(&strokes, position)),
     };
     let drawn = Drawn {
-        routes,
-        curves,
+        strokes,
         hovered: hovered_edge,
     };
     if let Some(index) = drawn.hovered {
         ui.ctx()
             .output_mut(|output| output.cursor_icon = CursorIcon::PointingHand);
-        describe_edge(ui, content, index);
+        describe_edge(ui, content, &drawn.strokes[index].bundle);
     }
 
     paint(
@@ -223,40 +232,66 @@ pub fn show(
     if background.clicked() {
         return background
             .interact_pointer_pos()
-            .and_then(|position| nearest_curve(&drawn.curves, position))
-            .map(|index| CanvasAction::Edge(content.edges[index].relation.clone()))
+            .and_then(|position| nearest_curve(&drawn.strokes, position))
+            .map(|index| {
+                CanvasAction::Edge(
+                    content.edges[drawn.strokes[index].bundle.lead]
+                        .relation
+                        .clone(),
+                )
+            })
             .or(Some(CanvasAction::Background));
     }
     None
 }
 
-/// The edges of one frame: where each one runs, the flattened screen curve
-/// that both paints and hit-tests it, and the one the pointer catches. All
-/// three lists index alike with [`Content::edges`].
+/// One stroke of one frame: the edges it draws, where it runs, and the
+/// flattened screen curve that both paints and hit-tests it.
+struct DrawnEdge {
+    bundle: Bundle,
+    route: Option<Route>,
+    curve: Option<Vec<Pos2>>,
+}
+
+/// The strokes of one frame and the one the pointer catches.
 struct Drawn {
-    routes: Vec<Option<Route>>,
-    curves: Vec<Option<Vec<Pos2>>>,
+    strokes: Vec<DrawnEdge>,
     hovered: Option<usize>,
 }
 
-/// Names the edge under the pointer: which boundaries it joins, how many
-/// concrete dependencies it stands for, and what the plan does to it. The
-/// canvas hit-tests its own edges, so the tooltip follows the pointer
-/// instead of a widget.
-fn describe_edge(ui: &Ui, content: &Content<'_>, index: usize) {
-    let Some(edge) = content.edges.get(index) else {
+/// Names the stroke under the pointer: which boundaries it joins, how many
+/// concrete dependencies it stands for, and what the plan does to it. A
+/// stroke that draws several connections names the pair of boxes it runs
+/// between and the one connection a click on it selects. The canvas
+/// hit-tests its own edges, so the tooltip follows the pointer instead of a
+/// widget.
+fn describe_edge(ui: &Ui, content: &Content<'_>, bundle: &Bundle) {
+    let Some(lead) = content.edges.get(bundle.lead) else {
         return;
     };
     let labels = Labels::of(content.view);
     let joins = format!(
         "{} {} {}",
-        labels.qualified(&edge.relation.from),
+        labels.qualified(&lead.relation.from),
         glyph::OUTWARD,
-        labels.qualified(&edge.relation.to)
+        labels.qualified(&lead.relation.to)
     );
+    let heading = if bundle.merged() {
+        format!(
+            "{} connections between {} and {}",
+            bundle.members.len(),
+            labels.qualified(&bundle.from),
+            labels.qualified(&bundle.to)
+        )
+    } else {
+        joins.clone()
+    };
+    let selects = bundle
+        .merged()
+        .then(|| format!("Click selects the heaviest: {joins}"));
     // A planned addition stands for nothing concrete yet, so it counts
     // nothing; every edge the architecture already carries does.
-    let stands_for = match (edge.status, edge.weight) {
+    let stands_for = match (lead.status, bundle.weight) {
         (EdgeStatus::Drawn, _) => None,
         (_, 1) => Some("1 concrete dependency".to_owned()),
         (_, many) => Some(format!("{many} concrete dependencies")),
@@ -268,11 +303,14 @@ fn describe_edge(ui: &Ui, content: &Content<'_>, index: usize) {
         egui::PopupAnchor::Pointer,
     )
     .show(|ui| {
-        ui.label(joins);
+        ui.label(heading);
         if let Some(stands_for) = stands_for {
             ui.label(stands_for);
         }
-        match edge.status {
+        if let Some(selects) = selects {
+            ui.label(selects);
+        }
+        match lead.status {
             EdgeStatus::Existing => {}
             EdgeStatus::Severed => {
                 ui.colored_label(SEVERED, "Planned for removal.");
@@ -648,6 +686,20 @@ fn paint_containers(
 /// it how many boundaries the block hides. Each line paints only while the
 /// block has room for it, so a block too small even for its name reads as a
 /// solid mass - which still tells the reader that something sits there.
+///
+/// The text is laid out in screen space, not in the world the camera scales.
+/// A block appears exactly when the camera has pulled far enough back to
+/// shrink its contents past reading, which is where a world-scaled font has
+/// stopped reading too: the block would then be a large anonymous shape. It
+/// takes the comfortable reading size instead, shrunk only as far as its own
+/// screen box demands, so pulling back swaps a frame's contents for its name
+/// the way a map swaps streets for a city.
+///
+/// A block alone earns screen-space text. A frame that shows its parts hangs
+/// its name in a header strip that shrinks with the camera, and text held at
+/// screen size would spill out of the strip and across the very children the
+/// frame exists to show. A block has no children to spill onto: the name is
+/// its whole content.
 fn paint_block_text(
     paint: &Paint<'_>,
     rect: Rect,
@@ -655,16 +707,19 @@ fn paint_block_text(
     block: &Block,
     strength: Strength,
 ) {
-    let Some(font) = paint.font() else {
+    let named = shade(paint.base, strength);
+    let text = paint.labels.label(id).text();
+    let comfortable = FontId::proportional(LABEL_SIZE);
+    let measured = paint
+        .painter
+        .layout_no_wrap(text.clone(), comfortable, named)
+        .size();
+    let room = rect.size() - Vec2::splat(2.0 * BLOCK_MARGIN);
+    let Some(size) = fitted_size(room, measured, LABEL_SIZE, LEGIBLE_FONT) else {
         return;
     };
-    let named = shade(paint.base, strength);
-    let name = paint
-        .painter
-        .layout_no_wrap(paint.labels.label(id).text(), font.clone(), named);
-    if !fits(name.size(), rect) {
-        return;
-    }
+    let font = FontId::proportional(size);
+    let name = paint.painter.layout_no_wrap(text, font.clone(), named);
     let center = rect.center();
     let counted = shade(paint.base.gamma_multiply(GLYPH), strength);
     let count = (block.inside > 0).then(|| {
@@ -696,23 +751,52 @@ fn fits(text: Vec2, rect: Rect) -> bool {
     text.x + 2.0 * BLOCK_MARGIN <= rect.width() && text.y + 2.0 * BLOCK_MARGIN <= rect.height()
 }
 
+/// The size a run of text paints at inside the room it is given: the size
+/// asked for while the text already fits, shrunk in proportion while it does
+/// not, and nothing at all once the fit would fall below the floor of
+/// legibility. Both extents bind, so a wide flat box shrinks the text as
+/// readily as a narrow one.
+///
+/// A glyph scales with its point size, so measuring the run once at the
+/// desired size answers for every smaller size as well.
+fn fitted_size(room: Vec2, at_desired: Vec2, desired: f32, floor: f32) -> Option<f32> {
+    let share = |room: f32, needed: f32| {
+        if needed > 0.0 {
+            room / needed
+        } else {
+            f32::INFINITY
+        }
+    };
+    let fitted = desired
+        * share(room.x, at_desired.x)
+            .min(share(room.y, at_desired.y))
+            .min(1.0);
+    (fitted >= floor).then_some(fitted)
+}
+
 fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
-    for (index, edge) in content.edges.iter().enumerate() {
-        let (Some(Some(route)), Some(Some(points))) =
-            (drawn.routes.get(index), drawn.curves.get(index))
-        else {
+    for (index, stroke) in drawn.strokes.iter().enumerate() {
+        let (Some(route), Some(points)) = (&stroke.route, &stroke.curve) else {
             continue;
         };
-        let ink = match edge.status {
+        let bundle = &stroke.bundle;
+        let visual = |edge: usize| &content.edges[edge];
+        // A stroke draws in the manner of the edge it answers for, and a
+        // merged one gathers edges of the current architecture alone.
+        let lead = visual(bundle.lead);
+        let ink = match lead.status {
             EdgeStatus::Existing => paint.base,
             EdgeStatus::Severed => SEVERED,
             EdgeStatus::Drawn => DRAWN,
         };
         // The scope dims before the selection does: an internal edge stays
         // behind the crossings whether anything is selected or not.
-        let color = shade(dim(ink, route.scope), paint.edge(&edge.relation));
-        let selected = content.selected_edge == Some(&edge.relation);
-        let width = edge_width(edge.weight, route.scope)
+        let color = shade(
+            dim(ink, route.scope),
+            bundle.strength(|edge| paint.edge(&visual(edge).relation)),
+        );
+        let selected = bundle.any(|edge| content.selected_edge == Some(&visual(edge).relation));
+        let width = edge_width(bundle.weight, route.scope)
             + if selected {
                 SELECTED_WIDTH
             } else if drawn.hovered == Some(index) {
@@ -720,17 +804,17 @@ fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
             } else {
                 0.0
             };
-        let stroke = Stroke::new(paint.stroke_width(width), color);
-        if edge.status == EdgeStatus::Existing {
-            paint.painter.add(Shape::line(points.clone(), stroke));
+        let pen = Stroke::new(paint.stroke_width(width), color);
+        if lead.status == EdgeStatus::Existing {
+            paint.painter.add(Shape::line(points.clone(), pen));
         } else {
             let dash = paint.camera.scaling.max(0.5);
-            for shape in Shape::dashed_line(points, stroke, 8.0 * dash, 5.0 * dash) {
+            for shape in Shape::dashed_line(points, pen, 8.0 * dash, 5.0 * dash) {
                 paint.painter.add(shape);
             }
         }
         arrow_head(&paint.painter, points, color, paint.camera.scaling);
-        if edge.annotated {
+        if bundle.any(|edge| visual(edge).annotated) {
             paint.painter.circle_filled(
                 points[points.len() / 2],
                 (4.0 * paint.camera.scaling).max(2.0),
@@ -887,10 +971,10 @@ fn arrow_head(painter: &egui::Painter, points: &[Pos2], color: Color32, zoom: f3
     ));
 }
 
-fn nearest_curve(curves: &[Option<Vec<Pos2>>], pointer: Pos2) -> Option<usize> {
+fn nearest_curve(strokes: &[DrawnEdge], pointer: Pos2) -> Option<usize> {
     let mut best: Option<(f32, usize)> = None;
-    for (index, curve) in curves.iter().enumerate() {
-        let Some(points) = curve else {
+    for (index, stroke) in strokes.iter().enumerate() {
+        let Some(points) = &stroke.curve else {
             continue;
         };
         for pair in points.windows(2) {
@@ -1014,6 +1098,56 @@ mod tests {
             targets[0].1,
             header_of(layout.rects[&id("package:a")]),
             "a frame around its parts answers on its header strip alone"
+        );
+    }
+
+    /// The extent of one name at [`LABEL_SIZE`], as the painter measures it.
+    const MEASURED: Vec2 = Vec2::new(100.0, 15.0);
+
+    #[test]
+    fn a_block_with_room_for_its_name_paints_it_at_reading_size() {
+        assert_eq!(
+            fitted_size(vec2(400.0, 200.0), MEASURED, LABEL_SIZE, LEGIBLE_FONT),
+            Some(LABEL_SIZE),
+            "a name that already fits is never enlarged either"
+        );
+    }
+
+    #[test]
+    fn a_name_wider_than_its_block_shrinks_until_it_fits() {
+        let fitted = fitted_size(vec2(50.0, 200.0), MEASURED, LABEL_SIZE, LEGIBLE_FONT)
+            .expect("half the width still reads");
+        assert!((fitted - LABEL_SIZE / 2.0).abs() < 0.01, "{fitted}");
+    }
+
+    #[test]
+    fn a_flat_block_shrinks_its_name_to_the_height_it_has() {
+        let fitted = fitted_size(vec2(400.0, 7.5), MEASURED, LABEL_SIZE, LEGIBLE_FONT)
+            .expect("half the height still reads");
+        assert!((fitted - LABEL_SIZE / 2.0).abs() < 0.01, "{fitted}");
+    }
+
+    #[test]
+    fn a_name_that_would_shrink_past_reading_paints_nothing() {
+        assert_eq!(
+            fitted_size(vec2(20.0, 200.0), MEASURED, LABEL_SIZE, LEGIBLE_FONT),
+            None,
+            "a fifth of the width falls below the legible floor"
+        );
+        assert_eq!(
+            fitted_size(vec2(-4.0, 200.0), MEASURED, LABEL_SIZE, LEGIBLE_FONT),
+            None,
+            "a box smaller than its own margins holds no text"
+        );
+    }
+
+    #[test]
+    fn a_block_label_never_scales_with_the_camera() {
+        let far_out = fitted_size(vec2(400.0, 200.0), MEASURED, LABEL_SIZE, LEGIBLE_FONT);
+        let close_in = fitted_size(vec2(4000.0, 2000.0), MEASURED, LABEL_SIZE, LEGIBLE_FONT);
+        assert_eq!(
+            far_out, close_in,
+            "the block's screen box decides the size, and nothing else does"
         );
     }
 

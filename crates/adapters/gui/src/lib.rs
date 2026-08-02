@@ -14,6 +14,7 @@
 //! question, and carries the selection across, because the subject of the
 //! question stays the reader's.
 
+mod bundle;
 mod canvas;
 mod continuity;
 mod detail;
