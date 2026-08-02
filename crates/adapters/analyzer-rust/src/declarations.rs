@@ -14,7 +14,10 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
             "struct_item" | "enum_item" | "trait_item" | "union_item" | "type_item" => {
                 ElementKind::Type
             }
-            "mod_item" => ElementKind::Module,
+            // A bodyless `mod foo;` only points at a file; that file is
+            // already a module element of its own, so declaring it again
+            // here would duplicate it.
+            "mod_item" if node.child_by_field_name("body").is_some() => ElementKind::Module,
             _ => continue,
         };
         let Some(name_node) = node.child_by_field_name("name") else {

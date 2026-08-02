@@ -202,6 +202,22 @@ fn top_level_declarations_belong_to_their_module() {
 }
 
 #[test]
+fn a_file_module_declaration_adds_no_element_beside_the_file_module() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        ("crates/b/src/lib.rs", "mod util;\n"),
+        ("crates/b/src/util.rs", ""),
+    ]);
+    let utils: Vec<_> = structure
+        .elements
+        .iter()
+        .filter(|e| e.element.kind == ElementKind::Module && e.element.name.as_str() == "util")
+        .map(|e| e.element.id.as_str())
+        .collect();
+    assert_eq!(utils, ["crates/b/src/util.rs"]);
+}
+
+#[test]
 fn a_module_defined_by_two_files_is_rejected() {
     let result = try_analyze(&[
         MANIFEST_B,
