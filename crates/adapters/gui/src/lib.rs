@@ -21,6 +21,7 @@ mod focus;
 mod inspector;
 mod label;
 mod layout;
+mod minimap;
 mod palette;
 mod routing;
 mod summary;

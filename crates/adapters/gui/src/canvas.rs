@@ -18,6 +18,7 @@ use eframe::egui::{
 use crate::focus::{Focus, Selected, Strength, focus_of};
 use crate::label::{Label, Labels};
 use crate::layout::{HEADER, Layout};
+use crate::minimap::Minimap;
 use crate::routing::{self, Route, Scope};
 use crate::summary::{Block, Summary, summarize};
 
@@ -116,6 +117,17 @@ const BLOCK: f32 = 0.22;
 const COUNT_SIZE: f32 = 0.8;
 /// The margin a summary block keeps around its text.
 const BLOCK_MARGIN: f32 = 6.0;
+/// Opacity of the minimap's own background: enough to lift the map off the
+/// picture, little enough to read the picture through it.
+const MAP_FILL: f32 = 0.85;
+/// Color strength of the map's frame, of the fill of the boxes on it, and
+/// of their outline. The map is chrome about the picture, so it stays under
+/// everything the picture itself draws.
+const MAP_BORDER: f32 = 0.3;
+const MAP_BOX_FILL: f32 = 0.14;
+const MAP_BOX_BORDER: f32 = 0.45;
+/// Width of the rectangle that marks where the reader stands on the map.
+const HERE_WIDTH: f32 = 1.5;
 
 pub fn show(
     ui: &mut Ui,
@@ -131,10 +143,20 @@ pub fn show(
         ui.id().with("canvas-background"),
         Sense::click_and_drag(),
     );
-    let camera = {
+    // The map paints and answers the pointer in a layer of its own above the
+    // picture, so a click on it reaches neither the boxes nor the background
+    // beneath it. Travel lands here, before anything else this frame reads
+    // the camera.
+    let (camera, map) = {
         let current = camera.get_or_insert_with(|| fit(world, viewport));
         steer(ui, &background, viewport, world, current);
-        *current
+        let map = Minimap::of(world, viewport, *current);
+        if let Some(map) = &map
+            && let Some(travelled) = travel(ui, map, content.layout, viewport, *current)
+        {
+            *current = travelled;
+        }
+        (*current, map)
     };
 
     // What the magnification has shrunk past reading decides before anything
@@ -158,9 +180,12 @@ pub fn show(
                 .map(|route| flattened(route.curve.map(|point| camera.mul_pos(point))))
         })
         .collect();
+    // The map is opaque to the picture beneath it: an edge that runs under
+    // the map is not the edge the reader points at.
     let pointer = ui
         .input(|input| input.pointer.hover_pos())
-        .filter(|position| viewport.contains(*position));
+        .filter(|position| viewport.contains(*position))
+        .filter(|position| !map.as_ref().is_some_and(|map| map.rect.contains(*position)));
     let hovered_edge = match &hovered_node {
         Some(_) => None,
         None => pointer.and_then(|position| nearest_curve(&curves, position)),
@@ -283,6 +308,69 @@ fn steer(ui: &Ui, background: &Response, viewport: Rect, world: Rect, camera: &m
     } else {
         camera.translation += ui.input(|input| input.smooth_scroll_delta);
     }
+}
+
+/// Paints the corner overview and answers the pointer on it: a click or a
+/// drag anywhere on the map travels there, and the marked rectangle follows
+/// the pointer as a scrollbar thumb does. Returns the camera the map asks
+/// for, and None while nobody points at it.
+///
+/// The map lives in a layer above the picture, so its area takes the click
+/// before the boxes and the background under it ever see it.
+fn travel(
+    ui: &Ui,
+    map: &Minimap,
+    layout: &Layout,
+    viewport: Rect,
+    camera: TSTransform,
+) -> Option<TSTransform> {
+    let mut travelled = None;
+    egui::Area::new(ui.id().with("minimap"))
+        .order(egui::Order::Middle)
+        .fixed_pos(map.rect.min)
+        .show(ui.ctx(), |ui| {
+            let response = ui.allocate_rect(map.rect, Sense::click_and_drag());
+            if let Some(pointer) = response.interact_pointer_pos() {
+                travelled = Some(map.travel(pointer, viewport, camera));
+            }
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
+            paint_map(ui, map, layout, viewport, travelled.unwrap_or(camera));
+        });
+    travelled
+}
+
+/// Draws the world at map scale: the outer boxes as plain outlines, no
+/// edges and no names. At this size a name is a smudge and an edge is a
+/// scribble; the shape of the picture and the place the reader stands in it
+/// are the whole message.
+fn paint_map(ui: &Ui, map: &Minimap, layout: &Layout, viewport: Rect, camera: TSTransform) {
+    let visuals = ui.visuals();
+    let ink = visuals.text_color();
+    let painter = ui.painter();
+    painter.rect(
+        map.rect,
+        CornerRadius::same(4),
+        visuals.panel_fill.gamma_multiply(MAP_FILL),
+        Stroke::new(1.0, ink.gamma_multiply(MAP_BORDER)),
+        StrokeKind::Middle,
+    );
+    for boundary in map.boxes(layout) {
+        painter.rect(
+            boundary,
+            CornerRadius::ZERO,
+            ink.gamma_multiply(MAP_BOX_FILL),
+            Stroke::new(HAIRLINE, ink.gamma_multiply(MAP_BOX_BORDER)),
+            StrokeKind::Middle,
+        );
+    }
+    painter.rect_stroke(
+        map.looked_at(viewport, camera),
+        CornerRadius::ZERO,
+        Stroke::new(HERE_WIDTH, visuals.selection.stroke.color),
+        StrokeKind::Middle,
+    );
 }
 
 /// How far the camera must move to bring one box into the viewport, and
