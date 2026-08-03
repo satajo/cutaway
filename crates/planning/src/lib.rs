@@ -10,9 +10,10 @@
 
 mod annotation;
 mod change_set;
+mod normalize;
 mod plan;
 pub mod ports;
 
 pub use annotation::{Annotation, InvalidNote, Note, Subject};
 pub use change_set::{ChangeSet, ChangeSetError, ProposedChange};
-pub use plan::{Plan, PlanError, PlannedChange};
+pub use plan::{GroupStanding, Plan, PlanError, PlannedChange};

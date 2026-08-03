@@ -24,3 +24,62 @@ Feature: Planning on the boundary view
     When the connection from "app" to "engine" is annotated with "app must stop reaching into engine"
     Then the connection from "app" to "engine" carries the note "app must stop reaching into engine"
     And the saved plan equals the working plan
+
+  Scenario: A planned removal stays planned when the boundary it enters opens
+    Given a package "viewer" at "crates/viewer"
+    And a package "model" at "crates/model"
+    And a source file "crates/viewer/src/lib.rs" containing:
+      """
+      use model::run;
+      """
+    And a source file "crates/model/src/lib.rs" containing:
+      """
+      pub fn run() {}
+      """
+    When the project is inspected
+    And the boundaries are viewed at "packages" level
+    And the connection from "viewer" to "model" is severed
+    And the boundary "model" is expanded
+    Then a connection goes from "viewer" to "crate"
+    And the plan marks the connection from "viewer" to "crate" for removal
+    And the saved plan equals the working plan
+
+  Scenario: A drawn dependency stays visible when the picture closes around it
+    Given a package "viewer" at "crates/viewer"
+    And a package "model" at "crates/model"
+    And a source file "crates/viewer/src/lib.rs" containing:
+      """
+      mod wiring;
+      """
+    And a source file "crates/viewer/src/wiring.rs" containing:
+      """
+      """
+    And a source file "crates/model/src/lib.rs" containing:
+      """
+      mod physics;
+      """
+    And a source file "crates/model/src/physics.rs" containing:
+      """
+      """
+    When the project is inspected
+    And the boundaries are viewed at "modules" level
+    And a connection is drawn from "physics" to "wiring"
+    And the boundaries are viewed at "packages" level
+    Then a connection goes from "model" to "viewer"
+    And the plan proposes a connection from "model" to "viewer"
+
+  Scenario: A drawn dependency stays visible when the boundary it names opens
+    Given a package "viewer" at "crates/viewer"
+    And a package "model" at "crates/model"
+    And a source file "crates/viewer/src/lib.rs" containing:
+      """
+      """
+    And a source file "crates/model/src/lib.rs" containing:
+      """
+      """
+    When the project is inspected
+    And the boundaries are viewed at "packages" level
+    And a connection is drawn from "model" to "viewer"
+    And the boundary "viewer" is expanded
+    Then a connection goes from "model" to "viewer"
+    And the plan proposes a connection from "model" to "viewer"

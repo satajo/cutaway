@@ -5,6 +5,14 @@
 //! for an agent working in that repository, and it versions together with
 //! the code it talks about. The format is versioned and stable; treat any
 //! change to it as a breaking change of the agent contract.
+//!
+//! Every relation the file stores - in changes and in relation-subject
+//! annotations alike - is a concrete source-level relation: real element
+//! ids on both ends, never a rolled-up boundary pair and never a synthetic
+//! `#self` own-content id. Files written before this contract held may
+//! carry both; loading a plan against a known base graph expands and strips
+//! them through `cutaway_planning`'s normalization (`Plan::normalized`).
+//! This store stays a dumb serializer and applies none of that itself.
 
 mod format;
 

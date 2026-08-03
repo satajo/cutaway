@@ -29,14 +29,14 @@ mod palette;
 mod routing;
 mod summary;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use cutaway_architecture::{ArchitectureGraph, Element, ElementId, Relation, RelationKind};
-use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
+use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view, self_leaf_frame};
 use cutaway_planning::ports::plan_store::PlanStore;
-use cutaway_planning::{Note, Plan, ProposedChange, Subject};
+use cutaway_planning::{GroupStanding, Note, Plan, ProposedChange, Subject};
 use eframe::egui::{self, Rect};
 
 use crate::camera::Camera;
@@ -152,9 +152,13 @@ struct Session {
 impl Session {
     fn open(project: OpenedProject) -> Self {
         let weights = layout::concept_weights(&project.graph);
+        // A stored plan may predate the concrete-relation contract:
+        // normalization re-anchors it to this graph before anything reads
+        // or extends it, so every markup matches by provenance from here on.
+        let plan = project.plan.normalized(&project.graph);
         let mut session = Self {
             graph: project.graph,
-            plan: project.plan,
+            plan,
             store: project.store,
             cut: Cut::uniform(Detail::Packages),
             scene: Err("not built yet".to_owned()),
@@ -185,8 +189,16 @@ impl Session {
     /// Paints the cut anew, leaving the camera where it is: opening or
     /// closing one boundary changes what the picture holds, not what the
     /// reader looks at. Whatever the new cut no longer shows is dropped.
+    ///
+    /// The lens views the architecture with the plan's added dependencies
+    /// drawn in, so a drawn connection rolls up and reattaches at every cut
+    /// exactly as the concrete ones do. Augmenting the graph before lensing,
+    /// rather than mapping planned endpoints through the view here, keeps
+    /// the lens pure and this shell thin, and planned elements will later
+    /// enter the picture the same way.
     fn rebuild_view(&mut self) {
-        self.scene = boundary_view(&self.graph, &self.cut)
+        let viewed = self.plan.with_planned_dependencies(&self.graph);
+        self.scene = boundary_view(&viewed, &self.cut)
             .map_err(|error| error.to_string())
             .map(|view| {
                 let layout = layout::compute(&view.graph, &self.weights);
@@ -309,82 +321,39 @@ impl Session {
     }
 
     fn edges(&self) -> Vec<EdgeVisual> {
-        let Ok(scene) = &self.scene else {
-            return Vec::new();
-        };
-        let view = &scene.view;
-        let mut edges = Vec::new();
-        for relation in view.graph.relations() {
-            if relation.kind != RelationKind::DependsOn {
-                continue;
-            }
-            let severed = self.plan.plans_removal_of(relation);
-            edges.push(EdgeVisual {
-                relation: relation.clone(),
-                status: if severed {
-                    EdgeStatus::Severed
-                } else {
-                    EdgeStatus::Existing
-                },
-                annotated: self.note_for(relation, severed).is_some(),
-                weight: concrete_count(view, relation),
-            });
+        match &self.scene {
+            Ok(scene) => edge_visuals(&scene.view, &self.plan),
+            Err(_) => Vec::new(),
         }
-        for planned in self.plan.changes() {
-            if let ProposedChange::AddRelation(relation) = &planned.change {
-                let visible = relation.kind == RelationKind::DependsOn
-                    && view.graph.element(&relation.from).is_some()
-                    && view.graph.element(&relation.to).is_some()
-                    && !view.graph.relations().any(|r| r == relation);
-                if visible {
-                    edges.push(EdgeVisual {
-                        relation: relation.clone(),
-                        status: EdgeStatus::Drawn,
-                        annotated: planned.note.is_some(),
-                        // A planned edge stands for itself alone: nothing
-                        // concrete is behind it yet.
-                        weight: 1,
-                    });
-                }
-            }
-        }
-        edges
     }
 
+    /// Every concrete dependency behind one rendered connection; empty
+    /// while the picture draws no such connection.
+    fn concrete_behind(&self, relation: &Relation) -> BTreeSet<Relation> {
+        self.scene
+            .as_ref()
+            .map(|scene| scene.view.concrete_behind(relation))
+            .unwrap_or_default()
+    }
+
+    /// How the plan stands toward a rendered connection, derived from the
+    /// concrete dependencies behind it rather than from the connection's
+    /// own name: the name changes with every cut, the dependencies do not.
     fn status_of(&self, relation: &Relation) -> EdgeStatus {
-        if self.plan.plans_removal_of(relation) {
-            EdgeStatus::Severed
-        } else if self.plan.plans_addition_of(relation) {
-            EdgeStatus::Drawn
-        } else {
-            EdgeStatus::Existing
-        }
-    }
-
-    fn note_for(&self, relation: &Relation, severed: bool) -> Option<&Note> {
-        if severed {
-            self.plan
-                .note_of(&ProposedChange::RemoveRelation(relation.clone()))
-        } else {
-            self.plan
-                .annotation_of(&Subject::Relation(relation.clone()))
-        }
+        status_of_group(&self.plan, &self.concrete_behind(relation))
     }
 
     fn current_note_text(&self, selection: &Selection) -> String {
         let note = match selection {
-            Selection::Node(id) => self.plan.annotation_of(&Subject::Element(id.clone())),
-            Selection::Edge(relation) => match self.status_of(relation) {
-                EdgeStatus::Existing => self
-                    .plan
-                    .annotation_of(&Subject::Relation(relation.clone())),
-                EdgeStatus::Severed => self
-                    .plan
-                    .note_of(&ProposedChange::RemoveRelation(relation.clone())),
-                EdgeStatus::Drawn => self
-                    .plan
-                    .note_of(&ProposedChange::AddRelation(relation.clone())),
-            },
+            Selection::Node(id) => self.plan.annotation_of(&Subject::Element(real_id(id))),
+            Selection::Edge(relation) => {
+                let concrete = self.concrete_behind(relation);
+                note_behind(
+                    &self.plan,
+                    status_of_group(&self.plan, &concrete),
+                    &concrete,
+                )
+            }
         };
         note.map(|note| note.as_str().to_owned())
             .unwrap_or_default()
@@ -470,6 +439,11 @@ impl Session {
             .map(|error| error.to_string());
     }
 
+    /// Writes the note draft onto whatever anchors the selection: an
+    /// element's annotation, or - for a connection - the concrete
+    /// dependencies behind it. A note on a rolled-up connection lands on
+    /// every concrete dependency it stands for, so the note is findable at
+    /// whatever cut shows any of them.
     fn save_note(&mut self) {
         let Some(selection) = self.selection.clone() else {
             return;
@@ -478,29 +452,50 @@ impl Session {
         let note = Note::new(self.note_draft.clone()).ok();
         let result = match &selection {
             Selection::Node(id) => {
-                let subject = Subject::Element(id.clone());
+                let subject = Subject::Element(real_id(id));
                 match &note {
                     Some(note) => self.plan.annotate(subject, note.clone()),
                     None => self.plan.clear_annotation(&subject),
                 }
                 Ok(())
             }
-            Selection::Edge(relation) => match self.status_of(relation) {
-                EdgeStatus::Existing => {
-                    let subject = Subject::Relation(relation.clone());
-                    match &note {
-                        Some(note) => self.plan.annotate(subject, note.clone()),
-                        None => self.plan.clear_annotation(&subject),
+            Selection::Edge(relation) => {
+                let concrete = self.concrete_behind(relation);
+                let status = status_of_group(&self.plan, &concrete);
+                let mut result = Ok(());
+                for concrete in &concrete {
+                    match status {
+                        // The additions folded into an existing run stand
+                        // aside: an annotation talks about what exists.
+                        EdgeStatus::Existing | EdgeStatus::PartiallySevered { .. } => {
+                            if self.plan.plans_addition_of(concrete) {
+                                continue;
+                            }
+                            let subject = Subject::Relation(concrete.clone());
+                            match &note {
+                                Some(note) => self.plan.annotate(subject, note.clone()),
+                                None => self.plan.clear_annotation(&subject),
+                            }
+                        }
+                        EdgeStatus::Severed => {
+                            if !self.plan.plans_removal_of(concrete) {
+                                continue;
+                            }
+                            result = result.and(self.plan.explain(
+                                &ProposedChange::RemoveRelation(concrete.clone()),
+                                note.clone(),
+                            ));
+                        }
+                        EdgeStatus::Drawn => {
+                            result = result.and(self.plan.explain(
+                                &ProposedChange::AddRelation(concrete.clone()),
+                                note.clone(),
+                            ));
+                        }
                     }
-                    Ok(())
                 }
-                EdgeStatus::Severed => self
-                    .plan
-                    .explain(&ProposedChange::RemoveRelation(relation.clone()), note),
-                EdgeStatus::Drawn => self
-                    .plan
-                    .explain(&ProposedChange::AddRelation(relation.clone()), note),
-            },
+                result
+            }
         };
         match result {
             Ok(()) => self.save_plan(),
@@ -508,41 +503,88 @@ impl Session {
         }
     }
 
+    /// Severs a rendered connection: proposes the removal of every concrete
+    /// dependency behind it, the ones waiting at a coarser detail included,
+    /// so the mark holds at whatever cut those dependencies reattach. On a
+    /// partly severed connection this completes the removal of the rest; on
+    /// a drawn one it erases the additions instead.
     fn sever(&mut self, relation: &Relation) {
-        // A drawn edge is erased, an existing one is marked for removal.
-        let result = if self.plan.plans_addition_of(relation) {
-            self.plan
-                .retract(&ProposedChange::AddRelation(relation.clone()))
-        } else {
-            self.plan
-                .propose(ProposedChange::RemoveRelation(relation.clone()))
-        };
+        let concrete = self.concrete_behind(relation);
+        if concrete.is_empty() {
+            self.status = Some("nothing stands behind that connection".to_owned());
+            return;
+        }
+        if matches!(self.plan.standing_of(&concrete), GroupStanding::Added) {
+            let mut result = Ok(());
+            for concrete in &concrete {
+                result = result.and(
+                    self.plan
+                        .retract(&ProposedChange::AddRelation(concrete.clone())),
+                );
+            }
+            match result {
+                Ok(()) => self.save_plan(),
+                Err(error) => self.status = Some(error.to_string()),
+            }
+            // The additions left the viewed graph, so the picture sheds the
+            // connection, and with it the selection.
+            self.rebuild_view();
+            self.select(None);
+            return;
+        }
+        let mut result = Ok(());
+        for concrete in concrete {
+            if self.plan.plans_addition_of(&concrete) || self.plan.plans_removal_of(&concrete) {
+                continue;
+            }
+            result = result.and(self.plan.propose(ProposedChange::RemoveRelation(concrete)));
+        }
         match result {
             Ok(()) => self.save_plan(),
             Err(error) => self.status = Some(error.to_string()),
         }
-        if self.plan.plans_addition_of(relation) || !edge_exists(&self.scene, relation) {
-            self.select(None);
-        }
     }
 
+    /// Withdraws every planned removal behind a rendered connection.
     fn restore(&mut self, relation: &Relation) {
-        match self
-            .plan
-            .retract(&ProposedChange::RemoveRelation(relation.clone()))
-        {
+        let planned: Vec<Relation> = self
+            .concrete_behind(relation)
+            .into_iter()
+            .filter(|concrete| self.plan.plans_removal_of(concrete))
+            .collect();
+        if planned.is_empty() {
+            self.status = Some("no removal is planned there".to_owned());
+            return;
+        }
+        let mut result = Ok(());
+        for concrete in planned {
+            result = result.and(self.plan.retract(&ProposedChange::RemoveRelation(concrete)));
+        }
+        match result {
             Ok(()) => self.save_plan(),
             Err(error) => self.status = Some(error.to_string()),
         }
     }
 
     fn draw_edge(&mut self, from: ElementId, to: ElementId) {
-        let relation = Relation {
+        let picked = Relation {
             from,
             to,
             kind: RelationKind::DependsOn,
         };
-        if edge_exists(&self.scene, &relation) {
+        if edge_exists(&self.scene, &picked) {
+            self.status = Some("that dependency already exists".to_owned());
+            return;
+        }
+        // A pick on a frame's own-content box means the frame: the leaf is
+        // the lens's invention, and the plan records only elements the
+        // sources can hold.
+        let relation = frame_pair(&picked);
+        if relation.from == relation.to {
+            self.status = Some("a boundary cannot depend on itself".to_owned());
+            return;
+        }
+        if self.graph.relations().any(|r| *r == relation) {
             self.status = Some("that dependency already exists".to_owned());
             return;
         }
@@ -552,10 +594,29 @@ impl Session {
         {
             Ok(()) => {
                 self.save_plan();
-                self.select(Some(Selection::Edge(relation)));
+                // The addition enters the viewed graph, and the lens rolls
+                // it up like any other dependency; the selection follows the
+                // connection that carries it here.
+                self.rebuild_view();
+                let rendered = self.rendered_for(&relation);
+                self.select(rendered.map(Selection::Edge));
             }
             Err(error) => self.status = Some(error.to_string()),
         }
+    }
+
+    /// The rendered connection carrying one concrete relation at this cut:
+    /// the rolled-up edge whose provenance holds it, or the coarse pair it
+    /// waits under. None while the relation is interior to one boundary.
+    fn rendered_for(&self, concrete: &Relation) -> Option<Relation> {
+        let scene = self.scene.as_ref().ok()?;
+        scene
+            .view
+            .provenance
+            .iter()
+            .chain(scene.view.coarse.iter())
+            .find(|(_, behind)| behind.contains(concrete))
+            .map(|(edge, _)| edge.clone())
     }
 
     fn handle(&mut self, action: CanvasAction) {
@@ -594,12 +655,110 @@ impl Session {
     }
 }
 
-/// How many concrete dependencies one rolled-up edge stands for. An edge
-/// the view rolled nothing into still stands for the one dependency it is.
-fn concrete_count(view: &BoundaryView, relation: &Relation) -> usize {
-    view.provenance
-        .get(relation)
-        .map_or(1, |concrete| concrete.len().max(1))
+/// The element an id truly names: itself, or - for a frame's own-content
+/// leaf - the frame. Nothing the plan records may carry a self-leaf id,
+/// because no source graph holds one.
+fn real_id(id: &ElementId) -> ElementId {
+    self_leaf_frame(id).unwrap_or_else(|| id.clone())
+}
+
+/// A rendered edge named by the boundaries the self leaves stand for.
+fn frame_pair(relation: &Relation) -> Relation {
+    Relation {
+        from: real_id(&relation.from),
+        to: real_id(&relation.to),
+        kind: relation.kind,
+    }
+}
+
+/// Every connection one frame draws, with what the plan says about each.
+///
+/// The status of a connection derives from the concrete dependencies behind
+/// it, never from the connection's own name: the name changes with every
+/// cut, the dependencies do not, so a planned removal keeps its mark when a
+/// boundary opens and the same dependencies reattach elsewhere.
+fn edge_visuals(view: &BoundaryView, plan: &Plan) -> Vec<EdgeVisual> {
+    let mut edges = Vec::new();
+    let mut rendered_pairs = BTreeSet::new();
+    for relation in view.provenance.keys() {
+        rendered_pairs.insert(frame_pair(relation));
+        let concrete = view.concrete_behind(relation);
+        let status = status_of_group(plan, &concrete);
+        edges.push(EdgeVisual {
+            relation: relation.clone(),
+            status,
+            annotated: note_behind(plan, status, &concrete).is_some(),
+            weight: weight_of(plan, status, &concrete),
+        });
+    }
+    // A planned addition naming an open frame as a whole would wait at a
+    // coarser detail, as the architecture's own whole-frame dependencies
+    // do; but a drawn dependency is the plan speaking, and the plan speaks
+    // at every cut, so it attaches to the frame's border instead. A pair a
+    // rendered edge already answers for stays out, or it would draw twice.
+    for (pair, concrete) in &view.coarse {
+        if matches!(plan.standing_of(concrete), GroupStanding::Added)
+            && !rendered_pairs.contains(pair)
+        {
+            edges.push(EdgeVisual {
+                relation: pair.clone(),
+                status: EdgeStatus::Drawn,
+                annotated: note_behind(plan, EdgeStatus::Drawn, concrete).is_some(),
+                weight: concrete.len(),
+            });
+        }
+    }
+    edges
+}
+
+fn status_of_group(plan: &Plan, concrete: &BTreeSet<Relation>) -> EdgeStatus {
+    match plan.standing_of(concrete) {
+        GroupStanding::Untouched => EdgeStatus::Existing,
+        GroupStanding::Added => EdgeStatus::Drawn,
+        GroupStanding::Removed => EdgeStatus::Severed,
+        GroupStanding::PartlyRemoved { removed, of } => EdgeStatus::PartiallySevered {
+            severed: removed,
+            total: of,
+        },
+    }
+}
+
+/// How many concrete dependencies one rendered edge stands for: what the
+/// architecture carries behind it, or - drawn - what the plan proposes. An
+/// edge with nothing recorded behind it still stands for the one dependency
+/// it is.
+fn weight_of(plan: &Plan, status: EdgeStatus, concrete: &BTreeSet<Relation>) -> usize {
+    let counted = match status {
+        EdgeStatus::Drawn => concrete.len(),
+        _ => concrete
+            .iter()
+            .filter(|relation| !plan.plans_addition_of(relation))
+            .count(),
+    };
+    counted.max(1)
+}
+
+/// The note a rendered edge shows, read from the concrete dependencies
+/// behind it: the plan's rationale where the connection is planned, the
+/// annotation where it merely exists. Several dependencies can carry notes;
+/// the first in relation order answers, and saving a note writes them all
+/// alike again.
+fn note_behind<'p>(
+    plan: &'p Plan,
+    status: EdgeStatus,
+    concrete: &BTreeSet<Relation>,
+) -> Option<&'p Note> {
+    concrete.iter().find_map(|relation| match status {
+        EdgeStatus::Drawn => plan.note_of(&ProposedChange::AddRelation(relation.clone())),
+        EdgeStatus::Severed => plan.note_of(&ProposedChange::RemoveRelation(relation.clone())),
+        EdgeStatus::Existing | EdgeStatus::PartiallySevered { .. } => {
+            if plan.plans_addition_of(relation) {
+                None
+            } else {
+                plan.annotation_of(&Subject::Relation(relation.clone()))
+            }
+        }
+    })
 }
 
 fn edge_exists(scene: &Result<Scene, String>, relation: &Relation) -> bool {
@@ -906,6 +1065,139 @@ mod tests {
             subject_of(&layout(), &Selection::Node(id("elsewhere"))),
             None
         );
+    }
+
+    fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: cutaway_architecture::ElementKind) {
+        graph
+            .add_element(Element {
+                id: id(id_text),
+                name: cutaway_architecture::ElementName::new(id_text).unwrap(),
+                kind,
+            })
+            .unwrap();
+    }
+
+    /// package:a ⊃ {a/one, a/two}, package:b ⊃ {b/one}, with both of a's
+    /// modules depending on b/one.
+    fn two_packages() -> ArchitectureGraph {
+        use cutaway_architecture::ElementKind;
+        let mut graph = ArchitectureGraph::new();
+        add(&mut graph, "package:a", ElementKind::Package);
+        add(&mut graph, "package:b", ElementKind::Package);
+        add(&mut graph, "a/one", ElementKind::Module);
+        add(&mut graph, "a/two", ElementKind::Module);
+        add(&mut graph, "b/one", ElementKind::Module);
+        for (from, to) in [
+            ("package:a", "a/one"),
+            ("package:a", "a/two"),
+            ("package:b", "b/one"),
+        ] {
+            graph
+                .add_relation(Relation {
+                    from: id(from),
+                    to: id(to),
+                    kind: RelationKind::Contains,
+                })
+                .unwrap();
+        }
+        for from in ["a/one", "a/two"] {
+            graph.add_relation(depends(from, "b/one")).unwrap();
+        }
+        graph
+    }
+
+    fn visuals(graph: &ArchitectureGraph, plan: &Plan, cut: &Cut) -> Vec<EdgeVisual> {
+        let view = boundary_view(&plan.with_planned_dependencies(graph), cut).unwrap();
+        edge_visuals(&view, plan)
+    }
+
+    fn removing(relations: &[Relation]) -> Plan {
+        let mut plan = Plan::new();
+        for relation in relations {
+            plan.propose(ProposedChange::RemoveRelation(relation.clone()))
+                .unwrap();
+        }
+        plan
+    }
+
+    #[test]
+    fn a_connection_with_every_dependency_severed_draws_as_severed() {
+        let plan = removing(&[depends("a/one", "b/one"), depends("a/two", "b/one")]);
+        let edges = visuals(&two_packages(), &plan, &Cut::uniform(Detail::Packages));
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].status, EdgeStatus::Severed);
+        assert_eq!(edges[0].weight, 2);
+    }
+
+    #[test]
+    fn a_connection_with_part_of_its_dependencies_severed_draws_the_partial_mark() {
+        let plan = removing(&[depends("a/one", "b/one")]);
+        let edges = visuals(&two_packages(), &plan, &Cut::uniform(Detail::Packages));
+        assert_eq!(
+            edges[0].status,
+            EdgeStatus::PartiallySevered {
+                severed: 1,
+                total: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_planned_removal_keeps_its_mark_when_the_target_boundary_opens() {
+        let plan = removing(&[depends("a/one", "b/one"), depends("a/two", "b/one")]);
+        let opened = Cut {
+            detail: Detail::Packages,
+            overrides: BTreeMap::from([(id("package:b"), Detail::Modules)]),
+        };
+        let edges = visuals(&two_packages(), &plan, &opened);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            edges[0].relation,
+            depends("package:a", "b/one"),
+            "the same dependencies reattach to the module the boundary opened onto"
+        );
+        assert_eq!(edges[0].status, EdgeStatus::Severed);
+    }
+
+    #[test]
+    fn a_drawn_dependency_draws_at_every_cut() {
+        let mut graph = two_packages();
+        for from in ["a/one", "a/two"] {
+            graph.remove_relation(&depends(from, "b/one")).unwrap();
+        }
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddRelation(depends("a/one", "b/one")))
+            .unwrap();
+
+        let coarse = visuals(&graph, &plan, &Cut::uniform(Detail::Packages));
+        assert_eq!(coarse.len(), 1);
+        assert_eq!(coarse[0].relation, depends("package:a", "package:b"));
+        assert_eq!(coarse[0].status, EdgeStatus::Drawn);
+
+        let fine = visuals(&graph, &plan, &Cut::uniform(Detail::Modules));
+        assert_eq!(fine.len(), 1);
+        assert_eq!(fine[0].relation, depends("a/one", "b/one"));
+        assert_eq!(fine[0].status, EdgeStatus::Drawn);
+    }
+
+    #[test]
+    fn a_drawn_dependency_naming_an_open_frame_still_draws() {
+        let mut graph = two_packages();
+        for from in ["a/one", "a/two"] {
+            graph.remove_relation(&depends(from, "b/one")).unwrap();
+        }
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddRelation(depends("a/one", "package:b")))
+            .unwrap();
+
+        let edges = visuals(&graph, &plan, &Cut::uniform(Detail::Modules));
+        assert_eq!(
+            edges.len(),
+            1,
+            "the whole-frame addition does not wait at a coarser detail"
+        );
+        assert_eq!(edges[0].relation, depends("a/one", "package:b"));
+        assert_eq!(edges[0].status, EdgeStatus::Drawn);
     }
 
     #[test]

@@ -8,11 +8,11 @@
 //! much of it there is: the stroke carries the weight of everything it
 //! draws, so its width already reads as the traffic.
 //!
-//! Only what the architecture already carries bundles. A severed or a drawn
-//! edge is the plan speaking: it is rare, it is the reason the reader opened
-//! the picture, and a line nobody can pick out is a line nobody can answer
-//! for. Such an edge therefore keeps a stroke of its own however much runs
-//! beside it.
+//! Only what the architecture carries and the plan leaves untouched
+//! bundles. A severed, partly severed, or drawn edge is the plan speaking:
+//! it is rare, it is the reason the reader opened the picture, and a line
+//! nobody can pick out is a line nobody can answer for. Such an edge
+//! therefore keeps a stroke of its own however much runs beside it.
 //!
 //! The bundling is pure - the edges, the substitution the summary made, and
 //! the weights go in and the draw list comes out - so it is unit-testable

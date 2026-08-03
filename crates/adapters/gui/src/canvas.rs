@@ -30,8 +30,13 @@ use crate::summary::{Block, Summary, summarize};
 pub enum EdgeStatus {
     /// Part of the current architecture: monochrome, solid.
     Existing,
-    /// Planned for removal: red, dashed.
+    /// Every concrete dependency behind it is planned for removal: red,
+    /// dashed.
     Severed,
+    /// Some but not all concrete dependencies behind it are planned for
+    /// removal: the normal stroke - most of the connection stays - with a
+    /// red mark beside the arrowhead saying the plan has touched it.
+    PartiallySevered { severed: usize, total: usize },
     /// Planned addition: green, dashed.
     Drawn,
 }
@@ -324,6 +329,12 @@ fn describe_edge(ui: &Ui, content: &Content<'_>, bundle: &Bundle) {
             EdgeStatus::Existing => {}
             EdgeStatus::Severed => {
                 ui.colored_label(SEVERED, "Planned for removal.");
+            }
+            EdgeStatus::PartiallySevered { severed, total } => {
+                ui.colored_label(
+                    SEVERED,
+                    format!("{severed} of {total} concrete dependencies severed."),
+                );
             }
             EdgeStatus::Drawn => {
                 ui.colored_label(DRAWN, "Planned addition.");
@@ -737,8 +748,11 @@ fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
         // A stroke draws in the manner of the edge it answers for, and a
         // merged one gathers edges of the current architecture alone.
         let lead = visual(bundle.lead);
+        // A partly severed connection keeps the stroke of an existing one:
+        // most of what it stands for stays, and the red mark by the
+        // arrowhead carries the plan's part of the story.
         let ink = match lead.status {
-            EdgeStatus::Existing => paint.base,
+            EdgeStatus::Existing | EdgeStatus::PartiallySevered { .. } => paint.base,
             EdgeStatus::Severed => SEVERED,
             EdgeStatus::Drawn => DRAWN,
         };
@@ -767,7 +781,10 @@ fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
                 0.0
             };
         let pen = Stroke::new(paint.stroke_width(width), color);
-        if lead.status == EdgeStatus::Existing {
+        if matches!(
+            lead.status,
+            EdgeStatus::Existing | EdgeStatus::PartiallySevered { .. }
+        ) {
             paint.painter.add(Shape::line(points.clone(), pen));
         } else {
             let dash = paint.camera.scaling.max(0.5);
@@ -776,6 +793,15 @@ fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
             }
         }
         arrow_head(&paint.painter, points, color, paint.camera.scaling);
+        if matches!(lead.status, EdgeStatus::PartiallySevered { .. }) {
+            // The mark sits just short of the arrowhead: the reader looks
+            // there to see what arrives, so that is where the plan speaks.
+            paint.painter.circle_filled(
+                points[(points.len() - 1) * 9 / 10],
+                (4.0 * paint.camera.scaling).max(2.5),
+                SEVERED,
+            );
+        }
         if bundle.any(|edge| visual(edge).annotated) {
             paint.painter.circle_filled(
                 points[points.len() / 2],

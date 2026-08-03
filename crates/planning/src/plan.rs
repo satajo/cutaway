@@ -1,4 +1,4 @@
-use cutaway_architecture::Relation;
+use cutaway_architecture::{ArchitectureGraph, Relation, RelationKind};
 
 use crate::annotation::{Annotation, Note, Subject};
 use crate::change_set::{ChangeSet, ProposedChange};
@@ -130,6 +130,90 @@ impl Plan {
         }
         changes
     }
+
+    /// The base architecture with this plan's added dependencies drawn in,
+    /// for viewing: a lens rolls a planned dependency up exactly as it rolls
+    /// a concrete one, so a drawn connection reattaches at every cut the way
+    /// the real ones do.
+    ///
+    /// Only `DependsOn` additions enter - the containment tree stays the one
+    /// the sources declare - and an addition the graph rejects (an endpoint
+    /// the base does not hold yet, or a relation it already carries) stays
+    /// out of the picture without failing it: the plan may run ahead of the
+    /// architecture, and a picture must still stand. Removals stay out too:
+    /// a severed dependency still exists, and the picture marks it instead
+    /// of hiding it.
+    #[must_use]
+    pub fn with_planned_dependencies(&self, base: &ArchitectureGraph) -> ArchitectureGraph {
+        let mut graph = base.clone();
+        for planned in &self.changes {
+            let ProposedChange::AddRelation(relation) = &planned.change else {
+                continue;
+            };
+            if relation.kind != RelationKind::DependsOn {
+                continue;
+            }
+            let _ = graph.add_relation(relation.clone());
+        }
+        graph
+    }
+
+    /// How this plan stands toward a group of concrete relations that render
+    /// as one connection.
+    ///
+    /// Planned additions and the rest never mix in one answer: a group that
+    /// is entirely planned additions reads as [`GroupStanding::Added`], and
+    /// otherwise the additions stand aside - they are not part of the
+    /// architecture yet - while the real relations decide. The empty group
+    /// is [`GroupStanding::Untouched`]: with nothing concrete behind a
+    /// connection, the plan holds no stance on it.
+    #[must_use]
+    pub fn standing_of<'a>(
+        &self,
+        concrete: impl IntoIterator<Item = &'a Relation>,
+    ) -> GroupStanding {
+        let (mut added, mut real, mut removed) = (0, 0, 0);
+        for relation in concrete {
+            if self.plans_addition_of(relation) {
+                added += 1;
+            } else {
+                real += 1;
+                if self.plans_removal_of(relation) {
+                    removed += 1;
+                }
+            }
+        }
+        if real == 0 {
+            return if added > 0 {
+                GroupStanding::Added
+            } else {
+                GroupStanding::Untouched
+            };
+        }
+        match removed {
+            0 => GroupStanding::Untouched,
+            all if all == real => GroupStanding::Removed,
+            some => GroupStanding::PartlyRemoved {
+                removed: some,
+                of: real,
+            },
+        }
+    }
+}
+
+/// What a plan does to a group of concrete relations rendered as one
+/// connection. See [`Plan::standing_of`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupStanding {
+    /// Nothing in the group is marked; the connection stands as it is.
+    Untouched,
+    /// Every relation in the group is a planned addition: the connection
+    /// exists only in the plan.
+    Added,
+    /// Every real relation in the group is planned for removal.
+    Removed,
+    /// Some but not all real relations are planned for removal.
+    PartlyRemoved { removed: usize, of: usize },
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -198,5 +282,121 @@ mod tests {
         plan.propose(ProposedChange::AddRelation(relation("a", "c")))
             .unwrap();
         assert_eq!(plan.change_set().changes().len(), 2);
+    }
+
+    fn graph_of(elements: &[&str], relations: &[(&str, &str)]) -> ArchitectureGraph {
+        use cutaway_architecture::{Element, ElementKind, ElementName};
+        let mut graph = ArchitectureGraph::new();
+        for id in elements {
+            graph
+                .add_element(Element {
+                    id: ElementId::new(*id).unwrap(),
+                    name: ElementName::new(*id).unwrap(),
+                    kind: ElementKind::Module,
+                })
+                .unwrap();
+        }
+        for (from, to) in relations {
+            graph.add_relation(relation(from, to)).unwrap();
+        }
+        graph
+    }
+
+    #[test]
+    fn planned_dependency_additions_join_the_graph_a_lens_views() {
+        let base = graph_of(&["a", "b"], &[]);
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddRelation(relation("a", "b")))
+            .unwrap();
+
+        let viewed = plan.with_planned_dependencies(&base);
+        assert!(viewed.relations().any(|r| *r == relation("a", "b")));
+        assert!(
+            base.relations().next().is_none(),
+            "the base architecture stays untouched"
+        );
+    }
+
+    #[test]
+    fn an_addition_the_graph_cannot_hold_yet_stays_out_of_the_viewed_graph() {
+        let base = graph_of(&["a"], &[]);
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddRelation(relation("a", "missing")))
+            .unwrap();
+        assert_eq!(plan.with_planned_dependencies(&base), base);
+    }
+
+    #[test]
+    fn a_planned_removal_keeps_its_relation_in_the_viewed_graph() {
+        let base = graph_of(&["a", "b"], &[("a", "b")]);
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::RemoveRelation(relation("a", "b")))
+            .unwrap();
+        assert_eq!(
+            plan.with_planned_dependencies(&base),
+            base,
+            "a severed dependency still exists; the picture marks it instead of hiding it"
+        );
+    }
+
+    #[test]
+    fn a_group_the_plan_never_mentions_is_untouched() {
+        assert_eq!(
+            Plan::new().standing_of([relation("a", "b")].iter()),
+            GroupStanding::Untouched
+        );
+        assert_eq!(
+            Plan::new().standing_of(std::iter::empty::<&Relation>()),
+            GroupStanding::Untouched
+        );
+    }
+
+    #[test]
+    fn a_group_with_every_relation_planned_for_removal_reads_as_removed() {
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::RemoveRelation(relation("a", "b")))
+            .unwrap();
+        plan.propose(ProposedChange::RemoveRelation(relation("a", "c")))
+            .unwrap();
+        assert_eq!(
+            plan.standing_of([relation("a", "b"), relation("a", "c")].iter()),
+            GroupStanding::Removed
+        );
+    }
+
+    #[test]
+    fn a_group_with_part_of_its_relations_planned_for_removal_reads_as_partly_removed() {
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::RemoveRelation(relation("a", "b")))
+            .unwrap();
+        assert_eq!(
+            plan.standing_of([relation("a", "b"), relation("a", "c")].iter()),
+            GroupStanding::PartlyRemoved { removed: 1, of: 2 }
+        );
+    }
+
+    #[test]
+    fn a_group_of_planned_additions_alone_reads_as_added() {
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddRelation(relation("a", "b")))
+            .unwrap();
+        assert_eq!(
+            plan.standing_of([relation("a", "b")].iter()),
+            GroupStanding::Added
+        );
+    }
+
+    #[test]
+    fn an_addition_folded_among_real_relations_leaves_the_real_ones_deciding() {
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddRelation(relation("a", "b")))
+            .unwrap();
+        plan.propose(ProposedChange::RemoveRelation(relation("a", "c")))
+            .unwrap();
+        assert_eq!(
+            plan.standing_of([relation("a", "b"), relation("a", "c")].iter()),
+            GroupStanding::Removed,
+            "the planned addition stands aside; the one real relation is removed"
+        );
     }
 }

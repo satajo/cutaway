@@ -184,6 +184,32 @@ pub struct BoundaryView {
     pub detail_within: BTreeMap<ElementId, Detail>,
 }
 
+impl BoundaryView {
+    /// Every concrete relation one rendered edge answers for: what the lens
+    /// rolled into it, together with the dependencies between the same pair
+    /// of boundaries that name the target frame as a whole and wait in
+    /// [`BoundaryView::coarse`]. Acting on the rendered edge - severing it,
+    /// annotating it - means acting on all of them: the reader addresses the
+    /// connection between two boundaries, not one attachment of it.
+    ///
+    /// The self leaves stand for their frames here, so an edge into a
+    /// frame's own content also answers for the dependencies on the frame
+    /// as a whole. Answers empty for an edge this view does not draw.
+    #[must_use]
+    pub fn concrete_behind(&self, edge: &Relation) -> BTreeSet<Relation> {
+        let mut concrete = self.provenance.get(edge).cloned().unwrap_or_default();
+        let frame_pair = Relation {
+            from: self_leaf_frame(&edge.from).unwrap_or_else(|| edge.from.clone()),
+            to: self_leaf_frame(&edge.to).unwrap_or_else(|| edge.to.clone()),
+            kind: edge.kind,
+        };
+        if let Some(coarse) = self.coarse.get(&frame_pair) {
+            concrete.extend(coarse.iter().cloned());
+        }
+        concrete
+    }
+}
+
 /// Cuts `graph` where the cut asks for.
 pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryView, LensError> {
     let parents = containment_parents(graph)?;
@@ -422,7 +448,16 @@ const SELF_LEAF_MARK: &str = "#self";
 /// sources declare. A view holds these synthetic leaves beside the real
 /// boundaries, and a reader deserves to see the difference.
 pub fn is_self_leaf(id: &ElementId) -> bool {
-    id.as_str().ends_with(SELF_LEAF_MARK)
+    self_leaf_frame(id).is_some()
+}
+
+/// The frame whose own content a self leaf names, and None for an id the
+/// sources declare. A plan must never record a self leaf - the id exists in
+/// no source graph - so whatever acts on a self leaf acts on this frame.
+pub fn self_leaf_frame(id: &ElementId) -> Option<ElementId> {
+    id.as_str()
+        .strip_suffix(SELF_LEAF_MARK)
+        .and_then(|frame| ElementId::new(frame).ok())
 }
 
 fn self_leaf_id(frame: &ElementId) -> ElementId {
@@ -976,6 +1011,76 @@ mod tests {
     fn a_detail_reaching_deeper_into_the_hierarchy_is_the_greater_one() {
         assert!(Detail::Items > Detail::Modules);
         assert!(Detail::Modules > Detail::Packages);
+    }
+
+    #[test]
+    fn a_self_leaf_id_names_the_frame_it_grew_on() {
+        assert_eq!(self_leaf_frame(&id("a/lib#self")), Some(id("a/lib")));
+        assert_eq!(self_leaf_frame(&id("a/lib")), None);
+        assert_eq!(
+            self_leaf_frame(&id("a/lib#type:X")),
+            None,
+            "an item id ends in #<kind>:<name>, never in the self mark"
+        );
+    }
+
+    #[test]
+    fn the_concrete_relations_behind_an_edge_are_its_provenance() {
+        let view = boundary_view(&fixture(), &Cut::uniform(Detail::Packages)).unwrap();
+        assert_eq!(
+            view.concrete_behind(&relation("package:a", "package:b", RelationKind::DependsOn)),
+            BTreeSet::from([relation("a/util", "b/lib", RelationKind::DependsOn)])
+        );
+    }
+
+    #[test]
+    fn an_edge_into_a_frames_own_content_also_answers_for_the_frame_as_a_whole() {
+        let mut graph = fixture();
+        graph
+            .add_element(element("b/util", ElementKind::Module))
+            .unwrap();
+        graph
+            .add_relation(relation("b/lib", "b/util", RelationKind::Contains))
+            .unwrap();
+        // a/util reaches b/lib as a whole (the fixture dependency) and an
+        // item of b/lib's own content.
+        graph
+            .add_element(element("b/lib#function:go", ElementKind::Function))
+            .unwrap();
+        graph
+            .add_relation(relation(
+                "b/lib",
+                "b/lib#function:go",
+                RelationKind::Contains,
+            ))
+            .unwrap();
+        graph
+            .add_relation(relation(
+                "a/util",
+                "b/lib#function:go",
+                RelationKind::DependsOn,
+            ))
+            .unwrap();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+
+        let edge = relation("a/util", "b/lib#self", RelationKind::DependsOn);
+        assert_eq!(
+            view.concrete_behind(&edge),
+            BTreeSet::from([
+                relation("a/util", "b/lib", RelationKind::DependsOn),
+                relation("a/util", "b/lib#function:go", RelationKind::DependsOn),
+            ]),
+            "the waiting whole-frame dependency joins the rendered edge's answer"
+        );
+    }
+
+    #[test]
+    fn an_edge_the_view_does_not_draw_answers_for_nothing() {
+        let view = boundary_view(&fixture(), &Cut::uniform(Detail::Packages)).unwrap();
+        assert!(
+            view.concrete_behind(&relation("package:b", "package:a", RelationKind::DependsOn))
+                .is_empty()
+        );
     }
 
     #[test]

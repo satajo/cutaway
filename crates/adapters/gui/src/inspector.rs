@@ -123,7 +123,9 @@ fn help(ui: &mut egui::Ui) {
     );
     ui.label(
         "Severed connections turn red, drawn ones green; the plan saves to \
-         cutaway.json in the repository.",
+         cutaway.json in the repository. A connection with only part of its \
+         concrete dependencies severed keeps its color and carries a red \
+         mark by its arrowhead.",
     );
     ui.label(
         "Drag or scroll to pan, ctrl+scroll or pinch to zoom; press Home, click Fit, \
@@ -177,6 +179,28 @@ fn edge(ui: &mut egui::Ui, session: &mut Session, relation: &Relation) {
             if ui.button("Restore").clicked() {
                 session.restore(relation);
             }
+        }
+        EdgeStatus::PartiallySevered { severed, total } => {
+            ui.colored_label(
+                canvas::SEVERED,
+                format!("{severed} of {total} concrete dependencies severed."),
+            );
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Sever")
+                    .on_hover_text("Mark the remaining dependencies for removal too.")
+                    .clicked()
+                {
+                    session.sever(relation);
+                }
+                if ui
+                    .button("Restore")
+                    .on_hover_text("Withdraw every planned removal behind this connection.")
+                    .clicked()
+                {
+                    session.restore(relation);
+                }
+            });
         }
         EdgeStatus::Drawn => {
             ui.colored_label(canvas::DRAWN, "Planned addition.");
@@ -373,7 +397,13 @@ fn edge_panel(session: &Session, relation: &Relation) -> Option<EdgePanel> {
             glyph::OUTWARD,
             labels.qualified(&relation.to)
         ),
-        provenance: provenance_rows(view, &session.graph, &Labels::of(&session.graph), relation),
+        provenance: provenance_rows(
+            view,
+            &session.graph,
+            &Labels::of(&session.graph),
+            relation,
+            &session.plan,
+        ),
     })
 }
 
@@ -474,7 +504,9 @@ fn unscoped_rows(view: &BoundaryView, concrete: &Labels<'_>) -> Vec<Row> {
 }
 
 /// The concrete dependencies behind one rolled-up edge, each leading to the
-/// boundary its source shows up as at this detail.
+/// boundary its source shows up as at this detail. A dependency the plan
+/// removes says so, which is how a partly severed connection lists which of
+/// its dependencies are going.
 ///
 /// A row names elements below the detail the view cuts at, so it reads them
 /// through the labels of the full graph: only that graph holds them.
@@ -483,13 +515,19 @@ fn provenance_rows(
     graph: &ArchitectureGraph,
     concrete: &Labels<'_>,
     relation: &Relation,
+    plan: &cutaway_planning::Plan,
 ) -> Vec<Row> {
     let behind = || view.provenance.get(relation).into_iter().flatten();
     let names = concrete.distinct(behind().flat_map(|edge| [&edge.from, &edge.to]));
     behind()
         .map(|edge| Row {
             text: format!(
-                "{} {} {}",
+                "{}{} {} {}",
+                if plan.plans_removal_of(edge) {
+                    "(severed) "
+                } else {
+                    ""
+                },
                 names.name(&edge.from),
                 glyph::OUTWARD,
                 names.name(&edge.to)
@@ -788,6 +826,7 @@ mod tests {
             &graph,
             &Labels::of(&graph),
             &depends("package:a", "package:b"),
+            &cutaway_planning::Plan::new(),
         );
         assert_eq!(
             texts(&rows),
@@ -800,6 +839,32 @@ mod tests {
         for row in &rows {
             assert_eq!(row.target, Some(Selection::Node(id("package:a"))));
         }
+    }
+
+    #[test]
+    fn a_partly_severed_connection_lists_which_dependencies_are_going() {
+        let graph = graph();
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
+        let mut plan = cutaway_planning::Plan::new();
+        plan.propose(cutaway_planning::ProposedChange::RemoveRelation(depends(
+            "a/one", "b/one",
+        )))
+        .unwrap();
+        let rows = provenance_rows(
+            &view,
+            &graph,
+            &Labels::of(&graph),
+            &depends("package:a", "package:b"),
+            &plan,
+        );
+        assert_eq!(
+            texts(&rows),
+            [
+                format!("(severed) a/one {} b/one", glyph::OUTWARD),
+                format!("a/two {} b/one", glyph::OUTWARD),
+                format!("a/two#type:X {} b/one", glyph::OUTWARD)
+            ]
+        );
     }
 
     #[test]
