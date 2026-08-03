@@ -118,6 +118,9 @@ const FADE: f32 = 0.18;
 /// Color strength left to the frames around the selection's neighborhood:
 /// enough to read their names, little enough to stay background.
 const CONTEXT: f32 = 0.55;
+/// Color strength of a frame's border: the frame is the room its parts sit
+/// in, so its outline stays a step behind the name it carries.
+const FRAME_BORDER: f32 = 0.6;
 /// Color strength of a frame's own-content leaf while nothing touches it:
 /// present beside the parts, never competing with them.
 const OWN_CONTENT: f32 = 0.5;
@@ -125,7 +128,8 @@ const OWN_CONTENT: f32 = 0.5;
 const GLYPH: f32 = 0.55;
 /// The gap between a kind glyph and its name, in font sizes.
 const GLYPH_GAP: f32 = 0.3;
-/// Opacity of the wash that tints one nesting level of frames.
+/// How far a frame's interior steps from the backdrop toward the tint of its
+/// nesting level.
 const WASH: f32 = 0.06;
 /// Stroke width of an edge that stands for a single concrete dependency.
 const EDGE_WIDTH: f32 = 1.2;
@@ -161,11 +165,16 @@ const COUNT_SIZE: f32 = 0.8;
 /// The margin a summary block keeps around its text.
 const BLOCK_MARGIN: f32 = 6.0;
 /// Opacity of the minimap's own background: enough to lift the map off the
-/// picture, little enough to read the picture through it.
+/// picture, little enough to read the picture through it. The map is the one
+/// surface whose translucency carries meaning - it lies over the whole
+/// picture and must let it through - so it stays alpha-based while the
+/// picture itself paints flat.
 const MAP_FILL: f32 = 0.85;
 /// Color strength of the map's frame, of the fill of the boxes on it, and
 /// of their outline. The map is chrome about the picture, so it stays under
-/// everything the picture itself draws.
+/// everything the picture itself draws. All three lie on the map's own
+/// translucent surface rather than on the backdrop, so they thin their alpha
+/// along with it.
 const MAP_BORDER: f32 = 0.3;
 const MAP_BOX_FILL: f32 = 0.14;
 const MAP_BOX_BORDER: f32 = 0.45;
@@ -517,9 +526,13 @@ fn header_of(rect: Rect) -> Rect {
 struct Paint<'a> {
     painter: egui::Painter,
     camera: TSTransform,
+    /// The surface the whole picture lies on. Every weakened mark blends
+    /// against it instead of thinning its own alpha, so no two weakened
+    /// marks can stack into a stronger one.
+    background: Color32,
     base: Color32,
     fill: Color32,
-    /// The interior tints of frames, by nesting depth parity.
+    /// The inks frames tint their interiors with, by nesting depth parity.
     washes: [Color32; 2],
     labels: Labels<'a>,
     focus: Option<Focus<'a>>,
@@ -548,7 +561,7 @@ impl Paint<'_> {
             .map_or(Strength::Focused, |focus| focus.edge(relation))
     }
 
-    /// The interior of a frame at this nesting depth.
+    /// The ink a frame at this nesting depth tints its interior toward.
     fn wash(&self, depth: usize) -> Color32 {
         self.washes[depth % 2]
     }
@@ -558,13 +571,42 @@ impl Paint<'_> {
 /// depths wash in opposite directions, one toward the text and one toward
 /// the deepest background, so no frame shares the shade of the frame around
 /// it. Both directions come from the theme, so a light and a dark canvas
-/// read alike, and both stay faint enough to leave the boxes and the edges
-/// the picture.
+/// read alike. Each frame steps only [`WASH`] of the way toward its tint,
+/// which leaves the boxes and the edges the picture.
 fn washes(visuals: &egui::Visuals) -> [Color32; 2] {
-    [
-        visuals.text_color().gamma_multiply(WASH),
-        visuals.extreme_bg_color.gamma_multiply(WASH),
-    ]
+    [visuals.text_color(), visuals.extreme_bg_color]
+}
+
+/// A flat step from the backdrop toward an ink: each channel moves `share`
+/// of the way, and the answer is opaque.
+///
+/// This is what weakening a mark means on this canvas. Weakening by alpha
+/// instead lets marks composite: two faded strokes crossing on a dark
+/// backdrop add their ink and read brighter than either, which is exactly
+/// the shout the fade exists to prevent. A flat step answers one color per
+/// (backdrop, ink, share), so a hundred faded strokes over one another read
+/// as one.
+///
+/// Blending the same backdrop twice is the same as blending once with the
+/// product of the shares, so callers that weaken for several reasons
+/// multiply the shares and step once - one rounding, one answer.
+fn toward(background: Color32, ink: Color32, share: f32) -> Color32 {
+    // A share outside the range names no color between the two ends, so it
+    // holds at the end it passed.
+    let share = share.clamp(0.0, 1.0);
+    // Both ends enter opaque, which is what makes the step a step between
+    // two colors rather than a lerp of two coverages.
+    let opaque = |color: Color32| Color32::from_rgb(color.r(), color.g(), color.b());
+    opaque(background).lerp_to_gamma(opaque(ink), share)
+}
+
+/// How much of its ink a mark keeps at each strength.
+fn share_of(strength: Strength) -> f32 {
+    match strength {
+        Strength::Focused => 1.0,
+        Strength::Context => CONTEXT,
+        Strength::Faded => FADE,
+    }
 }
 
 /// The ink a box draws its border and its name in: the plan's colour where
@@ -580,12 +622,10 @@ fn node_ink(base: Color32, status: Option<&NodeStatus>) -> Color32 {
     }
 }
 
-fn shade(color: Color32, strength: Strength) -> Color32 {
-    match strength {
-        Strength::Focused => color,
-        Strength::Context => color.gamma_multiply(CONTEXT),
-        Strength::Faded => color.gamma_multiply(FADE),
-    }
+/// The color a mark paints in at a given strength: the ink itself in focus,
+/// and a flat step from the backdrop toward it everywhere else.
+fn shade(background: Color32, ink: Color32, strength: Strength) -> Color32 {
+    toward(background, ink, share_of(strength))
 }
 
 fn paint(
@@ -601,6 +641,7 @@ fn paint(
     let paint = Paint {
         painter: ui.painter().with_clip_rect(viewport),
         camera,
+        background: visuals.panel_fill,
         base: visuals.text_color(),
         fill: visuals.extreme_bg_color,
         washes: washes(visuals),
@@ -657,16 +698,21 @@ fn paint_containers(
         let ink = node_ink(paint.base, content.nodes.get(id));
         let border = Stroke::new(
             paint.stroke_width(width),
-            shade(ink.gamma_multiply(0.6), strength),
+            toward(paint.background, ink, FRAME_BORDER * share_of(strength)),
         );
-        let fill = match block {
-            Some(_) => paint.base.gamma_multiply(BLOCK),
-            None => paint.wash(frame.depth),
+        // A frame's interior lies on the backdrop and on the frames that
+        // hold it, never on a box or an edge - containers paint before
+        // both. Nothing is meant to read through it, so it paints flat:
+        // translucent tints would add wherever nesting stacks them, and the
+        // deepest frame would glow instead of receding.
+        let (tint, presence) = match block {
+            Some(_) => (paint.base, BLOCK),
+            None => (paint.wash(frame.depth), WASH),
         };
         paint.painter.rect(
             rect,
             CornerRadius::same(6),
-            shade(fill, strength),
+            toward(paint.background, tint, presence * share_of(strength)),
             border,
             StrokeKind::Middle,
         );
@@ -679,7 +725,7 @@ fn paint_containers(
                         Align2::LEFT_TOP,
                         paint.labels.label(id).text(),
                         font,
-                        shade(ink, strength),
+                        shade(paint.background, ink, strength),
                     );
                 }
             }
@@ -713,7 +759,7 @@ fn paint_block_text(
     strength: Strength,
     ink: Color32,
 ) {
-    let named = shade(ink, strength);
+    let named = shade(paint.background, ink, strength);
     let text = paint.labels.label(id).text();
     let comfortable = FontId::proportional(LABEL_SIZE);
     let measured = paint
@@ -727,7 +773,7 @@ fn paint_block_text(
     let font = FontId::proportional(size);
     let name = paint.painter.layout_no_wrap(text, font.clone(), named);
     let center = rect.center();
-    let counted = shade(ink.gamma_multiply(GLYPH), strength);
+    let counted = toward(paint.background, ink, GLYPH * share_of(strength));
     let count = (block.inside > 0).then(|| {
         paint.painter.layout_no_wrap(
             format!("{} inside", block.inside),
@@ -806,14 +852,18 @@ fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
         // not. The one stroke the reader asks about keeps all of its ink,
         // however much company it has.
         let asked_about = selected || hovered;
-        let color = shade(
-            dim(ink, route.scope).gamma_multiply(if asked_about {
+        // Three reasons to hold a stroke back, and one step from the
+        // backdrop for all three: stepping once per reason would round three
+        // times, and a stroke that crosses another would still add ink where
+        // they meet.
+        let share = scope_ink(route.scope)
+            * if asked_about {
                 1.0
             } else {
                 crowd_ink(route.crowd)
-            }),
-            bundle.strength(|edge| paint.edge(&visual(edge).relation)),
-        );
+            }
+            * share_of(bundle.strength(|edge| paint.edge(&visual(edge).relation)));
+        let color = toward(paint.background, ink, share);
         let width = edge_width(bundle.weight, route.scope)
             + if selected {
                 SELECTED_WIDTH
@@ -866,10 +916,12 @@ fn edge_width(weight: usize, scope: Scope) -> f32 {
     }
 }
 
-fn dim(color: Color32, scope: Scope) -> Color32 {
+/// How much of its ink a stroke keeps for the reach it has: an edge that
+/// stays inside one top-level boundary is not the picture's subject.
+fn scope_ink(scope: Scope) -> f32 {
     match scope {
-        Scope::Intra => color.gamma_multiply(INTRA),
-        Scope::Cross => color,
+        Scope::Intra => INTRA,
+        Scope::Cross => 1.0,
     }
 }
 
@@ -916,31 +968,33 @@ fn paint_leaves(
         } else {
             0.8
         };
+        // A leaf's box is solid where the reader looks, and a faded one is
+        // not a window: an edge that runs under it stays under it either
+        // way. So the fill steps toward the backdrop instead of thinning,
+        // and a stroke beneath a faded box no longer half-shows through it.
         paint.painter.rect(
             rect,
             CornerRadius::same(5),
             if secondary {
                 Color32::TRANSPARENT
             } else {
-                shade(paint.fill, strength)
+                shade(paint.background, paint.fill, strength)
             },
             Stroke::new(
                 paint.stroke_width(width),
-                shade(ink.gamma_multiply(presence), strength),
+                toward(paint.background, ink, presence * share_of(strength)),
             ),
             StrokeKind::Middle,
         );
         if let Some(font) = paint.font() {
-            let color = shade(
-                ink.gamma_multiply(if secondary { OWN_CONTENT } else { 1.0 }),
-                strength,
-            );
+            let named = if secondary { OWN_CONTENT } else { 1.0 } * share_of(strength);
             paint_leaf_label(
                 &paint.painter,
                 rect.center(),
                 &paint.labels.label(id),
                 &font,
-                color,
+                toward(paint.background, ink, named),
+                toward(paint.background, ink, named * GLYPH),
             );
         }
     }
@@ -948,31 +1002,32 @@ fn paint_leaves(
 
 /// Writes a leaf's label centered in its box. The kind glyph paints dimmer
 /// than the name beside it: the name is the subject, the glyph only says
-/// what kind of thing carries it. Layout measures glyph and name together,
-/// so the pair always fits.
+/// what kind of thing carries it. Both colors arrive ready, each blended
+/// from the backdrop in one step, so neither is a shade of the other.
+/// Layout measures glyph and name together, so the pair always fits.
 fn paint_leaf_label(
     painter: &egui::Painter,
     center: Pos2,
     label: &Label,
     font: &FontId,
-    color: Color32,
+    named: Color32,
+    glyphed: Color32,
 ) {
-    let name = painter.layout_no_wrap(label.name.clone(), font.clone(), color);
+    let name = painter.layout_no_wrap(label.name.clone(), font.clone(), named);
     let Some(glyph) = label.glyph else {
         let size = name.size();
-        painter.galley(center - size / 2.0, name, color);
+        painter.galley(center - size / 2.0, name, named);
         return;
     };
-    let dim = color.gamma_multiply(GLYPH);
-    let glyph = painter.layout_no_wrap((*glyph).to_owned(), font.clone(), dim);
+    let glyph = painter.layout_no_wrap((*glyph).to_owned(), font.clone(), glyphed);
     let (glyph_size, name_size) = (glyph.size(), name.size());
     let gap = font.size * GLYPH_GAP;
     let left = center.x - (glyph_size.x + gap + name_size.x) / 2.0;
-    painter.galley(pos2(left, center.y - glyph_size.y / 2.0), glyph, dim);
+    painter.galley(pos2(left, center.y - glyph_size.y / 2.0), glyph, glyphed);
     painter.galley(
         pos2(left + glyph_size.x + gap, center.y - name_size.y / 2.0),
         name,
-        color,
+        named,
     );
 }
 
@@ -1169,6 +1224,61 @@ mod tests {
             far_out, close_in,
             "the block's screen box decides the size, and nothing else does"
         );
+    }
+
+    /// A dark canvas and its text: the pair every mark blends between.
+    const BACKDROP: Color32 = Color32::from_rgb(27, 27, 27);
+    const INK: Color32 = Color32::from_rgb(140, 140, 140);
+
+    #[test]
+    fn a_mark_with_no_ink_left_is_the_backdrop_itself() {
+        assert_eq!(toward(BACKDROP, INK, 0.0), BACKDROP);
+    }
+
+    #[test]
+    fn a_mark_at_full_strength_paints_the_ink_it_was_given() {
+        assert_eq!(toward(BACKDROP, INK, 1.0), INK);
+        assert_eq!(toward(BACKDROP, SEVERED, 1.0), SEVERED);
+    }
+
+    #[test]
+    fn a_weakened_mark_is_never_translucent() {
+        for share in [0.0, FADE, CONTEXT, OWN_CONTENT, 0.99, 1.0] {
+            for ink in [INK, SEVERED, DRAWN, MODIFIED] {
+                assert_eq!(
+                    toward(BACKDROP, ink, share).a(),
+                    255,
+                    "share {share} of {ink:?} must cover what it paints over"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_faded_marks_over_each_other_read_as_one() {
+        let first = toward(BACKDROP, SEVERED, FADE);
+        let second = toward(BACKDROP, SEVERED, FADE);
+        assert_eq!(
+            first, second,
+            "the same backdrop, ink and share answer the same color, and an \
+             opaque one covers its twin exactly"
+        );
+    }
+
+    #[test]
+    fn the_plan_colors_stay_apart_from_the_backdrop_and_from_each_other() {
+        for share in [FADE, CONTEXT] {
+            let plan = [SEVERED, DRAWN, MODIFIED].map(|ink| toward(BACKDROP, ink, share));
+            for color in plan {
+                assert!(
+                    color.intensity() > BACKDROP.intensity() + 0.01,
+                    "at share {share}, {color:?} must lift off the backdrop"
+                );
+            }
+            assert_ne!(plan[0], plan[1]);
+            assert_ne!(plan[1], plan[2]);
+            assert_ne!(plan[0], plan[2]);
+        }
     }
 
     #[test]
