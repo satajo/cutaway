@@ -13,7 +13,7 @@
 //! decision is geometry, so it is answered here and proved without a screen.
 
 use eframe::egui::emath::TSTransform;
-use eframe::egui::{self, Rect, Response, Ui, Vec2};
+use eframe::egui::{self, Pos2, Rect, Response, Ui, Vec2};
 
 /// The magnification the reader is held between. Past the near bound a box
 /// is all that fits on the canvas; past the far one the whole picture is
@@ -44,6 +44,10 @@ const MAX_SUBJECT_SHARE: f32 = 0.6;
 /// enough that the eye can follow the picture across, short enough that the
 /// reader never waits for it.
 const TRAVEL: f32 = 0.25;
+/// The magnification a point of wheel travel is worth, as an exponent. This
+/// is the speed egui itself gives ctrl+scroll, so one notch of the wheel
+/// magnifies by the same step whichever way the reader asks for it.
+const WHEEL_ZOOM_SPEED: f32 = 1.0 / 200.0;
 
 /// Where the picture stands, and where it is travelling.
 ///
@@ -150,8 +154,12 @@ impl Flight {
     }
 }
 
-/// Applies drag-to-pan, scroll-to-pan, and pinch-or-ctrl-scroll zoom about
-/// the pointer, and answers with the camera the frame paints at.
+/// Applies drag-to-pan, scroll-or-pinch zoom about the pointer, and
+/// shift-scroll pan, and answers with the camera the frame paints at.
+///
+/// The wheel magnifies and the hand pans, because the reader crosses this
+/// picture far more often by getting closer to a boundary than by sliding
+/// the page.
 ///
 /// A double click on the background refits the whole picture. That one
 /// travels rather than cuts: the reader's hand is not on the picture, and a
@@ -172,19 +180,26 @@ pub(crate) fn steer(
     if background.dragged() {
         steered = shifted(steered, background.drag_delta());
     }
-    if let Some(pointer) = ui
-        .input(|input| input.pointer.hover_pos())
-        .filter(|position| viewport.contains(*position))
-    {
-        let zoom = ui.input(egui::InputState::zoom_delta);
+    // The wheel, the pinch, the modifier and the pointer are read from one
+    // snapshot: a modifier let go between two reads would turn the reader's
+    // pan into a zoom halfway through the gesture.
+    let (pinch, scroll, pans, pointer) = ui.input(|input| {
+        (
+            input.zoom_delta(),
+            input.smooth_scroll_delta,
+            input.modifiers.shift,
+            input.pointer.hover_pos(),
+        )
+    });
+    if let Some(pointer) = pointer.filter(|position| viewport.contains(*position)) {
+        // A pinch and a wheel that arrive in the same frame are one wish for
+        // magnification, so they multiply into a single step instead of each
+        // moving the camera in turn.
+        let zoom = pinch * wheel_zoom(scroll, pans);
         if (zoom - 1.0).abs() > f32::EPSILON {
-            let allowed = (steered.scaling * zoom).clamp(MIN_ZOOM, MAX_ZOOM) / steered.scaling;
-            steered = TSTransform::from_translation(pointer.to_vec2())
-                * TSTransform::from_scaling(allowed)
-                * TSTransform::from_translation(-pointer.to_vec2())
-                * steered;
+            steered = magnified(steered, pointer, zoom);
         } else {
-            steered = shifted(steered, ui.input(|input| input.smooth_scroll_delta));
+            steered = shifted(steered, scroll);
         }
     }
     if steered == current {
@@ -192,6 +207,39 @@ pub(crate) fn steer(
         return current;
     }
     camera.hold(steered)
+}
+
+/// What the wheel asks the magnification to be multiplied by, and 1.0 where
+/// it asks for a pan instead.
+///
+/// Magnification is multiplicative, so wheel travel enters it as an exponent:
+/// equal travel in either direction magnifies and shrinks by the same step,
+/// and travelling back undoes exactly what travelling out did.
+///
+/// Two deltas mean a pan and never a zoom. Shift is the reader saying so,
+/// and egui has already laid that gesture on the horizontal axis by the time
+/// it arrives here. A delta with no vertical part at all is a sideways
+/// scroll from a trackpad or a tilting wheel, which carries nothing to
+/// magnify by.
+fn wheel_zoom(scroll: Vec2, pans: bool) -> f32 {
+    if pans || scroll.y == 0.0 {
+        return 1.0;
+    }
+    (scroll.y * WHEEL_ZOOM_SPEED).exp()
+}
+
+/// The camera magnified about one point on the screen, held between the
+/// bounds the reader is allowed.
+///
+/// The world under that point stays under it: the picture grows around what
+/// the reader is pointing at, so the boundary they are reaching for is the
+/// one that fills the canvas.
+fn magnified(camera: TSTransform, about: Pos2, zoom: f32) -> TSTransform {
+    let allowed = (camera.scaling * zoom).clamp(MIN_ZOOM, MAX_ZOOM) / camera.scaling;
+    TSTransform::from_translation(about.to_vec2())
+        * TSTransform::from_scaling(allowed)
+        * TSTransform::from_translation(-about.to_vec2())
+        * camera
 }
 
 /// Whether this frame's keys ask for the whole picture again.
@@ -381,6 +429,60 @@ mod tests {
         assert_eq!(
             revealing(Rect::NOTHING, TSTransform::IDENTITY, subject),
             None
+        );
+    }
+
+    #[test]
+    fn magnifying_about_a_point_leaves_that_point_where_it_is() {
+        let camera = centered_on(vec2(1000.0, 500.0), 0.7, viewport());
+        let pointer = pos2(310.0, 90.0);
+        let under_pointer = camera.inverse().mul_pos(pointer);
+
+        let closer = magnified(camera, pointer, 1.4);
+        assert!(same(closer.scaling, 0.98), "{closer:?}");
+        let moved = closer.mul_pos(under_pointer);
+        assert!(
+            same(moved.x, pointer.x) && same(moved.y, pointer.y),
+            "the world under the pointer must not slide out from under it: {moved:?}"
+        );
+    }
+
+    #[test]
+    fn magnification_stops_at_the_bounds_the_reader_is_held_between() {
+        let pointer = pos2(120.0, 200.0);
+        let farthest = centered_on(vec2(1000.0, 500.0), MIN_ZOOM, viewport());
+        let nearest = centered_on(vec2(1000.0, 500.0), MAX_ZOOM, viewport());
+
+        assert!(
+            same_stand(magnified(farthest, pointer, 0.1), farthest),
+            "a camera at the far bound stands still instead of drifting"
+        );
+        assert!(
+            same_stand(magnified(nearest, pointer, 10.0), nearest),
+            "a camera at the near bound stands still instead of drifting"
+        );
+        let leapt = magnified(farthest, pointer, 100.0);
+        assert!(
+            same(leapt.scaling, MAX_ZOOM),
+            "one huge step lands on the bound, not past it: {leapt:?}"
+        );
+    }
+
+    #[test]
+    fn wheel_travel_back_undoes_the_magnification_it_made() {
+        let out = wheel_zoom(vec2(0.0, 14.0), false);
+        let back = wheel_zoom(vec2(0.0, -14.0), false);
+
+        assert!(out > 1.0, "scrolling up comes closer: {out}");
+        assert!(same(out * back, 1.0), "{out} against {back}");
+    }
+
+    #[test]
+    fn a_sideways_scroll_pans_instead_of_magnifying() {
+        assert!(same(wheel_zoom(vec2(-30.0, 0.0), false), 1.0));
+        assert!(
+            same(wheel_zoom(vec2(0.0, 14.0), true), 1.0),
+            "shift asks the wheel to pan, whichever axis the delta arrives on"
         );
     }
 

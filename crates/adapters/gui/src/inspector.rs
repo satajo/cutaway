@@ -150,8 +150,8 @@ fn help(ui: &mut egui::Ui) {
          of the story.",
     );
     ui.label(
-        "Drag or scroll to pan, ctrl+scroll or pinch to zoom; press Home, click Fit, \
-         or double-click the background to bring the whole picture back.",
+        "Scroll or pinch to zoom, drag to pan; shift+scroll pans too. Press Home, \
+         click Fit, or double-click the background to bring the whole picture back.",
     );
 }
 
