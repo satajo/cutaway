@@ -108,6 +108,7 @@ mod tests {
                 .into_iter()
                 .map(|(boundary, within)| (ElementId::new(boundary).unwrap(), within))
                 .collect(),
+            scope: None,
         }
     }
 

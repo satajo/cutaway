@@ -23,6 +23,13 @@
 //! Choosing another stop drops those decisions, because a new whole is a new
 //! question, and carries the selection across, because the subject of the
 //! question stays the reader's.
+//!
+//! Focusing scopes the picture to one boundary: it becomes the whole
+//! picture, its dependency partners stand at the border as single closed
+//! boxes, and the rest of the project leaves. The scope outlives every stop
+//! and every expansion - those say how the boundary is read, not which
+//! boundary is read - and the toolbar names it until the reader shows
+//! everything again.
 
 mod bundle;
 mod camera;
@@ -322,7 +329,11 @@ impl Session {
             .selection
             .take()
             .and_then(|selection| Some((self.scene.as_ref().ok()?.view.clone(), selection)));
+        // The scope survives the new whole: a detail says how the reader
+        // reads a boundary, never which boundary they are reading.
+        let scope = self.cut.scope.clone();
         self.cut = Cut::uniform(detail);
+        self.cut.focus(scope);
         self.rebuild_view();
         let carried = before.and_then(|(before, selection)| {
             let after = self.scene.as_ref().ok()?;
@@ -374,6 +385,43 @@ impl Session {
         if step(&mut self.cut, &scene.view, id) {
             self.rebuild_view();
         }
+    }
+
+    /// Scopes the picture to one boundary: it becomes the whole picture, its
+    /// dependency partners stand at the border as single closed boxes, and
+    /// everything else leaves. A frame's own-content box scopes to the frame
+    /// it belongs to, which is the boundary the reader means.
+    fn focus(&mut self, id: &ElementId) {
+        self.scoped_to(Some(real_id(id)));
+    }
+
+    /// Puts the whole project back in the picture.
+    fn unfocus(&mut self) {
+        self.scoped_to(None);
+    }
+
+    /// Moves the picture to another scope. The selection carries over where
+    /// the new picture still holds it, and the camera fits the new picture
+    /// whole: another scope lays the world out anew, so the old coordinates
+    /// point at arbitrary content.
+    fn scoped_to(&mut self, scope: Option<ElementId>) {
+        if self.cut.scope == scope {
+            return;
+        }
+        self.status = None;
+        self.cut.focus(scope);
+        self.rebuild_view();
+        self.refit();
+    }
+
+    /// Whether one element of the architecture stands inside the scope the
+    /// picture holds, and true while the picture holds no scope: without a
+    /// scope every element is in the picture's reach.
+    fn within_scope(&self, id: &ElementId) -> bool {
+        let Some(scope) = &self.cut.scope else {
+            return true;
+        };
+        focus::subtree_of(&self.viewed, scope).contains(&real_id(id))
     }
 
     /// The detail governing what a boundary shows inside it; None while the
@@ -500,6 +548,12 @@ impl Session {
     /// boundary above it answers instead, so the reader always lands
     /// somewhere the picture holds.
     fn locate(&mut self, target: &ElementId) {
+        // A search reaches past the picture, and past its scope with it. An
+        // element outside the scope is answered by showing everything again:
+        // a scoped picture has no box to put it in.
+        if !self.within_scope(target) {
+            self.unfocus();
+        }
         if !self.shows(target) {
             for (boundary, detail) in palette::overrides_revealing(&self.graph, target) {
                 // A boundary the reader closed opens again: the search is
@@ -1310,16 +1364,42 @@ impl eframe::App for CutawayApp {
                 if camera::refit_requested(ui.ctx()) {
                     session.refit();
                 }
+                if focus_requested(ui.ctx())
+                    && let Some(Selection::Node(id)) = session.selection.clone()
+                {
+                    session.focus(&id);
+                }
                 // A mode that waits for a click on the picture must be
                 // leavable without one, and Escape is the key that leaves.
+                // With no mode waiting, Escape leaves the scope instead: it
+                // is the one key that steps back out of wherever the reader
+                // went, and only one thing is ever there to step out of.
                 if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    let waiting = session.drawing
+                        || session.draw_source.is_some()
+                        || session.merging.is_some();
                     session.drawing = false;
                     session.draw_source = None;
                     session.merging = None;
+                    if !waiting {
+                        session.unfocus();
+                    }
                 }
             }
         }
     }
+}
+
+/// Whether this frame's keys ask to scope the picture to the selection.
+///
+/// F is the first letter of what it does, and it commands only while no text
+/// field holds the keyboard: in a note or a name, F is a letter. The search
+/// takes ctrl+F before this reads anything, so the two never contend.
+fn focus_requested(ctx: &egui::Context) -> bool {
+    if ctx.text_edit_focused() {
+        return false;
+    }
+    ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F))
 }
 
 /// The empty canvas, before an architecture stands on it. A dark expanse
@@ -1368,6 +1448,22 @@ fn project_tools(ui: &mut egui::Ui, session: &mut Session) {
     // it, so the stop alone would misname the picture.
     if let Some(departures) = detail::departures(&session.cut) {
         ui.label(egui::RichText::new(departures).weak().small());
+    }
+    // A scoped picture leaves the rest of the project out, and a reader who
+    // forgets that reads a whole project into one package. The scope
+    // therefore names itself beside the stops, where the picture's own terms
+    // stand, together with the way back out.
+    if let Some(scope) = session.cut.scope.clone() {
+        ui.separator();
+        let name = Labels::renaming(&session.viewed, &session.renames).qualified(&scope);
+        ui.label(format!("Focused on {name}"));
+        if ui
+            .button("Show everything")
+            .on_hover_text("Put the whole project back in the picture. Esc.")
+            .clicked()
+        {
+            session.unfocus();
+        }
     }
     ui.separator();
     let label = if session.drawing {
@@ -1758,6 +1854,7 @@ mod tests {
         let opened = Cut {
             detail: Detail::Packages,
             overrides: BTreeMap::from([(id("package:b"), Detail::Modules)]),
+            scope: None,
         };
         let edges = visuals(&two_packages(), &plan, &opened);
         assert_eq!(edges.len(), 1);

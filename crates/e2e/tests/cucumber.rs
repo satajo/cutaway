@@ -68,6 +68,27 @@ fn the_boundary_is_collapsed(world: &mut CutawayWorld, name: String) {
         .expect("the boundary collapses");
 }
 
+#[when(expr = "the picture is focused on {string}")]
+fn the_picture_is_focused_on(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .focus_boundary(&name)
+        .expect("the picture focuses");
+}
+
+#[when("the whole picture is shown again")]
+fn the_whole_picture_is_shown_again(world: &mut CutawayWorld) {
+    world.driver.unfocus();
+}
+
+#[then(expr = "the boundary {string} cannot be expanded")]
+fn the_boundary_cannot_be_expanded(world: &mut CutawayWorld, name: String) {
+    assert!(
+        world.driver.expand_boundary(&name).is_err(),
+        "expected {name} to stay closed"
+    );
+}
+
 #[when(expr = "the connection from {string} to {string} is severed")]
 fn the_connection_is_severed(world: &mut CutawayWorld, from: String, to: String) {
     world

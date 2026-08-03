@@ -46,6 +46,33 @@
 //! and re-inspecting a repository routinely removes elements; rejecting a
 //! stale id would leave the reader with no picture at all over a boundary
 //! that no longer exists.
+//!
+//! # A cut scoped to one boundary
+//!
+//! Every detail below packages puts the whole project's insides in front of
+//! the reader at once. A [`Cut`] therefore carries a scope: the one boundary
+//! the picture is about. The rules, in order:
+//!
+//! - The scoped boundary is the root frame of the picture and always
+//!   visible. The frames that contain it are not: nothing is drawn around
+//!   the root of a picture, and what holds the scope is said in words
+//!   beside it.
+//! - What the scope contains shows exactly as the unscoped cut - detail and
+//!   overrides alike - would show it.
+//! - A partner is an element outside the scope that a concrete dependency
+//!   connects with one inside it, either way round, the dependencies naming
+//!   a frame of the scope as a whole included. Each partner shows as the
+//!   topmost boundary above it that does not contain the scope: the largest
+//!   box disjoint from the scope, which is a sibling package for a partner
+//!   in another package and a sibling boundary for one in the scope's own.
+//!   Several partners behind one such box share it.
+//! - Only the dependencies that reach into the scope enter the picture.
+//!   What passes between two partners is about neither of them and leaves.
+//! - A stub stands whole: [`Cut::expand`] refuses it and an override on it
+//!   is ignored. Looking inside a partner means scoping to that partner.
+//!
+//! A scope naming an element the graph does not hold is ignored, exactly as
+//! a stale override is, and for the same reason.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -122,6 +149,10 @@ pub struct Cut {
     pub detail: Detail,
     /// Boundary -> the detail governing everything inside that boundary.
     pub overrides: BTreeMap<ElementId, Detail>,
+    /// The boundary the picture is about, and None for the whole project.
+    /// A scope says where the reader stands rather than what the sources
+    /// hold, so nothing outlives the reading that set it.
+    pub scope: Option<ElementId>,
 }
 
 impl Cut {
@@ -130,7 +161,15 @@ impl Cut {
         Self {
             detail,
             overrides: BTreeMap::new(),
+            scope: None,
         }
+    }
+
+    /// Scopes the picture to one boundary, or - with None - back to the
+    /// whole project. The detail and the overrides stand either way: a
+    /// reader who scopes the picture keeps the cut they were reading it at.
+    pub fn focus(&mut self, scope: Option<ElementId>) {
+        self.scope = scope;
     }
 
     /// Opens one boundary a step deeper than the detail governing its
@@ -153,6 +192,12 @@ impl Cut {
         boundary: &ElementId,
         step: fn(Detail) -> Option<Detail>,
     ) -> bool {
+        // A stub stands for a partner of the scope, whole and closed. The
+        // picture is about the scope, so looking inside a partner means
+        // scoping to that partner instead.
+        if view.stubs.contains(boundary) {
+            return false;
+        }
         let Some(detail) = view.detail_within.get(boundary).copied().and_then(step) else {
             return false;
         };
@@ -182,6 +227,10 @@ pub struct BoundaryView {
     /// the boundary deepens this detail and collapsing it coarsens it. The
     /// synthetic `self` leaves hold nothing, so they appear here not at all.
     pub detail_within: BTreeMap<ElementId, Detail>,
+    /// The partners standing at the border of a scoped picture, each whole
+    /// and closed. They open to nothing: a reader looks inside one by
+    /// scoping the picture to it. Empty while the cut scopes to nothing.
+    pub stubs: BTreeSet<ElementId>,
 }
 
 impl BoundaryView {
@@ -214,21 +263,41 @@ impl BoundaryView {
 pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryView, LensError> {
     let parents = containment_parents(graph)?;
     let contexts = contexts(graph, &parents, cut);
+    let scoped = Scoped::of(graph, &parents, cut.scope.as_ref());
+    let shown = |element: &Element| {
+        contexts
+            .get(&element.id)
+            .is_some_and(|detail| detail.shows(element.kind))
+    };
     let visible: BTreeSet<ElementId> = graph
         .elements()
-        .filter(|element| {
-            contexts
-                .get(&element.id)
-                .is_some_and(|detail| detail.shows(element.kind))
+        .filter(|element| match &scoped {
+            None => shown(element),
+            Some(scoped) => scoped.draws(&element.id, shown(element)),
         })
         .map(|element| element.id.clone())
         .collect();
     let detail_within: BTreeMap<ElementId, Detail> = visible
         .iter()
-        .map(|id| (id.clone(), within(graph, cut, &contexts, id)))
+        .map(|id| {
+            let within = match &scoped {
+                Some(scoped) if scoped.stubs.contains(id) => closed(graph, cut, id),
+                _ => within(graph, cut, &contexts, id),
+            };
+            (id.clone(), within)
+        })
         .collect();
 
     let boundary_of = |id: &ElementId| -> Option<ElementId> {
+        // Outside the scope only the stubs stand, and every element behind
+        // one attaches to the stub that stands for it.
+        if let Some(scoped) = &scoped
+            && !scoped.holds(id)
+        {
+            return scoped.stub_of(&parents, id);
+        }
+        // The scoped boundary is always visible, so a climb that starts
+        // inside the scope never leaves it.
         let mut current = Some(id.clone());
         while let Some(id) = current {
             if visible.contains(&id) {
@@ -262,12 +331,19 @@ pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryVie
     }
     let frames: BTreeSet<ElementId> = nesting.iter().map(|r| r.from.clone()).collect();
 
+    // A scoped picture is about the scope, so the dependencies that reach
+    // neither into nor out of it never enter the roll-up at all.
+    let concrete = graph.relations().filter(|relation| {
+        scoped
+            .as_ref()
+            .is_none_or(|scoped| scoped.touches(relation))
+    });
     let RolledUp {
         provenance,
         coarse,
         unscoped,
         self_leaves,
-    } = roll_up(graph, &frames, boundary_of);
+    } = roll_up(concrete, &frames, boundary_of);
 
     for frame in &self_leaves {
         let kind = view
@@ -296,7 +372,129 @@ pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryVie
         coarse,
         unscoped,
         detail_within,
+        stubs: scoped.map(|scoped| scoped.stubs).unwrap_or_default(),
     })
+}
+
+/// The picture one scope narrows to: the scoped boundary with everything
+/// inside it, and one closed stub per partner at its border.
+struct Scoped {
+    /// The scoped boundary, which is the root frame of the picture.
+    root: ElementId,
+    /// The root and everything containment-wise inside it.
+    inside: BTreeSet<ElementId>,
+    /// The boundaries that contain the root. The picture draws none of them:
+    /// they hold the root, so no box disjoint from it can stand for them.
+    above: BTreeSet<ElementId>,
+    stubs: BTreeSet<ElementId>,
+}
+
+impl Scoped {
+    /// What a cut scopes the picture to, and None while it scopes to nothing
+    /// or names an element this graph does not hold.
+    fn of(
+        graph: &ArchitectureGraph,
+        parents: &BTreeMap<ElementId, ElementId>,
+        scope: Option<&ElementId>,
+    ) -> Option<Self> {
+        let root = scope?.clone();
+        graph.element(&root)?;
+        let above = ancestors(parents, &root);
+        let inside = graph
+            .elements()
+            .map(|element| &element.id)
+            .filter(|id| **id == root || ancestors(parents, id).contains(&root))
+            .cloned()
+            .collect();
+        let mut scoped = Self {
+            root,
+            inside,
+            above,
+            stubs: BTreeSet::new(),
+        };
+        scoped.stubs = graph
+            .relations()
+            .filter(|relation| relation.kind == RelationKind::DependsOn)
+            .filter_map(|relation| scoped.partner(relation))
+            .filter_map(|partner| scoped.stub_of(parents, partner))
+            .collect();
+        Some(scoped)
+    }
+
+    /// Whether an element stands inside the scope.
+    fn holds(&self, id: &ElementId) -> bool {
+        self.inside.contains(id)
+    }
+
+    /// The element one dependency reaches outside the scope while its other
+    /// end stands inside it. A dependency wholly inside the scope, and one
+    /// wholly outside it, answer None.
+    fn partner<'r>(&self, relation: &'r Relation) -> Option<&'r ElementId> {
+        match (self.holds(&relation.from), self.holds(&relation.to)) {
+            (true, false) => Some(&relation.to),
+            (false, true) => Some(&relation.from),
+            _ => None,
+        }
+    }
+
+    /// The stub one element outside the scope stands as: the topmost
+    /// boundary above it - itself, where nothing is above it - that does not
+    /// contain the scope. That is the largest box disjoint from the scope.
+    /// A boundary that contains the scope answers None: every box that would
+    /// stand for it would hold the picture's own root.
+    fn stub_of(
+        &self,
+        parents: &BTreeMap<ElementId, ElementId>,
+        id: &ElementId,
+    ) -> Option<ElementId> {
+        if self.above.contains(id) {
+            return None;
+        }
+        let mut stub = id;
+        while let Some(parent) = parents.get(stub) {
+            if self.above.contains(parent) {
+                break;
+            }
+            stub = parent;
+        }
+        Some(stub.clone())
+    }
+
+    /// Whether the picture draws one element. `shown` is what the cut alone
+    /// says about it: inside the scope that answer stands unchanged, the
+    /// scoped boundary itself stands whatever it says, and outside the scope
+    /// the stubs stand alone.
+    fn draws(&self, id: &ElementId, shown: bool) -> bool {
+        *id == self.root || self.stubs.contains(id) || (shown && self.holds(id))
+    }
+
+    /// Whether one dependency reaches into the scope.
+    fn touches(&self, relation: &Relation) -> bool {
+        self.holds(&relation.from) || self.holds(&relation.to)
+    }
+}
+
+/// The boundaries above an element, nearest first.
+fn ancestors(parents: &BTreeMap<ElementId, ElementId>, id: &ElementId) -> BTreeSet<ElementId> {
+    let mut above = BTreeSet::new();
+    let mut current = parents.get(id);
+    while let Some(parent) = current {
+        if !above.insert(parent.clone()) {
+            break;
+        }
+        current = parents.get(parent);
+    }
+    above
+}
+
+/// The detail a boundary frozen at the border of a scope reads at: the
+/// coarsest one that shows a boundary of its kind, which is the detail that
+/// draws it as the single box it is.
+fn closed(graph: &ArchitectureGraph, cut: &Cut, id: &ElementId) -> Detail {
+    graph
+        .element(id)
+        .and_then(|element| Detail::showing(element.kind))
+        .unwrap_or(cut.detail)
 }
 
 /// Every dependency of one cut, gathered from the concrete relations.
@@ -309,9 +507,11 @@ struct RolledUp {
     self_leaves: BTreeSet<ElementId>,
 }
 
-/// Rolls every concrete dependency up to the boundaries that carry it.
-fn roll_up(
-    graph: &ArchitectureGraph,
+/// Rolls every concrete dependency up to the boundaries that carry it. The
+/// relations are what the picture is drawn from: a scoped picture hands over
+/// the ones that reach into its scope, and every other picture all of them.
+fn roll_up<'r>(
+    relations: impl Iterator<Item = &'r Relation>,
     frames: &BTreeSet<ElementId>,
     boundary_of: impl Fn(&ElementId) -> Option<ElementId>,
 ) -> RolledUp {
@@ -321,7 +521,7 @@ fn roll_up(
         unscoped: BTreeSet::new(),
         self_leaves: BTreeSet::new(),
     };
-    for relation in graph.relations() {
+    for relation in relations {
         if relation.kind != RelationKind::DependsOn {
             continue;
         }
@@ -539,7 +739,26 @@ mod tests {
                 .into_iter()
                 .map(|(boundary, within)| (id(boundary), within))
                 .collect(),
+            scope: None,
         }
+    }
+
+    fn scoped<const N: usize>(detail: Detail, scope: &str, overrides: [(&str, Detail); N]) -> Cut {
+        let mut cut = cut(detail, overrides);
+        cut.focus(Some(id(scope)));
+        cut
+    }
+
+    /// Every boundary one view draws.
+    fn drawn(view: &BoundaryView) -> BTreeSet<ElementId> {
+        view.graph
+            .elements()
+            .map(|element| element.id.clone())
+            .collect()
+    }
+
+    fn ids<const N: usize>(texts: [&str; N]) -> BTreeSet<ElementId> {
+        texts.into_iter().map(id).collect()
     }
 
     fn relation(from: &str, to: &str, kind: RelationKind) -> Relation {
@@ -1081,6 +1300,239 @@ mod tests {
             view.concrete_behind(&relation("package:b", "package:a", RelationKind::DependsOn))
                 .is_empty()
         );
+    }
+
+    /// The fixture with a package beside the other two, a module beside
+    /// a/lib, and a module inside each of the far ones:
+    ///
+    /// project ⊃ {package:a ⊃ {a/lib ⊃ a/util, a/other ⊃ a/other/deep},
+    ///            package:b ⊃ b/lib ⊃ b/deep,
+    ///            package:c ⊃ c/lib}
+    ///
+    /// a/util reaches b/lib, b/deep and a/other/deep; c/lib reaches a/util;
+    /// b/lib reaches c/lib.
+    fn neighbourhood() -> ArchitectureGraph {
+        let mut graph = fixture();
+        graph
+            .add_element(element("package:c", ElementKind::Package))
+            .unwrap();
+        for module in ["a/other", "a/other/deep", "b/deep", "c/lib"] {
+            graph
+                .add_element(element(module, ElementKind::Module))
+                .unwrap();
+        }
+        for (from, to) in [
+            ("package:a", "a/other"),
+            ("a/other", "a/other/deep"),
+            ("b/lib", "b/deep"),
+            ("project", "package:c"),
+            ("package:c", "c/lib"),
+        ] {
+            graph
+                .add_relation(relation(from, to, RelationKind::Contains))
+                .unwrap();
+        }
+        for (from, to) in [
+            ("a/util", "b/deep"),
+            ("a/util", "a/other/deep"),
+            ("c/lib", "a/util"),
+            ("b/lib", "c/lib"),
+        ] {
+            graph
+                .add_relation(relation(from, to, RelationKind::DependsOn))
+                .unwrap();
+        }
+        graph
+    }
+
+    #[test]
+    fn a_scoped_picture_holds_the_scope_the_partners_at_its_border_and_nothing_else() {
+        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+
+        assert_eq!(
+            drawn(&view),
+            ids(["a/util", "a/other", "package:b", "package:c"])
+        );
+        assert_eq!(view.stubs, ids(["a/other", "package:b", "package:c"]));
+    }
+
+    #[test]
+    fn a_scoped_boundary_stands_at_the_root_of_the_picture() {
+        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+
+        assert!(
+            view.graph
+                .relations()
+                .all(|r| r.kind != RelationKind::Contains || r.to != id("a/util")),
+            "no frame is drawn around the boundary the picture is about"
+        );
+    }
+
+    #[test]
+    fn a_partner_stands_as_the_largest_boundary_that_leaves_the_scope_out() {
+        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+
+        assert!(
+            view.graph.element(&id("b/deep")).is_none(),
+            "a partner in another package stands as that package"
+        );
+        assert!(
+            view.graph.element(&id("a/other/deep")).is_none(),
+            "a partner in the scope's own package stands as the boundary beside the scope"
+        );
+        assert!(
+            view.graph
+                .relations()
+                .all(|r| r.kind != RelationKind::Contains),
+            "every partner is one closed box, so the picture nests nothing"
+        );
+    }
+
+    #[test]
+    fn every_dependency_to_one_partner_gathers_on_the_stub_that_stands_for_it() {
+        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+
+        assert_eq!(
+            view.provenance[&relation("a/util", "package:b", RelationKind::DependsOn)],
+            BTreeSet::from([
+                relation("a/util", "b/deep", RelationKind::DependsOn),
+                relation("a/util", "b/lib", RelationKind::DependsOn),
+            ])
+        );
+        assert_eq!(
+            view.provenance[&relation("package:c", "a/util", RelationKind::DependsOn)],
+            BTreeSet::from([relation("c/lib", "a/util", RelationKind::DependsOn)]),
+            "a dependency reaching into the scope stands as readily as one leaving it"
+        );
+    }
+
+    #[test]
+    fn a_dependency_between_two_partners_leaves_a_scoped_picture() {
+        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+
+        assert!(!view.provenance.contains_key(&relation(
+            "package:b",
+            "package:c",
+            RelationKind::DependsOn
+        )));
+        assert!(view.coarse.is_empty());
+        assert!(
+            view.unscoped.is_empty(),
+            "a dependency the picture is not about is dropped, not reported"
+        );
+    }
+
+    #[test]
+    fn a_partner_stays_closed_however_the_reader_asks_to_open_it() {
+        let graph = neighbourhood();
+        let mut cut = scoped(Detail::Modules, "a/util", []);
+        let view = boundary_view(&graph, &cut).unwrap();
+
+        assert!(!cut.expand(&view, &id("package:b")));
+        assert!(!cut.collapse(&view, &id("package:b")));
+        assert_eq!(cut, scoped(Detail::Modules, "a/util", []));
+    }
+
+    #[test]
+    fn an_override_that_would_open_a_partner_is_ignored_while_the_scope_stands() {
+        let view = boundary_view(
+            &neighbourhood(),
+            &scoped(Detail::Modules, "a/util", [("package:b", Detail::Items)]),
+        )
+        .unwrap();
+
+        assert!(view.graph.element(&id("b/lib")).is_none());
+        assert_eq!(
+            view.detail_within[&id("package:b")],
+            Detail::Packages,
+            "a stub stands whole, at the detail that shows a package as one box"
+        );
+    }
+
+    #[test]
+    fn a_boundary_inside_the_scope_opens_as_it_would_without_a_scope() {
+        let graph = neighbourhood();
+        let mut cut = scoped(Detail::Packages, "package:a", []);
+
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert_eq!(drawn(&view), ids(["package:a", "package:b", "package:c"]));
+
+        assert!(cut.expand(&view, &id("package:a")));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(view.graph.element(&id("a/lib")).is_some());
+        assert!(view.graph.element(&id("a/other")).is_some());
+    }
+
+    #[test]
+    fn the_scoped_frames_own_content_answers_for_its_own_dependencies() {
+        let mut graph = neighbourhood();
+        graph
+            .add_relation(relation("a/lib", "b/lib", RelationKind::DependsOn))
+            .unwrap();
+        let view = boundary_view(&graph, &scoped(Detail::Modules, "package:a", [])).unwrap();
+
+        assert_eq!(
+            view.provenance[&relation("a/lib#self", "package:b", RelationKind::DependsOn)],
+            BTreeSet::from([relation("a/lib", "b/lib", RelationKind::DependsOn)])
+        );
+    }
+
+    #[test]
+    fn a_partner_naming_the_scoped_frame_as_a_whole_stands_at_its_border() {
+        let mut graph = neighbourhood();
+        graph
+            .add_relation(relation("c/lib", "package:a", RelationKind::DependsOn))
+            .unwrap();
+        let view = boundary_view(&graph, &scoped(Detail::Modules, "package:a", [])).unwrap();
+
+        assert!(view.graph.element(&id("package:c")).is_some());
+        assert_eq!(
+            view.coarse[&relation("package:c", "package:a", RelationKind::DependsOn)],
+            BTreeSet::from([relation("c/lib", "package:a", RelationKind::DependsOn)]),
+            "a dependency naming the scoped frame as a whole waits at a coarser \
+             detail, exactly as it does without a scope"
+        );
+    }
+
+    #[test]
+    fn a_scope_on_a_single_item_shows_that_item_among_its_partners() {
+        let mut graph = neighbourhood();
+        graph
+            .add_element(element("a/util#function:go", ElementKind::Function))
+            .unwrap();
+        graph
+            .add_relation(relation(
+                "a/util",
+                "a/util#function:go",
+                RelationKind::Contains,
+            ))
+            .unwrap();
+        graph
+            .add_relation(relation(
+                "a/util#function:go",
+                "b/deep",
+                RelationKind::DependsOn,
+            ))
+            .unwrap();
+        let view = boundary_view(&graph, &scoped(Detail::Items, "a/util#function:go", [])).unwrap();
+
+        assert_eq!(drawn(&view), ids(["a/util#function:go", "package:b"]));
+        assert_eq!(
+            view.provenance[&relation("a/util#function:go", "package:b", RelationKind::DependsOn)],
+            BTreeSet::from([relation(
+                "a/util#function:go",
+                "b/deep",
+                RelationKind::DependsOn
+            )])
+        );
+    }
+
+    #[test]
+    fn a_scope_naming_no_element_leaves_the_whole_picture_standing() {
+        let plain = boundary_view(&fixture(), &Cut::uniform(Detail::Packages)).unwrap();
+        let stale =
+            boundary_view(&fixture(), &scoped(Detail::Packages, "package:gone", [])).unwrap();
+        assert_eq!(plain, stale);
     }
 
     #[test]

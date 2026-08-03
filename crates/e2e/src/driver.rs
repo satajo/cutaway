@@ -28,6 +28,11 @@ pub trait ApplicationDriver {
     fn expand_boundary(&mut self, name: &str) -> Result<(), String>;
     /// Closes one boundary a step back toward a single box.
     fn collapse_boundary(&mut self, name: &str) -> Result<(), String>;
+    /// Scopes the picture to one boundary: it and the partners at its
+    /// border, and nothing else.
+    fn focus_boundary(&mut self, name: &str) -> Result<(), String>;
+    /// Puts the whole project back in the picture.
+    fn unfocus(&mut self);
     fn boundary_names(&self) -> Vec<String>;
     fn connections(&self) -> Vec<(String, String)>;
     fn sever_connection(&mut self, from: &str, to: &str) -> Result<(), String>;
@@ -249,7 +254,12 @@ impl ApplicationDriver for InProcessDriver {
         };
         // A new detail for the whole picture drops the boundaries opened or
         // closed under the old one: those decisions answered the old detail.
-        self.cut = Some(Cut::uniform(detail));
+        // The scope stands through it: a detail says how a boundary is read,
+        // never which boundary is read.
+        let scope = self.cut.as_ref().and_then(|cut| cut.scope.clone());
+        let mut cut = Cut::uniform(detail);
+        cut.focus(scope);
+        self.cut = Some(cut);
         self.rebuild_view()
     }
 
@@ -259,6 +269,24 @@ impl ApplicationDriver for InProcessDriver {
 
     fn collapse_boundary(&mut self, name: &str) -> Result<(), String> {
         self.step_boundary(name, Cut::collapse)
+    }
+
+    fn focus_boundary(&mut self, name: &str) -> Result<(), String> {
+        // A frame's own-content box scopes to the frame it belongs to: the
+        // leaf is the lens's invention, and the reader means the frame.
+        let id = self.element_id(name)?;
+        let cut = self.cut.as_mut().ok_or("no boundary view yet")?;
+        cut.focus(Some(id));
+        self.rebuild_view()
+    }
+
+    fn unfocus(&mut self) {
+        let Some(cut) = self.cut.as_mut() else {
+            return;
+        };
+        cut.focus(None);
+        // The picture built while scoped, so it builds unscoped.
+        self.rebuild_view().expect("the whole picture builds");
     }
 
     fn boundary_names(&self) -> Vec<String> {

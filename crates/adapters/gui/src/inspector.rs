@@ -125,6 +125,10 @@ fn help(ui: &mut egui::Ui) {
          whatever you selected carries over to the new one.",
     );
     ui.label(
+        "Press F to focus the picture on the selected boundary; Escape shows \
+         everything again.",
+    );
+    ui.label(
         "Press ctrl+F or / to search every element by name, however the picture is \
          cut; enter opens the picture down to the one you choose.",
     );
@@ -492,25 +496,55 @@ fn add_controls(
 /// Opens or closes this one boundary on top of the detail the rest of the
 /// picture follows, so the project stays whole while the boundary under
 /// study shows its parts. Double-clicking the boundary expands it too.
+///
+/// Scoping the picture to the boundary stands beside them: it is the other
+/// way of reading one boundary closely, and the only way of reading a
+/// partner standing closed at the border of a scope.
 fn detail_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     let (Some(within), Ok(Scene { view, .. })) = (session.detail_within(id), &session.scene) else {
         return;
     };
-    let line = inside(&view.graph, &session.graph, id, within);
+    let stub = view.stubs.contains(id);
+    let line = if stub {
+        "Stands whole at the border of the focus.".to_owned()
+    } else {
+        inside(&view.graph, &session.graph, id, within)
+    };
     ui.separator();
     ui.label(line);
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(within.deeper().is_some(), egui::Button::new("Expand"))
-            .clicked()
-        {
+        let expand = ui.add_enabled(
+            !stub && within.deeper().is_some(),
+            egui::Button::new("Expand"),
+        );
+        // A partner is closed because the picture is about the scope, not
+        // because it holds nothing; the button says which of the two it is.
+        let expand = if stub {
+            expand.on_disabled_hover_text("Focus this boundary to look inside it.")
+        } else {
+            expand
+        };
+        if expand.clicked() {
             session.expand(id);
         }
         if ui
-            .add_enabled(within.shallower().is_some(), egui::Button::new("Collapse"))
+            .add_enabled(
+                !stub && within.shallower().is_some(),
+                egui::Button::new("Collapse"),
+            )
             .clicked()
         {
             session.collapse(id);
+        }
+        if ui
+            .button("Focus (F)")
+            .on_hover_text(
+                "Show this boundary and its dependency partners alone. \
+                 Esc shows everything again.",
+            )
+            .clicked()
+        {
+            session.focus(id);
         }
     });
 }
