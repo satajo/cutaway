@@ -18,7 +18,7 @@ use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
 use crate::glyph;
-use crate::label::{self, Labels, kind_name, kind_symbol};
+use crate::label::{Labels, kind_name, kind_symbol};
 use crate::{Modifying, Scene, Selection, Session, Standing, detail, focus, real_id};
 
 /// How many rows one list shows before it names the rest. The cap is a
@@ -112,9 +112,15 @@ fn help(ui: &mut egui::Ui) {
     );
     ui.label("A box grows with the number of concepts inside it.");
     ui.label(
-        "A boundary that holds other boundaries shows the code it declares itself as \
-         an (own) box. The connections of that box are the dependencies of that code \
-         alone, not of the boundaries beside it.",
+        "A boundary that holds other boundaries shows the code it declares itself as a \
+         box of its own, named after what declares it: module code, package code. The \
+         connections of that box are the dependencies of that code alone, not of the \
+         boundaries beside it.",
+    );
+    ui.label(
+        "A package whose whole content sits in one boundary shows that boundary's \
+         parts directly, without a box around them that says nothing the package does \
+         not already say.",
     );
     ui.label(
         "Double-click a boundary to open it one level deeper than the rest of the \
@@ -164,6 +170,9 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     // The id is the element's path through the sources: a reader knows the
     // boundary by it even where two short names read alike.
     ui.small(egui::RichText::new(id.as_str()).monospace());
+    if let Some(line) = panel.own_content {
+        ui.label(line);
+    }
     plan_controls(ui, session, id);
     modify_controls(ui, session, id);
     detail_controls(ui, session, id);
@@ -663,8 +672,35 @@ struct NodePanel {
     /// What the boundary is, for the panel to decide what may be planned
     /// inside it.
     element_kind: ElementKind,
+    /// What a frame's own-content box stands for, and None for a boundary
+    /// the sources declare: only the box the lens invents needs explaining.
+    own_content: Option<&'static str>,
     contents: Vec<Row>,
     connections: Vec<Row>,
+}
+
+/// What a frame's own-content box holds, in words. The box carries the code
+/// the frame declares beside the boundaries drawn inside it, and its
+/// connections are the dependencies of that code alone.
+fn own_content_line(kind: ElementKind) -> &'static str {
+    match kind {
+        ElementKind::Module => {
+            "The module's top-level code - imports and declarations outside any item. \
+             Its connections are what that code alone uses."
+        }
+        ElementKind::Package => {
+            "The code the package declares beside the boundaries inside it. \
+             Its connections are what that code alone uses."
+        }
+        ElementKind::Project => {
+            "The code the project declares beside the packages inside it. \
+             Its connections are what that code alone uses."
+        }
+        ElementKind::Function | ElementKind::Type => {
+            "The code this boundary declares beside the boundaries inside it. \
+             Its connections are what that code alone uses."
+        }
+    }
 }
 
 fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
@@ -679,6 +715,7 @@ fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
         heading: format!("{} {}", kind_symbol(element.kind), labels.qualified(id)),
         kind: kind_name(element.kind),
         element_kind: element.kind,
+        own_content: is_self_leaf(id).then(|| own_content_line(element.kind)),
         contents: contents_rows(&view.graph, &labels, id),
         connections: connection_rows(view, &labels, id),
     })
@@ -717,13 +754,7 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
     focus::contents_of(view, id)
         .into_iter()
         .map(|child| Row {
-            // A frame's own content needs no name here: the frame it
-            // belongs to is the heading right above the list.
-            text: if is_self_leaf(child) {
-                label::OWN_CONTENT.to_owned()
-            } else {
-                labels.label(child).text()
-            },
+            text: labels.label(child).text(),
             target: Some(Selection::Node(child.clone())),
         })
         .collect()

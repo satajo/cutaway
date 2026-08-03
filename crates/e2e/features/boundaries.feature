@@ -3,10 +3,13 @@ Feature: The boundary lens
   The architecture appears as boundaries at an adjustable level of detail:
   packages, the modules within them, or the individual items within the
   modules. Connections attach only to boundaries without visible children.
-  A boundary that contains other boundaries shows its own content as an
-  "(own)" boundary, and a dependency that names such a boundary as a whole
-  waits at a coarser detail. Dependencies inside one boundary stay out of
-  sight at that level.
+  A boundary that contains other boundaries shows the code it declares
+  itself as a box named after what declares it - "module code", "package
+  code" - and a dependency that names such a boundary as a whole waits at a
+  coarser detail. A package whose whole content sits in one boundary shows
+  that boundary's parts directly, without a box around them that says
+  nothing the package does not already say. Dependencies inside one boundary
+  stay out of sight at that level.
 
   Scenario: Package dependencies declared in manifests appear as connections
     Given a package "app" at "crates/app" depending on "engine"
@@ -31,7 +34,7 @@ Feature: The boundary lens
     And the boundaries are viewed at "packages" level
     Then a connection goes from "app" to "engine"
 
-  Scenario: Module detail shows a boundary's own code as its own-content boundary
+  Scenario: A package's own code shows as a box beside the modules inside it
     Given a package "engine" at "crates/engine"
     And a source file "crates/engine/src/lib.rs" containing:
       """
@@ -44,7 +47,49 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "modules" level
-    Then a connection goes from "(own)" to "physics"
+    Then a connection goes from "package code" to "physics"
+
+  Scenario: A package whose whole content sits in one boundary shows its parts directly
+    Given a package "engine" at "crates/engine"
+    And a source file "crates/engine/src/lib.rs" containing:
+      """
+      mod physics;
+      mod render;
+      """
+    And a source file "crates/engine/src/physics.rs" containing:
+      """
+      pub fn step() {}
+      """
+    And a source file "crates/engine/src/render.rs" containing:
+      """
+      pub fn draw() {}
+      """
+    When the project is inspected
+    And the boundaries are viewed at "modules" level
+    Then the boundaries do not include "crate"
+    And the boundary "engine" contains "physics"
+    And the boundary "engine" contains "render"
+
+  Scenario: A boundary with another beside it keeps its own box
+    Given a package "engine" at "crates/engine"
+    And a source file "crates/engine/src/lib.rs" containing:
+      """
+      mod physics;
+      use crate::physics::step;
+      """
+    And a source file "crates/engine/src/physics.rs" containing:
+      """
+      pub fn step() {}
+      """
+    And a source file "crates/engine/tests/behaviour.rs" containing:
+      """
+      """
+    When the project is inspected
+    And the boundaries are viewed at "modules" level
+    Then the boundaries include "crate"
+    And the boundary "engine" contains "crate"
+    And the boundary "crate" contains "physics"
+    And a connection goes from "module code" to "physics"
 
   Scenario: A dependency on a whole boundary waits at a coarser detail
     Given a package "app" at "crates/app" depending on "engine"
@@ -115,4 +160,4 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "items" level
-    Then a connection goes from "(own)" to "step"
+    Then a connection goes from "package code" to "step"

@@ -202,17 +202,26 @@ mod tests {
     }
 
     /// project ⊃ {package:a ⊃ {a/one ⊃ a/one#type:X, a/two},
-    /// package:b ⊃ b/one, package:c ⊃ c/one ⊃ {c/one/inner, c/one#type:Y},
-    /// stray}. Everything on the left reaches b/one, and a/one also reaches
-    /// a/two beside it. a/one is a leaf at modules and a frame at items;
-    /// c/one is a frame at both.
+    /// package:b ⊃ b/one, package:c ⊃ {c/one ⊃ {c/one/inner, c/one#type:Y},
+    /// c/two}, stray}. Everything on the left reaches b/one, and a/one also
+    /// reaches a/two beside it. a/one is a leaf at modules and a frame at
+    /// items; c/one is a frame at both, and c/two stands beside it so that
+    /// c/one is a boundary of its own rather than the whole of package:c.
     fn graph() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         add(&mut graph, "project", ElementKind::Project);
         for package in ["package:a", "package:b", "package:c"] {
             add(&mut graph, package, ElementKind::Package);
         }
-        for module in ["a/one", "a/two", "b/one", "c/one", "c/one/inner", "stray"] {
+        for module in [
+            "a/one",
+            "a/two",
+            "b/one",
+            "c/one",
+            "c/one/inner",
+            "c/two",
+            "stray",
+        ] {
             add(&mut graph, module, ElementKind::Module);
         }
         add(&mut graph, "a/one#type:X", ElementKind::Type);
@@ -226,6 +235,7 @@ mod tests {
             ("package:a", "a/two"),
             ("package:b", "b/one"),
             ("package:c", "c/one"),
+            ("package:c", "c/two"),
             ("a/one", "a/one#type:X"),
             ("c/one", "c/one/inner"),
             ("c/one", "c/one#type:Y"),

@@ -24,10 +24,6 @@ use cutaway_planning::{ModificationKind, Plan};
 use crate::glyph;
 use crate::real_id;
 
-/// What a frame's own content is called where a text has room to say it in
-/// full. The picture writes the short form the lens gives the leaf.
-pub(crate) const OWN_CONTENT: &str = "own content";
-
 /// The text of one box: the name, and the kind glyph in front of it when
 /// the glyph tells the reader something.
 pub(crate) struct Label {
@@ -116,11 +112,11 @@ impl<'a> Labels<'a> {
     /// The name a text beside the picture gives a boundary: the whole name,
     /// nothing shortened, because only a box is short of room. A frame's own
     /// content answers as the frame it belongs to, which is the boundary the
-    /// reader knows.
+    /// reader knows, with what the box holds said after it.
     pub(crate) fn qualified(&self, id: &ElementId) -> String {
         match self.frame_of.get(id) {
             Some(frame) if is_self_leaf(id) => {
-                format!("{} ({OWN_CONTENT})", self.full_name(frame))
+                format!("{} ({})", self.full_name(frame), self.source_name(id))
             }
             _ => self.full_name(id),
         }
@@ -191,6 +187,9 @@ impl<'a> Labels<'a> {
     fn name(&self, id: &ElementId) -> String {
         let full = self.full_name(id);
         match self.frame_of.get(id) {
+            // A frame's own content is named by what the frame is rather
+            // than by where it sits, so there is no path in it to drop.
+            Some(_) if is_self_leaf(id) => full,
             // The path a box drops is the one the sources spell; a frame's
             // new name is a name nothing below it carries yet.
             Some(frame) => contextual(&full, &self.source_name(frame)).to_owned(),
@@ -392,7 +391,7 @@ mod tests {
         add(
             &mut graph,
             "core/ports.rs#self",
-            cutaway_lenses::OWN_CONTENT_NAME,
+            cutaway_lenses::own_content_name(ElementKind::Module),
             ElementKind::Module,
         );
         contain(&mut graph, "package:core", "core/ports.rs");
@@ -459,8 +458,8 @@ mod tests {
         let labels = Labels::of(&view);
         let own = labels.label(&id("core/ports.rs#self"));
         assert_eq!(own.glyph, None);
-        assert_eq!(own.name, cutaway_lenses::OWN_CONTENT_NAME);
-        assert_eq!(own.text(), cutaway_lenses::OWN_CONTENT_NAME);
+        assert_eq!(own.name, "module code");
+        assert_eq!(own.text(), "module code");
     }
 
     fn renaming(subject: &str, to: &str) -> Renames {
@@ -503,7 +502,7 @@ mod tests {
         );
         assert_eq!(
             labels.qualified(&id("core/ports.rs#self")),
-            format!("ports {} wiring ({OWN_CONTENT})", glyph::BECOMES),
+            format!("ports {} wiring (module code)", glyph::BECOMES),
             "a frame's own content speaks for the frame, rename included"
         );
     }
@@ -519,12 +518,12 @@ mod tests {
     }
 
     #[test]
-    fn a_frames_own_content_is_named_after_the_frame_it_belongs_to() {
+    fn a_frames_own_content_is_named_after_the_frame_and_what_the_box_holds() {
         let view = view();
         let labels = Labels::of(&view);
         assert_eq!(
             labels.qualified(&id("core/ports.rs#self")),
-            "ports (own content)"
+            "ports (module code)"
         );
     }
 
@@ -543,7 +542,7 @@ mod tests {
             add(
                 &mut graph,
                 &format!("{root}#self"),
-                cutaway_lenses::OWN_CONTENT_NAME,
+                cutaway_lenses::own_content_name(ElementKind::Module),
                 ElementKind::Module,
             );
             contain(&mut graph, &package_id, root);
@@ -587,12 +586,12 @@ mod tests {
         let names = labels.distinct(&listed);
         assert_eq!(
             names.name(&listed[0]),
-            ["cutaway-gui", "crate (own content)"].join(glyph::CONTAINER_STEP),
+            ["cutaway-gui", "crate (module code)"].join(glyph::CONTAINER_STEP),
             "a frame's own content reads under the package that holds the frame"
         );
         assert_eq!(
             names.name(&listed[1]),
-            ["cutaway-lenses", "crate (own content)"].join(glyph::CONTAINER_STEP)
+            ["cutaway-lenses", "crate (module code)"].join(glyph::CONTAINER_STEP)
         );
     }
 

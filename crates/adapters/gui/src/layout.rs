@@ -625,7 +625,8 @@ mod tests {
         graph
             .add_element(Element {
                 id: id.clone(),
-                name: ElementName::new(cutaway_lenses::OWN_CONTENT_NAME).unwrap(),
+                name: ElementName::new(cutaway_lenses::own_content_name(ElementKind::Package))
+                    .unwrap(),
                 kind: ElementKind::Package,
             })
             .unwrap();
