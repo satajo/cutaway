@@ -7,6 +7,11 @@
 //! inside its parent module reads as its own segment alone. The inspector
 //! still names every boundary in full; only the picture shortens.
 //!
+//! A plan renames elements, and a name is what the reader recognises a
+//! boundary by: a renamed boundary therefore reads "old → new" wherever its
+//! name paints, in a box and in the panel alike. The rename enters here,
+//! once, rather than at each of the places that write a name.
+//!
 //! Layout measures the label the canvas paints, so both ask this module and
 //! no box is ever too narrow for its text.
 
@@ -14,8 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
 use cutaway_lenses::is_self_leaf;
+use cutaway_planning::{ModificationKind, Plan};
 
 use crate::glyph;
+use crate::real_id;
 
 /// What a frame's own content is called where a text has room to say it in
 /// full. The picture writes the short form the lens gives the leaf.
@@ -38,16 +45,51 @@ impl Label {
     }
 }
 
+/// The new names a plan gives elements, by the element each renames. A
+/// frame's own-content leaf carries the rename of the frame it stands for,
+/// because the plan speaks about the frame.
+#[derive(Debug, Default)]
+pub(crate) struct Renames(BTreeMap<ElementId, String>);
+
+/// No rename at all: what labels read by when nothing feeds them a plan.
+static NONE: Renames = Renames(BTreeMap::new());
+
+impl Renames {
+    pub(crate) fn of(plan: &Plan) -> Self {
+        Self(
+            plan.modifications()
+                .filter_map(|modification| match &modification.kind {
+                    ModificationKind::Rename { to } => {
+                        Some((modification.subject.clone(), to.to_string()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    fn new_name(&self, id: &ElementId) -> Option<&str> {
+        self.0.get(&real_id(id)).map(String::as_str)
+    }
+}
+
 /// The labels of one view. A name reads against the frame around it, so the
 /// containment resolves once and every box then answers directly.
 pub(crate) struct Labels<'a> {
     view: &'a ArchitectureGraph,
     frame_of: BTreeMap<&'a ElementId, &'a ElementId>,
     frames: BTreeSet<&'a ElementId>,
+    renames: &'a Renames,
 }
 
 impl<'a> Labels<'a> {
+    /// The labels of a view read as the sources name it.
     pub(crate) fn of(view: &'a ArchitectureGraph) -> Self {
+        Self::renaming(view, &NONE)
+    }
+
+    /// The labels of a view with a plan's renames written into them.
+    pub(crate) fn renaming(view: &'a ArchitectureGraph, renames: &'a Renames) -> Self {
         let mut frame_of = BTreeMap::new();
         let mut frames = BTreeSet::new();
         for relation in view.relations() {
@@ -60,6 +102,7 @@ impl<'a> Labels<'a> {
             view,
             frame_of,
             frames,
+            renames,
         }
     }
 
@@ -148,12 +191,26 @@ impl<'a> Labels<'a> {
     fn name(&self, id: &ElementId) -> String {
         let full = self.full_name(id);
         match self.frame_of.get(id) {
-            Some(frame) => contextual(&full, &self.full_name(frame)).to_owned(),
+            // The path a box drops is the one the sources spell; a frame's
+            // new name is a name nothing below it carries yet.
+            Some(frame) => contextual(&full, &self.source_name(frame)).to_owned(),
             None => full,
         }
     }
 
+    /// The whole name of a boundary, the plan's rename included: a renamed
+    /// boundary reads "old → new", because the reader knows it by the name
+    /// the sources carry and must see what it becomes.
     fn full_name(&self, id: &ElementId) -> String {
+        let name = self.source_name(id);
+        match self.renames.new_name(id) {
+            Some(new) => format!("{name} {} {new}", glyph::BECOMES),
+            None => name,
+        }
+    }
+
+    /// The name the sources give a boundary, whatever the plan says of it.
+    fn source_name(&self, id: &ElementId) -> String {
         self.view
             .element(id)
             .map_or_else(|| id.to_string(), |element| element.name.to_string())
@@ -404,6 +461,51 @@ mod tests {
         assert_eq!(own.glyph, None);
         assert_eq!(own.name, cutaway_lenses::OWN_CONTENT_NAME);
         assert_eq!(own.text(), cutaway_lenses::OWN_CONTENT_NAME);
+    }
+
+    fn renaming(subject: &str, to: &str) -> Renames {
+        let mut plan = cutaway_planning::Plan::new();
+        plan.plan_modification(cutaway_planning::Modification {
+            subject: id(subject),
+            kind: ModificationKind::Rename {
+                to: ElementName::new(to).unwrap(),
+            },
+            note: None,
+        });
+        Renames::of(&plan)
+    }
+
+    #[test]
+    fn a_renamed_boundary_reads_as_the_name_it_becomes() {
+        let view = view();
+        let renames = renaming("core/ports/source_analyzer.rs", "parsing");
+        let labels = Labels::renaming(&view, &renames);
+        assert_eq!(
+            labels.label(&id("core/ports/source_analyzer.rs")).name,
+            format!("source_analyzer {} parsing", glyph::BECOMES),
+            "the box still drops the path its frame spells"
+        );
+        assert_eq!(
+            labels.qualified(&id("core/ports/source_analyzer.rs")),
+            format!("ports::source_analyzer {} parsing", glyph::BECOMES)
+        );
+    }
+
+    #[test]
+    fn a_renamed_frame_leaves_the_names_inside_it_as_short_as_they_were() {
+        let view = view();
+        let renames = renaming("core/ports.rs", "wiring");
+        let labels = Labels::renaming(&view, &renames);
+        assert_eq!(
+            labels.label(&id("core/ports/source_analyzer.rs")).name,
+            "source_analyzer",
+            "the path a box drops is the one the sources spell"
+        );
+        assert_eq!(
+            labels.qualified(&id("core/ports.rs#self")),
+            format!("ports {} wiring ({OWN_CONTENT})", glyph::BECOMES),
+            "a frame's own content speaks for the frame, rename included"
+        );
     }
 
     #[test]

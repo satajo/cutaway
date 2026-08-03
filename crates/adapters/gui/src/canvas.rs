@@ -21,7 +21,7 @@ use crate::bundle::{self, Bundle};
 use crate::camera::{self, Camera};
 use crate::focus::{Focus, Selected, Strength, focus_of};
 use crate::glyph;
-use crate::label::{Label, Labels};
+use crate::label::{Label, Labels, Renames};
 use crate::layout::{HEADER, Layout};
 use crate::minimap::Minimap;
 use crate::routing::{self, Route, Scope};
@@ -63,6 +63,10 @@ pub enum NodeStatus {
     /// The element exists only in the plan: green, exactly as a drawn
     /// connection reads.
     Added,
+    /// The element stays where it is and changes: renamed, split, merged
+    /// into another, or reworked. Blue, because neither what is going nor
+    /// what is arriving describes it.
+    Modified,
 }
 
 /// What the user clicked on the canvas.
@@ -82,13 +86,20 @@ pub struct Content<'a> {
     pub edges: &'a [EdgeVisual],
     /// The boxes the plan has touched. Everything else stands as it is.
     pub nodes: &'a BTreeMap<ElementId, NodeStatus>,
+    /// The new names the plan gives boxes, so a renamed one says what it
+    /// becomes.
+    pub renames: &'a Renames,
     pub selected_edge: Option<&'a Relation>,
     pub selected_node: Option<&'a ElementId>,
     pub draw_source: Option<&'a ElementId>,
 }
 
+/// The three colours the plan speaks in: what is going, what is arriving,
+/// and what stays and changes. They carry the same weight on a dark canvas,
+/// so no mark shouts over the others and the picture reads as one plan.
 pub const SEVERED: Color32 = Color32::from_rgb(205, 70, 60);
 pub const DRAWN: Color32 = Color32::from_rgb(70, 165, 80);
+pub const MODIFIED: Color32 = Color32::from_rgb(85, 150, 230);
 
 /// The size a label paints at while the camera stands at 1:1.
 pub(crate) const LABEL_SIZE: f32 = 13.0;
@@ -300,7 +311,7 @@ fn describe_edge(ui: &Ui, content: &Content<'_>, bundle: &Bundle) {
     let Some(lead) = content.edges.get(bundle.lead) else {
         return;
     };
-    let labels = Labels::of(content.view);
+    let labels = Labels::renaming(content.view, content.renames);
     let joins = format!(
         "{} {} {}",
         labels.qualified(&lead.relation.from),
@@ -565,6 +576,7 @@ fn node_ink(base: Color32, status: Option<&NodeStatus>) -> Color32 {
         None => base,
         Some(NodeStatus::Removed) => SEVERED,
         Some(NodeStatus::Added) => DRAWN,
+        Some(NodeStatus::Modified) => MODIFIED,
     }
 }
 
@@ -592,7 +604,7 @@ fn paint(
         base: visuals.text_color(),
         fill: visuals.extreme_bg_color,
         washes: washes(visuals),
-        labels: Labels::of(content.view),
+        labels: Labels::renaming(content.view, content.renames),
         focus: focus(content),
     };
     paint_containers(&paint, content, summary, hovered_node);

@@ -38,6 +38,10 @@
 //!   landing on every concrete relation; element subjects only lose `#self`
 //!   marks. Where expansions overlap, the later annotation replaces the
 //!   earlier on the shared subjects, as [`Plan::annotate`] always has.
+//! - A modification loses the `#self` marks of its subject and of the
+//!   element a merge folds into. One whose subject the base graph does not
+//!   hold drops: a modification talks about code that exists, and an element
+//!   the plan merely proposes is edited as an addition instead of modified.
 
 use std::collections::BTreeMap;
 
@@ -46,6 +50,7 @@ use cutaway_architecture::{ArchitectureGraph, ElementId, Relation, RelationKind}
 use crate::annotation::Subject;
 use crate::change_set::ProposedChange;
 use crate::containment::{containment_parents, lies_within};
+use crate::modification::{Modification, ModificationKind};
 use crate::plan::Plan;
 
 /// How older plan files spelled the boundary lens's own-content leaf. No
@@ -86,7 +91,29 @@ impl Plan {
                 }
             }
         }
+        for modification in self.modifications() {
+            let subject = stripped(&modification.subject);
+            if base.element(&subject).is_none() {
+                continue;
+            }
+            normalized.plan_modification(Modification {
+                subject,
+                kind: stripped_kind(&modification.kind),
+                note: modification.note.clone(),
+            });
+        }
         normalized
+    }
+}
+
+/// A modification's payload with its `#self` marks gone. Only a merge names
+/// an element at all; the rest carry names of things that do not exist yet.
+fn stripped_kind(kind: &ModificationKind) -> ModificationKind {
+    match kind {
+        ModificationKind::Merge { with } => ModificationKind::Merge {
+            with: stripped(with),
+        },
+        other => other.clone(),
     }
 }
 
@@ -405,6 +432,51 @@ mod tests {
         assert!(plan.normalized(&base()).is_empty());
     }
 
+    fn renaming(subject: &str, to: &str) -> Modification {
+        Modification {
+            subject: id(subject),
+            kind: ModificationKind::Rename {
+                to: ElementName::new(to).unwrap(),
+            },
+            note: None,
+        }
+    }
+
+    #[test]
+    fn a_modification_of_an_element_of_the_architecture_survives_normalization() {
+        let mut plan = Plan::new();
+        plan.plan_modification(renaming("a/one", "first"));
+        assert_eq!(plan.normalized(&base()), plan);
+    }
+
+    #[test]
+    fn a_modification_of_an_element_the_architecture_no_longer_holds_is_dropped_as_stale() {
+        let mut plan = Plan::new();
+        plan.plan_modification(renaming("a/gone", "first"));
+        assert!(plan.normalized(&base()).is_empty());
+    }
+
+    #[test]
+    fn a_modification_written_on_a_self_leaf_speaks_about_the_frame() {
+        let mut plan = Plan::new();
+        plan.plan_modification(Modification {
+            subject: id("b/lib#self"),
+            kind: ModificationKind::Merge {
+                with: id("a/one#self"),
+            },
+            note: None,
+        });
+
+        assert_eq!(
+            plan.normalized(&base()).modification_of(&id("b/lib")),
+            Some(&Modification {
+                subject: id("b/lib"),
+                kind: ModificationKind::Merge { with: id("a/one") },
+                note: None,
+            })
+        );
+    }
+
     #[test]
     fn a_normalized_plan_contains_no_self_leaf_id() {
         let mut plan = Plan::new();
@@ -423,6 +495,13 @@ mod tests {
             Subject::Relation(depends("a/one", "b/lib#self")),
             note("a seam"),
         );
+        plan.plan_modification(Modification {
+            subject: id("a/two#self"),
+            kind: ModificationKind::Merge {
+                with: id("b/lib#self"),
+            },
+            note: None,
+        });
 
         let normalized = plan.normalized(&base());
         let ids: Vec<ElementId> = normalized
@@ -441,6 +520,13 @@ mod tests {
                     Subject::Relation(r) => vec![r.from.clone(), r.to.clone()],
                 },
             ))
+            .chain(normalized.modifications().flat_map(|modification| {
+                let mut ids = vec![modification.subject.clone()];
+                if let ModificationKind::Merge { with } = &modification.kind {
+                    ids.push(with.clone());
+                }
+                ids
+            }))
             .collect();
         assert!(!ids.is_empty());
         for id in ids {
@@ -497,6 +583,7 @@ mod tests {
         )))
         .unwrap();
         plan.annotate(Subject::Relation(depends("a/one", "b/lib")), note("a seam"));
+        plan.plan_modification(renaming("a/one#self", "first"));
 
         let once = plan.normalized(&base);
         assert_eq!(once.normalized(&base), once);

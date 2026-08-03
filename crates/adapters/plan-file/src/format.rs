@@ -6,7 +6,9 @@
 
 use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, Relation, RelationKind};
 use cutaway_planning::ports::plan_store::PlanStoreError;
-use cutaway_planning::{Note, Plan, ProposedChange, Subject};
+use cutaway_planning::{
+    Modification, ModificationKind, Note, Plan, ProposedChange, SplitParts, Subject,
+};
 use serde::{Deserialize, Serialize};
 
 const VERSION: u32 = 1;
@@ -16,6 +18,11 @@ pub struct StoredPlan {
     version: u32,
     changes: Vec<StoredChange>,
     annotations: Vec<StoredAnnotation>,
+    /// Modifications joined the format after version 1 was in the field, and
+    /// they state no change to what the architecture holds: a file written
+    /// without them is a whole plan, so their absence reads as none.
+    #[serde(default)]
+    modifications: Vec<StoredModification>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,6 +86,24 @@ enum StoredSubject {
     Relation(StoredRelation),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredModification {
+    subject: String,
+    #[serde(flatten)]
+    kind: StoredModificationKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "modify", rename_all = "kebab-case")]
+enum StoredModificationKind {
+    Rename { to: String },
+    Split { into: Vec<String> },
+    Merge { with: String },
+    Rework,
+}
+
 impl StoredPlan {
     pub fn from_plan(plan: &Plan) -> Self {
         Self {
@@ -102,6 +127,17 @@ impl StoredPlan {
                         }
                     },
                     note: annotation.note.as_str().to_owned(),
+                })
+                .collect(),
+            modifications: plan
+                .modifications()
+                .map(|modification| StoredModification {
+                    subject: modification.subject.as_str().to_owned(),
+                    kind: StoredModificationKind::from_kind(&modification.kind),
+                    note: modification
+                        .note
+                        .as_ref()
+                        .map(|note| note.as_str().to_owned()),
                 })
                 .collect(),
         }
@@ -134,7 +170,62 @@ impl StoredPlan {
             }
             plan.annotate(subject, Note::new(stored.note).map_err(corrupt)?);
         }
+        for stored in self.modifications {
+            let subject = element_id(stored.subject)?;
+            if plan.modification_of(&subject).is_some() {
+                return Err(PlanStoreError::Corrupt {
+                    reason: "duplicate modification subject".to_owned(),
+                });
+            }
+            let note = stored.note.map(Note::new).transpose().map_err(corrupt)?;
+            plan.plan_modification(Modification {
+                subject,
+                kind: stored.kind.into_kind()?,
+                note,
+            });
+        }
         Ok(plan)
+    }
+}
+
+impl StoredModificationKind {
+    fn from_kind(kind: &ModificationKind) -> Self {
+        match kind {
+            ModificationKind::Rename { to } => Self::Rename {
+                to: to.as_str().to_owned(),
+            },
+            ModificationKind::Split { into } => Self::Split {
+                into: into
+                    .names()
+                    .iter()
+                    .map(|name| name.as_str().to_owned())
+                    .collect(),
+            },
+            ModificationKind::Merge { with } => Self::Merge {
+                with: with.as_str().to_owned(),
+            },
+            ModificationKind::Rework => Self::Rework,
+        }
+    }
+
+    fn into_kind(self) -> Result<ModificationKind, PlanStoreError> {
+        Ok(match self {
+            Self::Rename { to } => ModificationKind::Rename {
+                to: ElementName::new(to).map_err(corrupt)?,
+            },
+            Self::Split { into } => ModificationKind::Split {
+                into: SplitParts::new(
+                    into.into_iter()
+                        .map(|name| ElementName::new(name).map_err(corrupt))
+                        .collect::<Result<Vec<ElementName>, PlanStoreError>>()?,
+                )
+                .map_err(corrupt)?,
+            },
+            Self::Merge { with } => ModificationKind::Merge {
+                with: element_id(with)?,
+            },
+            Self::Rework => ModificationKind::Rework,
+        })
     }
 }
 

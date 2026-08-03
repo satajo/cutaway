@@ -17,7 +17,7 @@ use cutaway_architecture::{ArchitectureGraph, ElementId, RelationKind};
 use cutaway_lenses::is_self_leaf;
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 
-use crate::label::Labels;
+use crate::label::{Labels, Renames};
 
 /// The height of the smallest box a leaf ever gets: room for one label and
 /// the space around it.
@@ -105,7 +105,11 @@ pub fn concept_weights(graph: &ArchitectureGraph) -> BTreeMap<ElementId, usize> 
         .collect()
 }
 
-pub fn compute(view: &ArchitectureGraph, weights: &BTreeMap<ElementId, usize>) -> Layout {
+pub fn compute(
+    view: &ArchitectureGraph,
+    weights: &BTreeMap<ElementId, usize>,
+    renames: &Renames,
+) -> Layout {
     let mut parents: BTreeMap<ElementId, ElementId> = BTreeMap::new();
     let mut children: BTreeMap<ElementId, Vec<ElementId>> = BTreeMap::new();
     for relation in view.relations() {
@@ -160,9 +164,10 @@ pub fn compute(view: &ArchitectureGraph, weights: &BTreeMap<ElementId, usize>) -
         .map(|(parent, kids)| (parent.clone(), ordered_by_layer(kids, &depends)))
         .collect();
 
-    // A box must fit the label the canvas writes on it, glyph and shortened
-    // name included, so both read the label from the same place.
-    let labels = Labels::of(view);
+    // A box must fit the label the canvas writes on it, glyph, shortened
+    // name and the plan's rename included, so both read the label from the
+    // same place.
+    let labels = Labels::renaming(view, renames);
     let label_of = |id: &ElementId| -> String { labels.label(id).text() };
 
     // Arrange twice: the first pass reveals where everything lands, the
@@ -655,7 +660,7 @@ mod tests {
         let dependency = add_package(&mut graph, "domain");
         depend(&mut graph, &dependent, &dependency);
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         assert!(layout.rects[&dependent].max.x < layout.rects[&dependency].min.x);
     }
 
@@ -670,7 +675,7 @@ mod tests {
         depend(&mut graph, &left_a, &right_a);
         depend(&mut graph, &left_b, &right_a);
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         let separate = [
             (&left, &right),
             (&left_a, &left_b),
@@ -694,7 +699,7 @@ mod tests {
         let light = add_package(&mut graph, "omega");
 
         let weights = BTreeMap::from([(heavy.clone(), 49), (light.clone(), 0)]);
-        let layout = compute(&graph, &weights);
+        let layout = compute(&graph, &weights, &Renames::default());
         assert!(layout.rects[&heavy].area() > layout.rects[&light].area());
     }
 
@@ -706,7 +711,7 @@ mod tests {
             add_module(&mut graph, &package, &format!("crowded/m{index:02}.rs"));
         }
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         let box_of = layout.rects[&package];
         let aspect = box_of.width() / box_of.height();
         assert!(
@@ -736,7 +741,7 @@ mod tests {
             children.push(child);
         }
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         for (index, a) in children.iter().enumerate() {
             assert!(
                 layout.rects[&package].contains_rect(layout.rects[a]),
@@ -764,7 +769,7 @@ mod tests {
             depend(&mut graph, &pair[0], &pair[1]);
         }
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         for pair in chain.windows(2) {
             let (dependent, dependency) = (layout.rects[&pair[0]], layout.rects[&pair[1]]);
             let reads_first = dependent.center().y < dependency.center().y
@@ -795,7 +800,7 @@ mod tests {
         depend(&mut graph, &two, &above);
         depend(&mut graph, &own, &below);
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         for part in [&one, &two] {
             assert!(
                 layout.rects[&own].min.y < layout.rects[part].min.y,
@@ -812,7 +817,7 @@ mod tests {
         let plain_frame = add_package(&mut graph, "beta");
         let plain = add_named_module(&mut graph, &plain_frame, "beta/y.rs", "y");
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         let difference = (layout.rects[&nested].width() - layout.rects[&plain].width()).abs();
         assert!(
             difference < 1.0,
@@ -825,7 +830,7 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         let package = add_package(&mut graph, "app");
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         assert!(layout.rects[&package].width() >= label_width(&format!("{} app", glyph::PACKAGE)));
     }
 
@@ -840,7 +845,7 @@ mod tests {
         depend(&mut graph, &upper, &straight);
         depend(&mut graph, &lower, &crossed);
 
-        let layout = compute(&graph, &no_weights());
+        let layout = compute(&graph, &no_weights(), &Renames::default());
         let above =
             |a: &ElementId, b: &ElementId| layout.rects[a].center().y < layout.rects[b].center().y;
         assert_eq!(above(&upper, &lower), above(&straight, &crossed));

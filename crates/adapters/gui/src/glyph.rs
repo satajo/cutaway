@@ -41,6 +41,10 @@ glyphs! {
     /// boundary the panel is about.
     INWARD = "⏴";
 
+    /// What a renamed element becomes: it stands between the name the
+    /// sources carry and the name the plan gives it.
+    BECOMES = "»";
+
     /// The arrow keys, as a hint names them.
     KEY_UP = "⏶";
     KEY_DOWN = "⏷";

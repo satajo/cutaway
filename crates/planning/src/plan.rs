@@ -4,9 +4,11 @@ use cutaway_architecture::{ArchitectureGraph, ElementId, Relation, RelationKind}
 
 use crate::annotation::{Annotation, Note, Subject};
 use crate::change_set::{ChangeSet, ProposedChange};
+use crate::modification::Modification;
 
 /// A complete markup of an architecture: the proposed changes, each with an
-/// optional rationale, plus annotations on parts that stay as they are.
+/// optional rationale, the modifications of elements that stay, and
+/// annotations on parts that change not at all.
 ///
 /// The plan is the artifact Cutaway exports for an agent to work from and
 /// checks against after the work lands.
@@ -14,6 +16,9 @@ use crate::change_set::{ChangeSet, ProposedChange};
 pub struct Plan {
     changes: Vec<PlannedChange>,
     annotations: Vec<Annotation>,
+    /// At most one per subject. The modification API lives beside the type
+    /// it stores, in [`crate::modification`].
+    pub(crate) modifications: Vec<Modification>,
 }
 
 /// One proposed change and why it is proposed.
@@ -31,7 +36,7 @@ impl Plan {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty() && self.annotations.is_empty()
+        self.changes.is_empty() && self.annotations.is_empty() && self.modifications.is_empty()
     }
 
     #[must_use]

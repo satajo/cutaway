@@ -129,6 +129,77 @@ fn a_package_is_planned(world: &mut CutawayWorld, name: String) {
         .expect("planning the package succeeds");
 }
 
+#[when(expr = "the rename of {string} to {string} is planned")]
+fn the_rename_of_an_element_is_planned(world: &mut CutawayWorld, name: String, to: String) {
+    world
+        .driver
+        .plan_rename(&name, &to)
+        .expect("planning the rename succeeds");
+}
+
+/// An act the application may refuse. The scenario states what the plan
+/// holds afterwards, which is the behavior either way.
+#[when(expr = "the rename of {string} to {string} is attempted")]
+fn the_rename_of_an_element_is_attempted(world: &mut CutawayWorld, name: String, to: String) {
+    let _ = world.driver.plan_rename(&name, &to);
+}
+
+#[when(expr = "the split of {string} into {string} is planned")]
+fn the_split_of_an_element_is_planned(world: &mut CutawayWorld, name: String, parts: String) {
+    let parts: Vec<&str> = parts.split(',').map(str::trim).collect();
+    world
+        .driver
+        .plan_split(&name, &parts)
+        .expect("planning the split succeeds");
+}
+
+#[when(expr = "the merge of {string} into {string} is planned")]
+fn the_merge_of_an_element_is_planned(world: &mut CutawayWorld, name: String, into: String) {
+    world
+        .driver
+        .plan_merge(&name, &into)
+        .expect("planning the merge succeeds");
+}
+
+#[when(expr = "the rework of {string} is planned")]
+fn the_rework_of_an_element_is_planned(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .plan_rework(&name)
+        .expect("planning the rework succeeds");
+}
+
+#[when(expr = "the modification of {string} is discarded")]
+fn the_modification_of_an_element_is_discarded(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .discard_modification(&name)
+        .expect("discarding succeeds");
+}
+
+#[when(expr = "the element {string} is annotated with {string}")]
+fn the_element_is_annotated(world: &mut CutawayWorld, name: String, note: String) {
+    world
+        .driver
+        .annotate_element(&name, &note)
+        .expect("annotating succeeds");
+}
+
+#[then(expr = "the plan modifies {string} by {string}")]
+fn the_plan_modifies_an_element(world: &mut CutawayWorld, name: String, stated: String) {
+    assert_eq!(world.driver.modification_of(&name), Some(stated));
+}
+
+#[then(expr = "the plan modifies {string} in no way")]
+fn the_plan_modifies_an_element_in_no_way(world: &mut CutawayWorld, name: String) {
+    assert_eq!(world.driver.modification_of(&name), None);
+}
+
+#[then(expr = "the element {string} carries the note {string}")]
+fn the_element_carries_the_note(world: &mut CutawayWorld, name: String, note: String) {
+    assert_eq!(world.driver.note_on_element(&name), Some(note));
+}
+
 #[then(expr = "the plan marks {string} for removal")]
 fn the_plan_marks_an_element_for_removal(world: &mut CutawayWorld, name: String) {
     assert!(world.driver.element_removal_is_planned(&name));

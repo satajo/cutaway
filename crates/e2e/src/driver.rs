@@ -9,7 +9,10 @@ use cutaway_architecture::{
 use cutaway_inspection::inspect;
 use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view, self_leaf_frame};
 use cutaway_planning::ports::plan_store::PlanStore;
-use cutaway_planning::{GroupStanding, Note, Plan, ProposedChange, Subject, addition_of_element};
+use cutaway_planning::{
+    GroupStanding, Modification, ModificationKind, Note, Plan, ProposedChange, SplitParts, Subject,
+    addition_of_element,
+};
 
 use crate::fakes::{InMemoryPlanStore, InMemorySourceTree};
 
@@ -40,6 +43,25 @@ pub trait ApplicationDriver {
     fn add_element_inside(&mut self, parent: &str, kind: &str, name: &str) -> Result<(), String>;
     /// Plans a new package at the root of the project.
     fn add_package(&mut self, name: &str) -> Result<(), String>;
+    /// States that one element keeps everything but its name.
+    fn plan_rename(&mut self, name: &str, to: &str) -> Result<(), String>;
+    /// States that one element becomes the several named here.
+    fn plan_split(&mut self, name: &str, parts: &[&str]) -> Result<(), String>;
+    /// States that one element folds into another that already exists.
+    fn plan_merge(&mut self, name: &str, into: &str) -> Result<(), String>;
+    /// States that the insides of one element change while its place does
+    /// not. The note beside it carries the description.
+    fn plan_rework(&mut self, name: &str) -> Result<(), String>;
+    /// Leaves the element exactly as the sources have it.
+    fn discard_modification(&mut self, name: &str) -> Result<(), String>;
+    /// What the plan states about one element that stays, in words: "rename
+    /// to engine", "split into engine, transport", "merge into engine", or
+    /// "rework". None while the plan states nothing about it.
+    fn modification_of(&self, name: &str) -> Option<String>;
+    /// Writes a remark about one element: the rationale of the modification
+    /// it carries, or - with none - a note on the element as it stands.
+    fn annotate_element(&mut self, name: &str, note: &str) -> Result<(), String>;
+    fn note_on_element(&self, name: &str) -> Option<String>;
     /// What one boundary directly holds, by display name.
     fn contents_of(&self, name: &str) -> Vec<String>;
     fn element_removal_is_planned(&self, name: &str) -> bool;
@@ -173,6 +195,33 @@ impl InProcessDriver {
         self.store
             .save(&self.plan)
             .map_err(|error| error.to_string())
+    }
+
+    /// States one modification and stores the plan. Only an element the
+    /// sources declare may be modified: an element that lives only in the
+    /// plan carries whatever the planner gave it, so the addition itself is
+    /// what changes.
+    fn plan_modification(&mut self, name: &str, kind: ModificationKind) -> Result<(), String> {
+        let subject = self.element_id(name)?;
+        let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
+        if graph.element(&subject).is_none() {
+            return Err(format!(
+                "{name} exists only in the plan; change the planned element itself"
+            ));
+        }
+        self.plan.plan_modification(Modification {
+            subject,
+            kind,
+            note: None,
+        });
+        self.save()
+    }
+
+    /// The name a scenario knows one element by.
+    fn display_name(&self, id: &ElementId) -> String {
+        self.viewed()
+            .element(id)
+            .map_or_else(|| id.to_string(), |element| element.name.to_string())
     }
 }
 
@@ -341,6 +390,82 @@ impl ApplicationDriver for InProcessDriver {
             .find(|element| element.kind == ElementKind::Project)
             .map(|element| element.id.clone());
         self.plan_addition(root.as_ref(), ElementKind::Package, name)
+    }
+
+    fn plan_rename(&mut self, name: &str, to: &str) -> Result<(), String> {
+        let to = ElementName::new(to).map_err(|error| error.to_string())?;
+        self.plan_modification(name, ModificationKind::Rename { to })
+    }
+
+    fn plan_split(&mut self, name: &str, parts: &[&str]) -> Result<(), String> {
+        let named: Result<Vec<ElementName>, String> = parts
+            .iter()
+            .map(|part| ElementName::new(*part).map_err(|error| error.to_string()))
+            .collect();
+        let into = SplitParts::new(named?).map_err(|error| error.to_string())?;
+        self.plan_modification(name, ModificationKind::Split { into })
+    }
+
+    fn plan_merge(&mut self, name: &str, into: &str) -> Result<(), String> {
+        let with = self.element_id(into)?;
+        self.plan_modification(name, ModificationKind::Merge { with })
+    }
+
+    fn plan_rework(&mut self, name: &str) -> Result<(), String> {
+        self.plan_modification(name, ModificationKind::Rework)
+    }
+
+    fn discard_modification(&mut self, name: &str) -> Result<(), String> {
+        let subject = self.element_id(name)?;
+        if self.plan.modification_of(&subject).is_none() {
+            return Err(format!("no modification is planned for {name}"));
+        }
+        self.plan.discard_modification(&subject);
+        self.save()
+    }
+
+    fn modification_of(&self, name: &str) -> Option<String> {
+        let subject = self.element_id(name).ok()?;
+        let modification = self.plan.modification_of(&subject)?;
+        Some(match &modification.kind {
+            ModificationKind::Rename { to } => format!("rename to {to}"),
+            ModificationKind::Split { into } => format!(
+                "split into {}",
+                into.names()
+                    .iter()
+                    .map(ElementName::as_str)
+                    .collect::<Vec<&str>>()
+                    .join(", ")
+            ),
+            ModificationKind::Merge { with } => format!("merge into {}", self.display_name(with)),
+            ModificationKind::Rework => "rework".to_owned(),
+        })
+    }
+
+    fn annotate_element(&mut self, name: &str, note: &str) -> Result<(), String> {
+        let subject = self.element_id(name)?;
+        let note = Note::new(note).map_err(|error| error.to_string())?;
+        // A modified element is described by the note on its modification:
+        // one remark about one element, wherever the plan carries it.
+        if let Some(modification) = self.plan.modification_of(&subject) {
+            let described = Modification {
+                note: Some(note),
+                ..modification.clone()
+            };
+            self.plan.plan_modification(described);
+        } else {
+            self.plan.annotate(Subject::Element(subject), note);
+        }
+        self.save()
+    }
+
+    fn note_on_element(&self, name: &str) -> Option<String> {
+        let subject = self.element_id(name).ok()?;
+        match self.plan.modification_of(&subject) {
+            Some(modification) => modification.note.as_ref(),
+            None => self.plan.annotation_of(&Subject::Element(subject.clone())),
+        }
+        .map(|note| note.as_str().to_owned())
     }
 
     fn contents_of(&self, name: &str) -> Vec<String> {

@@ -11,14 +11,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation};
+use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, ElementName, Relation};
 use cutaway_lenses::{BoundaryView, Detail, is_self_leaf};
+use cutaway_planning::ModificationKind;
 use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
 use crate::glyph;
 use crate::label::{self, Labels, kind_name, kind_symbol};
-use crate::{Scene, Selection, Session, Standing, detail, focus, real_id};
+use crate::{Modifying, Scene, Selection, Session, Standing, detail, focus, real_id};
 
 /// How many rows one list shows before it names the rest. The cap is a
 /// display limit and not a data limit: the count above every list still
@@ -139,6 +140,12 @@ fn help(ui: &mut egui::Ui) {
          to plan its removal, or to plan a new one inside it.",
     );
     ui.label(
+        "A boundary that stays and changes turns blue: rename, split, merge or \
+         rework it from its panel. A modification states intent for whoever \
+         implements the plan and redraws nothing, so its note carries the rest \
+         of the story.",
+    );
+    ui.label(
         "Drag or scroll to pan, ctrl+scroll or pinch to zoom; press Home, click Fit, \
          or double-click the background to bring the whole picture back.",
     );
@@ -154,6 +161,7 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     // boundary by it even where two short names read alike.
     ui.small(egui::RichText::new(id.as_str()).monospace());
     plan_controls(ui, session, id);
+    modify_controls(ui, session, id);
     detail_controls(ui, session, id);
     note_editor(ui, session);
     // A frame's own-content box adds inside the frame it belongs to: the
@@ -293,6 +301,126 @@ fn plan_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
                 session.erase_element(id);
             }
         }
+    }
+}
+
+/// What the plan changes about a boundary that stays where it is, and the
+/// acts that state it.
+///
+/// A modification is offered on an element the sources declare alone: an
+/// element that exists only in the plan is edited as the addition it is, and
+/// one on its way out is not renamed but removed. A modification already
+/// planned reads back whatever the element's standing became, so a reader
+/// who marks a modified boundary for removal still sees - and can withdraw -
+/// what they stated before.
+fn modify_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
+    let subject = real_id(id);
+    let planned = session.plan.modification_of(&subject).map(|modification| {
+        planned_modification(
+            &modification.kind,
+            &Labels::renaming(&session.viewed, &session.renames),
+        )
+    });
+    if let Some(line) = planned {
+        ui.separator();
+        ui.colored_label(canvas::MODIFIED, line);
+        if ui
+            .button("Discard")
+            .on_hover_text("Leave this element exactly as the sources have it.")
+            .clicked()
+        {
+            session.discard_modification(&subject);
+        }
+        return;
+    }
+    if !matches!(session.standing(id), Standing::Existing) {
+        return;
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Modify:");
+        if ui
+            .small_button("Rename")
+            .on_hover_text("The element keeps everything but its name.")
+            .clicked()
+        {
+            session.modifying = Modifying::Rename;
+            session.modification_draft.clear();
+        }
+        if ui
+            .small_button("Split")
+            .on_hover_text("The element becomes several, named here.")
+            .clicked()
+        {
+            session.modifying = Modifying::Split;
+            session.modification_draft.clear();
+        }
+        if ui
+            .small_button("Merge")
+            .on_hover_text("The element folds into another; pick it on the canvas.")
+            .clicked()
+        {
+            session.begin_merge(id);
+        }
+        if ui
+            .small_button("Rework")
+            .on_hover_text("The insides change and the picture does not. Say how in the note.")
+            .clicked()
+        {
+            session.propose_modification(id, ModificationKind::Rework);
+        }
+    });
+    match session.modifying {
+        Modifying::Nothing => {}
+        Modifying::Rename => modification_field(ui, session, id, "New name:", Session::plan_rename),
+        Modifying::Split => modification_field(
+            ui,
+            session,
+            id,
+            "Becomes, comma separated:",
+            Session::plan_split,
+        ),
+    }
+}
+
+/// What the plan states about one element that stays, in one line.
+fn planned_modification(kind: &ModificationKind, labels: &Labels<'_>) -> String {
+    match kind {
+        ModificationKind::Rename { to } => format!("Planned rename to {to}."),
+        ModificationKind::Split { into } => format!(
+            "Planned split into {}.",
+            into.names()
+                .iter()
+                .map(ElementName::as_str)
+                .collect::<Vec<&str>>()
+                .join(", ")
+        ),
+        ModificationKind::Merge { with } => {
+            format!("Planned merge into {}.", labels.qualified(with))
+        }
+        ModificationKind::Rework => "Planned rework.".to_owned(),
+    }
+}
+
+/// The field a modification takes its text from. The text goes through the
+/// same act whether the reader finishes it with the key that finishes every
+/// other field or with the button beside it.
+fn modification_field(
+    ui: &mut egui::Ui,
+    session: &mut Session,
+    id: &ElementId,
+    prompt: &str,
+    plan: fn(&mut Session, &ElementId),
+) {
+    ui.label(prompt);
+    let mut asked = false;
+    ui.horizontal(|ui| {
+        let field = ui.text_edit_singleline(&mut session.modification_draft);
+        asked = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        asked |= ui.button("Plan").clicked();
+    });
+    if asked {
+        plan(session, id);
     }
 }
 
@@ -509,7 +637,9 @@ fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
     let Ok(Scene { view, .. }) = &session.scene else {
         return None;
     };
-    let labels = Labels::of(&view.graph);
+    // The heading is where a reader reads what a boundary is called, so a
+    // renamed one says what it becomes right there.
+    let labels = Labels::renaming(&view.graph, &session.renames);
     let element = session.element_of(id)?;
     Some(NodePanel {
         heading: format!("{} {}", kind_symbol(element.kind), labels.qualified(id)),
@@ -1036,6 +1166,36 @@ mod tests {
         assert_eq!(
             inside(&view.graph, &graph, &id("a/two#type:X"), Detail::Items),
             "Nothing inside."
+        );
+    }
+
+    #[test]
+    fn a_planned_split_names_every_element_it_becomes() {
+        let graph = graph();
+        assert_eq!(
+            planned_modification(
+                &ModificationKind::Split {
+                    into: cutaway_planning::SplitParts::new(vec![
+                        ElementName::new("engine").unwrap(),
+                        ElementName::new("transport").unwrap(),
+                    ])
+                    .unwrap(),
+                },
+                &Labels::of(&graph)
+            ),
+            "Planned split into engine, transport."
+        );
+    }
+
+    #[test]
+    fn a_planned_merge_names_the_boundary_it_folds_into() {
+        let graph = graph();
+        assert_eq!(
+            planned_modification(
+                &ModificationKind::Merge { with: id("b/one") },
+                &Labels::of(&graph)
+            ),
+            "Planned merge into b/one."
         );
     }
 

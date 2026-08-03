@@ -30,6 +30,17 @@
 //! replaces the provisional id with the real one. The `add-relation`
 //! entry of kind `contains` beside it says which boundary the new element
 //! belongs to.
+//!
+//! A `modifications` entry states how one element that stays is to change:
+//! `rename` with the name it takes, `split` with the names it becomes,
+//! `merge` with the id of the element it folds into, or `rework`, whose
+//! `note` is the description of the work. At most one entry per subject, and
+//! every subject is an element the inspected architecture holds. These are
+//! structured intents for an agent to interpret, not changes to the graph:
+//! no entry beside them redraws a dependency, because which couplings
+//! survive a rename, a split or a merge is the work being ordered. A file
+//! written before modifications existed carries no such array, and loads as
+//! a plan with none.
 
 mod format;
 
@@ -81,8 +92,10 @@ impl PlanStore for JsonPlanStore {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{ElementId, Relation, RelationKind};
-    use cutaway_planning::{Note, ProposedChange, Subject};
+    use cutaway_architecture::{ElementId, ElementName, Relation, RelationKind};
+    use cutaway_planning::{
+        Modification, ModificationKind, Note, ProposedChange, SplitParts, Subject,
+    };
 
     use super::*;
 
@@ -109,6 +122,17 @@ mod tests {
             Subject::Element(ElementId::new("package:a").unwrap()),
             Note::new("deprecated, shrink it").unwrap(),
         );
+        plan.plan_modification(Modification {
+            subject: ElementId::new("package:b").unwrap(),
+            kind: ModificationKind::Split {
+                into: SplitParts::new(vec![
+                    ElementName::new("engine").unwrap(),
+                    ElementName::new("transport").unwrap(),
+                ])
+                .unwrap(),
+            },
+            note: Some(Note::new("the transport belongs on its own").unwrap()),
+        });
         plan
     }
 
@@ -147,5 +171,45 @@ mod tests {
         assert!(text.contains("\"version\": 1"));
         assert!(text.contains("remove-relation"));
         assert!(text.contains("cut the cycle"));
+        assert!(text.contains("\"modify\": \"split\""));
+    }
+
+    #[test]
+    fn a_plan_file_written_before_modifications_existed_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cutaway.json"),
+            r#"{"version": 1, "changes": [], "annotations": []}"#,
+        )
+        .unwrap();
+        let store = JsonPlanStore::for_repository(dir.path());
+        assert_eq!(store.load().unwrap(), Some(Plan::new()));
+    }
+
+    #[test]
+    fn a_split_naming_a_single_element_is_reported_as_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cutaway.json"),
+            r#"{"version": 1, "changes": [], "annotations": [], "modifications":
+               [{"subject": "package:a", "modify": "split", "into": ["engine"]}]}"#,
+        )
+        .unwrap();
+        let store = JsonPlanStore::for_repository(dir.path());
+        assert!(matches!(store.load(), Err(PlanStoreError::Corrupt { .. })));
+    }
+
+    #[test]
+    fn two_modifications_of_one_element_are_reported_as_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cutaway.json"),
+            r#"{"version": 1, "changes": [], "annotations": [], "modifications":
+               [{"subject": "package:a", "modify": "rework"},
+                {"subject": "package:a", "modify": "rename", "to": "engine"}]}"#,
+        )
+        .unwrap();
+        let store = JsonPlanStore::for_repository(dir.path());
+        assert!(matches!(store.load(), Err(PlanStoreError::Corrupt { .. })));
     }
 }

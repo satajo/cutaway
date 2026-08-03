@@ -12,7 +12,10 @@
 //! the lens views the architecture with the plan's own additions drawn in,
 //! so a planned boundary takes a box, receives connections, and rolls up
 //! exactly as a real one does. What the plan removes stays in the picture
-//! too, marked red: the reader must see what is going.
+//! too, marked red: the reader must see what is going. What the plan
+//! modifies - renamed, split, merged, reworked - stays where it is and turns
+//! blue: a modification states intent for whoever implements the plan and
+//! redraws nothing, so only the mark can say it.
 //!
 //! The toolbar's three stops set the detail of the whole picture, and single
 //! boundaries open or close on top of it: a double click on a boundary, or
@@ -45,13 +48,16 @@ use cutaway_architecture::{
 };
 use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view, self_leaf_frame};
 use cutaway_planning::ports::plan_store::PlanStore;
-use cutaway_planning::{GroupStanding, Note, Plan, ProposedChange, Subject, addition_of_element};
+use cutaway_planning::{
+    GroupStanding, Modification, ModificationKind, Note, Plan, ProposedChange, SplitParts, Subject,
+    addition_of_element,
+};
 use eframe::egui::{self, Rect};
 
 use crate::camera::Camera;
 use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual, NodeStatus};
 use crate::continuity::Piece;
-use crate::label::Labels;
+use crate::label::{Labels, Renames};
 use crate::layout::Layout;
 use crate::palette::Palette;
 
@@ -140,6 +146,9 @@ struct Session {
     /// Where the picture cuts the hierarchy: the detail of the whole, and
     /// the boundaries the reader opened or closed on top of it.
     cut: Cut,
+    /// The new names the plan gives elements. Both the arrangement and the
+    /// paint read the labels, so the renames resolve once per rebuild.
+    renames: Renames,
     scene: Result<Scene, String>,
     /// Contained-concept counts from the full graph; they size the boxes.
     weights: BTreeMap<ElementId, usize>,
@@ -157,6 +166,14 @@ struct Session {
     note_draft: String,
     /// The element the reader is composing in the inspector's add field.
     addition: Addition,
+    /// Which modification the reader is composing in the inspector, and the
+    /// text it takes. The field outlives one frame, so a reader who asks for
+    /// a split keeps typing into a split.
+    modifying: Modifying,
+    modification_draft: String,
+    /// The element waiting for the box it folds into: a merge names a second
+    /// element, and the reader picks it on the canvas.
+    merging: Option<ElementId>,
     drawing: bool,
     draw_source: Option<ElementId>,
     status: Option<String>,
@@ -184,6 +201,17 @@ impl Default for Addition {
     }
 }
 
+/// Which modification the inspector is taking text for. A rename and a split
+/// need a name and a list of names; a rework and a merge need neither, so
+/// they act the moment the reader asks for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Modifying {
+    #[default]
+    Nothing,
+    Rename,
+    Split,
+}
+
 impl Session {
     fn open(project: OpenedProject) -> Self {
         let weights = layout::concept_weights(&project.graph);
@@ -197,6 +225,7 @@ impl Session {
             plan,
             store: project.store,
             cut: Cut::uniform(Detail::Packages),
+            renames: Renames::default(),
             scene: Err("not built yet".to_owned()),
             weights,
             camera: Camera::default(),
@@ -204,6 +233,9 @@ impl Session {
             selection: None,
             note_draft: String::new(),
             addition: Addition::default(),
+            modifying: Modifying::default(),
+            modification_draft: String::new(),
+            merging: None,
             drawing: false,
             draw_source: None,
             status: None,
@@ -237,16 +269,25 @@ impl Session {
     /// lens pure and this shell thin.
     fn rebuild_view(&mut self) {
         self.viewed = self.plan.viewed_architecture(&self.graph);
+        // A renamed box says what it becomes, so the arrangement must give
+        // it room for the longer text: the renames resolve before the
+        // layout that measures them.
+        self.renames = Renames::of(&self.plan);
         self.scene = boundary_view(&self.viewed, &self.cut)
             .map_err(|error| error.to_string())
             .map(|view| {
-                let layout = layout::compute(&view.graph, &self.weights);
+                let layout = layout::compute(&view.graph, &self.weights, &self.renames);
                 Scene { view, layout }
             });
         if let Some(source) = &self.draw_source
             && !self.shows(source)
         {
             self.draw_source = None;
+        }
+        if let Some(subject) = &self.merging
+            && !self.shows(subject)
+        {
+            self.merging = None;
         }
         let dropped = self
             .selection
@@ -382,9 +423,17 @@ impl Session {
         status_of_group(&self.plan, &self.concrete_behind(relation))
     }
 
+    /// The note the editor shows for a selection. An element the plan
+    /// modifies answers with the modification's own note: a rework is
+    /// described by its note and nothing else, so the one note field beside
+    /// the element must be that note rather than a second remark about an
+    /// element the plan is already changing.
     fn current_note_text(&self, selection: &Selection) -> String {
         let note = match selection {
-            Selection::Node(id) => self.plan.annotation_of(&Subject::Element(real_id(id))),
+            Selection::Node(id) => match self.plan.modification_of(&real_id(id)) {
+                Some(modification) => modification.note.as_ref(),
+                None => self.plan.annotation_of(&Subject::Element(real_id(id))),
+            },
             Selection::Edge(relation) => {
                 let concrete = self.concrete_behind(relation);
                 note_behind(
@@ -403,6 +452,10 @@ impl Session {
             .as_ref()
             .map(|s| self.current_note_text(s))
             .unwrap_or_default();
+        // A half-written modification belongs to the element it was started
+        // on; the next subject is a new question.
+        self.modifying = Modifying::Nothing;
+        self.modification_draft.clear();
         self.selection = selection;
     }
 
@@ -491,12 +544,22 @@ impl Session {
         let note = Note::new(self.note_draft.clone()).ok();
         let result = match &selection {
             Selection::Node(id) => {
-                let subject = Subject::Element(real_id(id));
-                match &note {
-                    Some(note) => self.plan.annotate(subject, note.clone()),
-                    None => self.plan.clear_annotation(&subject),
+                let id = real_id(id);
+                if let Some(modification) = self.plan.modification_of(&id) {
+                    let described = Modification {
+                        note: note.clone(),
+                        ..modification.clone()
+                    };
+                    self.plan.plan_modification(described);
+                    Ok(())
+                } else {
+                    let subject = Subject::Element(id);
+                    match &note {
+                        Some(note) => self.plan.annotate(subject, note.clone()),
+                        None => self.plan.clear_annotation(&subject),
+                    }
+                    Ok(())
                 }
-                Ok(())
             }
             Selection::Edge(relation) => {
                 let concrete = self.concrete_behind(relation);
@@ -729,6 +792,118 @@ impl Session {
         self.select(None);
     }
 
+    /// States that one element changes while staying where it is. Only an
+    /// element the sources declare may be modified: an element that exists
+    /// only in the plan carries whatever name and place the reader gave it,
+    /// so the addition itself is what they edit.
+    fn propose_modification(&mut self, subject: &ElementId, kind: ModificationKind) {
+        let subject = real_id(subject);
+        if self.graph.element(&subject).is_none() {
+            self.status = Some(format!(
+                "{subject} exists only in the plan; change the planned element itself"
+            ));
+            return;
+        }
+        // A modification arriving on an element replaces whatever it
+        // carried, so its old note explained a change that no longer stands.
+        self.plan.plan_modification(Modification {
+            subject,
+            kind,
+            note: None,
+        });
+        self.modifying = Modifying::Nothing;
+        self.modification_draft.clear();
+        self.save_plan();
+        // A renamed box carries longer text and needs a wider box.
+        self.rebuild_view();
+        if let Some(selection) = self.selection.clone() {
+            self.select(Some(selection));
+        }
+    }
+
+    fn plan_rename(&mut self, subject: &ElementId) {
+        match ElementName::new(self.modification_draft.trim()) {
+            Ok(to) => self.propose_modification(subject, ModificationKind::Rename { to }),
+            Err(error) => self.status = Some(error.to_string()),
+        }
+    }
+
+    /// States the elements one boundary splits into, read from a
+    /// comma-separated list: the reader names the parts in one field, and
+    /// each name goes through [`ElementName`] like every other name in the
+    /// architecture.
+    fn plan_split(&mut self, subject: &ElementId) {
+        let named: Result<Vec<ElementName>, _> = self
+            .modification_draft
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(ElementName::new)
+            .collect();
+        let parts = match named
+            .map_err(|error| error.to_string())
+            .and_then(|names| SplitParts::new(names).map_err(|error| error.to_string()))
+        {
+            Ok(parts) => parts,
+            Err(reason) => {
+                self.status = Some(reason);
+                return;
+            }
+        };
+        self.propose_modification(subject, ModificationKind::Split { into: parts });
+    }
+
+    /// Asks the reader for the element this one folds into. The pick happens
+    /// on the canvas, exactly as drawing a dependency does: a merge names
+    /// two boundaries, and the picture is where the second one is found.
+    fn begin_merge(&mut self, subject: &ElementId) {
+        let subject = real_id(subject);
+        if self.graph.element(&subject).is_none() {
+            self.status = Some(format!(
+                "{subject} exists only in the plan; change the planned element itself"
+            ));
+            return;
+        }
+        self.drawing = false;
+        self.draw_source = None;
+        self.merging = Some(subject);
+    }
+
+    fn complete_merge(&mut self, target: &ElementId) {
+        let Some(subject) = self.merging.clone() else {
+            return;
+        };
+        let target = real_id(target);
+        if target == subject {
+            self.status = Some("an element cannot merge into itself".to_owned());
+            return;
+        }
+        if self.graph.element(&target).is_none() {
+            self.status = Some(format!(
+                "{target} exists only in the plan; nothing can fold into it yet"
+            ));
+            return;
+        }
+        self.merging = None;
+        self.propose_modification(&subject, ModificationKind::Merge { with: target });
+    }
+
+    fn discard_modification(&mut self, subject: &ElementId) {
+        let subject = real_id(subject);
+        if self.plan.modification_of(&subject).is_none() {
+            self.status = Some("no modification is planned there".to_owned());
+            return;
+        }
+        self.plan.discard_modification(&subject);
+        self.modifying = Modifying::Nothing;
+        self.modification_draft.clear();
+        self.save_plan();
+        self.rebuild_view();
+        if let Some(selection) = self.selection.clone() {
+            self.select(Some(selection));
+        }
+    }
+
     /// How many planned elements sit inside a planned one. Erasing the
     /// boundary erases them with it, and the button says so beforehand.
     fn planned_inside(&self, id: &ElementId) -> usize {
@@ -807,7 +982,9 @@ impl Session {
         self.status = None;
         match action {
             CanvasAction::Node(id) => {
-                if self.drawing {
+                if self.merging.is_some() {
+                    self.complete_merge(&id);
+                } else if self.drawing {
                     match self.draw_source.take() {
                         None => self.draw_source = Some(id),
                         Some(source) if source == id => {}
@@ -823,7 +1000,7 @@ impl Session {
             // Opening a boundary answers the question the reader just asked
             // of it, so the boundary stays selected under the new picture.
             CanvasAction::Expand(id) => {
-                if !self.drawing {
+                if !self.drawing && self.merging.is_none() {
                     self.select(Some(Selection::Node(id.clone())));
                     self.expand(&id);
                 }
@@ -873,6 +1050,10 @@ fn standing_of(plan: &Plan, viewed: &ArchitectureGraph, id: &ElementId) -> Stand
 
 /// What the plan does to each box of one picture. A box the plan leaves
 /// alone stays out of the answer, so the canvas paints it as it always did.
+///
+/// What is going and what is arriving answer before what merely changes: an
+/// element on its way out is not renamed, it is removed, and that is the
+/// story the reader must read off the box.
 fn node_statuses(
     view: &ArchitectureGraph,
     viewed: &ArchitectureGraph,
@@ -881,9 +1062,12 @@ fn node_statuses(
     view.elements()
         .filter_map(|element| {
             let status = match standing_of(plan, viewed, &element.id) {
-                Standing::Existing => return None,
                 Standing::Removed { .. } => NodeStatus::Removed,
                 Standing::Added => NodeStatus::Added,
+                Standing::Existing => {
+                    plan.modification_of(&real_id(&element.id))?;
+                    NodeStatus::Modified
+                }
             };
             Some((element.id.clone(), status))
         })
@@ -1072,47 +1256,7 @@ impl eframe::App for CutawayApp {
                     ui.label(repository.display().to_string());
                 }
                 if let Some(Ok(session)) = &mut self.session {
-                    ui.separator();
-                    ui.label("Detail");
-                    if let Some(chosen) = detail::stops(ui, session.cut.detail) {
-                        session.recut(chosen);
-                    }
-                    // What the reader opened or closed by hand departs from
-                    // the stop beside it, so the stop alone would misname the
-                    // picture.
-                    if let Some(departures) = detail::departures(&session.cut) {
-                        ui.label(egui::RichText::new(departures).weak().small());
-                    }
-                    ui.separator();
-                    let label = if session.drawing {
-                        match &session.draw_source {
-                            None => "Drawing: pick the dependent",
-                            Some(_) => "Drawing: pick the dependency",
-                        }
-                    } else {
-                        "Draw dependency"
-                    };
-                    if ui.selectable_label(session.drawing, label).clicked() {
-                        session.drawing = !session.drawing;
-                        session.draw_source = None;
-                    }
-                    if ui.button("Search (Ctrl+F)").clicked() {
-                        session.palette.open();
-                    }
-                    if ui
-                        .button("Fit (Home)")
-                        .on_hover_text(
-                            "Bring the whole picture back into the canvas. \
-                             Home, or a double click on the background.",
-                        )
-                        .clicked()
-                    {
-                        session.refit();
-                    }
-                    if let Some(status) = &session.status {
-                        ui.separator();
-                        ui.colored_label(ui.visuals().warn_fg_color, status);
-                    }
+                    project_tools(ui, session);
                 }
             });
         });
@@ -1166,6 +1310,13 @@ impl eframe::App for CutawayApp {
                 if camera::refit_requested(ui.ctx()) {
                     session.refit();
                 }
+                // A mode that waits for a click on the picture must be
+                // leavable without one, and Escape is the key that leaves.
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    session.drawing = false;
+                    session.draw_source = None;
+                    session.merging = None;
+                }
             }
         }
     }
@@ -1200,6 +1351,71 @@ fn invitation(ui: &mut egui::Ui, picking: bool) -> bool {
     asked
 }
 
+/// What the toolbar offers about an open project: where the picture cuts,
+/// the modes that wait for a click on it, the ways to move through it, and
+/// what the last act answered.
+///
+/// A mode that waits for a click names itself here and nowhere else, so a
+/// reader whose next click means something unusual reads that in one place -
+/// and leaves the mode by clicking the same label again.
+fn project_tools(ui: &mut egui::Ui, session: &mut Session) {
+    ui.separator();
+    ui.label("Detail");
+    if let Some(chosen) = detail::stops(ui, session.cut.detail) {
+        session.recut(chosen);
+    }
+    // What the reader opened or closed by hand departs from the stop beside
+    // it, so the stop alone would misname the picture.
+    if let Some(departures) = detail::departures(&session.cut) {
+        ui.label(egui::RichText::new(departures).weak().small());
+    }
+    ui.separator();
+    let label = if session.drawing {
+        match &session.draw_source {
+            None => "Drawing: pick the dependent",
+            Some(_) => "Drawing: pick the dependency",
+        }
+    } else {
+        "Draw dependency"
+    };
+    if ui.selectable_label(session.drawing, label).clicked() {
+        session.drawing = !session.drawing;
+        session.draw_source = None;
+        session.merging = None;
+    }
+    // A merge is asked for on the panel and answered on the canvas, so the
+    // toolbar says what the next click means.
+    if let Some(subject) = session.merging.clone() {
+        let folds = Labels::renaming(&session.viewed, &session.renames).qualified(&subject);
+        if ui
+            .selectable_label(true, "Merging: pick the element to merge into")
+            .on_hover_text(format!(
+                "{folds} folds into the element you pick. Esc cancels."
+            ))
+            .clicked()
+        {
+            session.merging = None;
+        }
+    }
+    if ui.button("Search (Ctrl+F)").clicked() {
+        session.palette.open();
+    }
+    if ui
+        .button("Fit (Home)")
+        .on_hover_text(
+            "Bring the whole picture back into the canvas. \
+             Home, or a double click on the background.",
+        )
+        .clicked()
+    {
+        session.refit();
+    }
+    if let Some(status) = &session.status {
+        ui.separator();
+        ui.colored_label(ui.visuals().warn_fg_color, status);
+    }
+}
+
 /// The boundary canvas, and what a click on it does.
 fn picture(ui: &mut egui::Ui, session: &mut Session) {
     session.viewport = ui.max_rect();
@@ -1224,6 +1440,7 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
             layout: &scene.layout,
             edges: &edges,
             nodes: &nodes,
+            renames: &session.renames,
             selected_edge,
             selected_node,
             draw_source: session.draw_source.as_ref(),
@@ -1408,6 +1625,47 @@ mod tests {
             statuses.get(&id("a/one#self")),
             Some(&NodeStatus::Removed),
             "the lens's own-content leaf stands for its frame, mark included"
+        );
+    }
+
+    fn modifying(plan: &mut Plan, subject: &str, kind: ModificationKind) {
+        plan.plan_modification(Modification {
+            subject: id(subject),
+            kind,
+            note: None,
+        });
+    }
+
+    #[test]
+    fn a_boundary_the_plan_modifies_is_marked_where_it_stands() {
+        let mut plan = Plan::new();
+        modifying(
+            &mut plan,
+            "package:a",
+            ModificationKind::Rename {
+                to: ElementName::new("engine").unwrap(),
+            },
+        );
+
+        let statuses = statuses(&two_packages(), &plan, &Cut::uniform(Detail::Modules));
+        assert_eq!(statuses.get(&id("package:a")), Some(&NodeStatus::Modified));
+        assert_eq!(
+            statuses.get(&id("a/one")),
+            None,
+            "a modification speaks about the element it names and nothing inside it"
+        );
+    }
+
+    #[test]
+    fn a_boundary_on_its_way_out_reads_as_removed_however_it_was_modified() {
+        let mut plan = removing_package_a();
+        modifying(&mut plan, "package:a", ModificationKind::Rework);
+
+        let statuses = statuses(&two_packages(), &plan, &Cut::uniform(Detail::Modules));
+        assert_eq!(
+            statuses.get(&id("package:a")),
+            Some(&NodeStatus::Removed),
+            "what is going is the story, not what it would have become"
         );
     }
 
