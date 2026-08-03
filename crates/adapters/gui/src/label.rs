@@ -18,11 +18,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
-use cutaway_lenses::is_self_leaf;
 use cutaway_planning::{ModificationKind, Plan};
 
 use crate::glyph;
-use crate::real_id;
 
 /// The text of one box: the name, and the kind glyph in front of it when
 /// the glyph tells the reader something.
@@ -41,9 +39,7 @@ impl Label {
     }
 }
 
-/// The new names a plan gives elements, by the element each renames. A
-/// frame's own-content leaf carries the rename of the frame it stands for,
-/// because the plan speaks about the frame.
+/// The new names a plan gives elements, by the element each renames.
 #[derive(Debug, Default)]
 pub(crate) struct Renames(BTreeMap<ElementId, String>);
 
@@ -65,7 +61,7 @@ impl Renames {
     }
 
     fn new_name(&self, id: &ElementId) -> Option<&str> {
-        self.0.get(&real_id(id)).map(String::as_str)
+        self.0.get(id).map(String::as_str)
     }
 }
 
@@ -110,16 +106,9 @@ impl<'a> Labels<'a> {
     }
 
     /// The name a text beside the picture gives a boundary: the whole name,
-    /// nothing shortened, because only a box is short of room. A frame's own
-    /// content answers as the frame it belongs to, which is the boundary the
-    /// reader knows, with what the box holds said after it.
+    /// nothing shortened, because only a box is short of room.
     pub(crate) fn qualified(&self, id: &ElementId) -> String {
-        match self.frame_of.get(id) {
-            Some(frame) if is_self_leaf(id) => {
-                format!("{} ({})", self.full_name(frame), self.source_name(id))
-            }
-            _ => self.full_name(id),
-        }
+        self.full_name(id)
     }
 
     /// The names the rows of one list carry. Rows stand side by side, so
@@ -142,20 +131,15 @@ impl<'a> Labels<'a> {
         }
     }
 
-    /// The boundaries above the one a name speaks of, nearest first. A
-    /// frame's own content speaks for the frame, so its context begins
-    /// above the frame. The project holds the whole picture and therefore
-    /// tells nothing apart; it stays out.
+    /// The boundaries above the one a name speaks of, nearest first. The
+    /// project holds the whole picture and therefore tells nothing apart;
+    /// it stays out.
     fn above(&self, id: &ElementId) -> Vec<String> {
-        let subject = match self.frame_of.get(id) {
-            Some(frame) if is_self_leaf(id) => *frame,
-            _ => id,
-        };
         let mut names = Vec::new();
         // Containment is a tree, but a walk that trusts that and meets a
         // cycle never ends; the seen set bounds it.
         let mut seen = BTreeSet::new();
-        let mut current = self.frame_of.get(subject).copied();
+        let mut current = self.frame_of.get(id).copied();
         while let Some(frame) = current {
             if !seen.insert(frame) {
                 break;
@@ -172,11 +156,10 @@ impl<'a> Labels<'a> {
         names
     }
 
-    /// The kind mark a box carries. A frame carries none - the box around
-    /// its children already says what it is - and neither does a frame's own
-    /// content, whose kind is the frame's own.
+    /// The kind mark a box carries. A frame carries none: the box around
+    /// its children already says what it is.
     fn glyph(&self, id: &ElementId) -> Option<&'static str> {
-        if self.frames.contains(id) || is_self_leaf(id) {
+        if self.frames.contains(id) {
             return None;
         }
         self.view
@@ -187,9 +170,6 @@ impl<'a> Labels<'a> {
     fn name(&self, id: &ElementId) -> String {
         let full = self.full_name(id);
         match self.frame_of.get(id) {
-            // A frame's own content is named by what the frame is rather
-            // than by where it sits, so there is no path in it to drop.
-            Some(_) if is_self_leaf(id) => full,
             // The path a box drops is the one the sources spell; a frame's
             // new name is a name nothing below it carries yet.
             Some(frame) => contextual(&full, &self.source_name(frame)).to_owned(),
@@ -388,15 +368,8 @@ mod tests {
             "ports::source_analyzer::analyze",
             ElementKind::Function,
         );
-        add(
-            &mut graph,
-            "core/ports.rs#self",
-            cutaway_lenses::own_content_name(ElementKind::Module),
-            ElementKind::Module,
-        );
         contain(&mut graph, "package:core", "core/ports.rs");
         contain(&mut graph, "core/ports.rs", "core/ports/source_analyzer.rs");
-        contain(&mut graph, "core/ports.rs", "core/ports.rs#self");
         contain(
             &mut graph,
             "core/ports/source_analyzer.rs",
@@ -452,16 +425,6 @@ mod tests {
         assert_eq!(labels.label(&id("package:core")).glyph, None);
     }
 
-    #[test]
-    fn a_frames_own_content_shows_no_kind_at_all() {
-        let view = view();
-        let labels = Labels::of(&view);
-        let own = labels.label(&id("core/ports.rs#self"));
-        assert_eq!(own.glyph, None);
-        assert_eq!(own.name, "module code");
-        assert_eq!(own.text(), "module code");
-    }
-
     fn renaming(subject: &str, to: &str) -> Renames {
         let mut plan = cutaway_planning::Plan::new();
         plan.plan_modification(cutaway_planning::Modification {
@@ -501,9 +464,9 @@ mod tests {
             "the path a box drops is the one the sources spell"
         );
         assert_eq!(
-            labels.qualified(&id("core/ports.rs#self")),
-            format!("ports {} wiring (module code)", glyph::BECOMES),
-            "a frame's own content speaks for the frame, rename included"
+            labels.qualified(&id("core/ports.rs")),
+            format!("ports {} wiring", glyph::BECOMES),
+            "a text beside the picture names the frame rename included"
         );
     }
 
@@ -517,19 +480,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_frames_own_content_is_named_after_the_frame_and_what_the_box_holds() {
-        let view = view();
-        let labels = Labels::of(&view);
-        assert_eq!(
-            labels.qualified(&id("core/ports.rs#self")),
-            "ports (module code)"
-        );
-    }
-
-    /// Two packages that each hold a module named `crate` with content of
-    /// its own, as two Rust crate roots appear side by side, and one module
-    /// no other package repeats.
+    /// Two packages that each hold a module named `crate`, as two Rust crate
+    /// roots appear side by side, and one module no other package repeats.
     fn crates() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         for (package, root) in [
@@ -539,14 +491,7 @@ mod tests {
             let package_id = format!("package:{package}");
             add(&mut graph, &package_id, package, ElementKind::Package);
             add(&mut graph, root, "crate", ElementKind::Module);
-            add(
-                &mut graph,
-                &format!("{root}#self"),
-                cutaway_lenses::own_content_name(ElementKind::Module),
-                ElementKind::Module,
-            );
             contain(&mut graph, &package_id, root);
-            contain(&mut graph, root, &format!("{root}#self"));
         }
         add(&mut graph, "gui/label.rs", "label", ElementKind::Module);
         contain(&mut graph, "package:cutaway-gui", "gui/label.rs");
@@ -576,23 +521,6 @@ mod tests {
         let listed = [id("gui/lib.rs"), id("lenses/lib.rs"), id("gui/label.rs")];
         let names = labels.distinct(&listed);
         assert_eq!(names.name(&listed[2]), "label");
-    }
-
-    #[test]
-    fn two_crates_root_modules_read_apart() {
-        let view = crates();
-        let labels = Labels::of(&view);
-        let listed = [id("gui/lib.rs#self"), id("lenses/lib.rs#self")];
-        let names = labels.distinct(&listed);
-        assert_eq!(
-            names.name(&listed[0]),
-            ["cutaway-gui", "crate (module code)"].join(glyph::CONTAINER_STEP),
-            "a frame's own content reads under the package that holds the frame"
-        );
-        assert_eq!(
-            names.name(&listed[1]),
-            ["cutaway-lenses", "crate (module code)"].join(glyph::CONTAINER_STEP)
-        );
     }
 
     #[test]

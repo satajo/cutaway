@@ -10,7 +10,6 @@
 use std::collections::BTreeMap;
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
-use cutaway_lenses::is_self_leaf;
 use eframe::egui::emath::TSTransform;
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke,
@@ -121,9 +120,6 @@ const CONTEXT: f32 = 0.55;
 /// Color strength of a frame's border: the frame is the room its parts sit
 /// in, so its outline stays a step behind the name it carries.
 const FRAME_BORDER: f32 = 0.6;
-/// Color strength of a frame's own-content leaf while nothing touches it:
-/// present beside the parts, never competing with them.
-const OWN_CONTENT: f32 = 0.5;
 /// Color strength of a kind glyph beside the name it marks.
 const GLYPH: f32 = 0.55;
 /// The gap between a kind glyph and its name, in font sizes.
@@ -956,18 +952,8 @@ fn paint_leaves(
         } else {
             1.0
         };
-        // A frame's own content is not a part beside the parts: it keeps a
-        // dim border and no fill until the pointer or the selection reaches
-        // it.
-        let secondary = is_self_leaf(id) && !hover && !selected;
         let ink = node_ink(paint.base, content.nodes.get(id));
-        let presence = if secondary {
-            OWN_CONTENT
-        } else if hover {
-            1.0
-        } else {
-            0.8
-        };
+        let presence = if hover { 1.0 } else { 0.8 };
         // A leaf's box is solid where the reader looks, and a faded one is
         // not a window: an edge that runs under it stays under it either
         // way. So the fill steps toward the backdrop instead of thinning,
@@ -975,11 +961,7 @@ fn paint_leaves(
         paint.painter.rect(
             rect,
             CornerRadius::same(5),
-            if secondary {
-                Color32::TRANSPARENT
-            } else {
-                shade(paint.background, paint.fill, strength)
-            },
+            shade(paint.background, paint.fill, strength),
             Stroke::new(
                 paint.stroke_width(width),
                 toward(paint.background, ink, presence * share_of(strength)),
@@ -987,7 +969,7 @@ fn paint_leaves(
             StrokeKind::Middle,
         );
         if let Some(font) = paint.font() {
-            let named = if secondary { OWN_CONTENT } else { 1.0 } * share_of(strength);
+            let named = share_of(strength);
             paint_leaf_label(
                 &paint.painter,
                 rect.center(),
@@ -1243,7 +1225,7 @@ mod tests {
 
     #[test]
     fn a_weakened_mark_is_never_translucent() {
-        for share in [0.0, FADE, CONTEXT, OWN_CONTENT, 0.99, 1.0] {
+        for share in [0.0, FADE, CONTEXT, 0.99, 1.0] {
             for ink in [INK, SEVERED, DRAWN, MODIFIED] {
                 assert_eq!(
                     toward(BACKDROP, ink, share).a(),

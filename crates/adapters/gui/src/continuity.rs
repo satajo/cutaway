@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
-use cutaway_lenses::{BoundaryView, is_self_leaf};
+use cutaway_lenses::BoundaryView;
 
 use crate::Selection;
 use crate::focus;
@@ -46,7 +46,7 @@ pub(crate) fn translated(
     selection: &Selection,
 ) -> Option<Carried> {
     match selection {
-        Selection::Node(id) => node_in(graph, before, after, id).map(|id| Carried {
+        Selection::Node(id) => node_in(graph, after, id).map(|id| Carried {
             selection: Selection::Node(id),
             piece: None,
         }),
@@ -56,39 +56,13 @@ pub(crate) fn translated(
 
 /// Where a selected boundary reappears. The rules, in order:
 ///
-/// - A frame's own content is no boundary of its own, so it answers as the
-///   frame it belongs to: that frame's place in the new picture, then the
-///   own content of that place where the new picture grew one, and the place
-///   itself where it did not.
 /// - A boundary the new picture holds answers as itself. The kind levels
 ///   nest, so a finer cut keeps everything a coarser one showed.
 /// - A boundary the new picture hides answers as the nearest boundary above
 ///   it, which is where its content rolled up to.
 /// - A boundary no visible boundary holds answers nothing.
-fn node_in(
-    graph: &ArchitectureGraph,
-    before: &BoundaryView,
-    after: &BoundaryView,
-    id: &ElementId,
-) -> Option<ElementId> {
-    if is_self_leaf(id) {
-        let frame = focus::frame_of(&before.graph, id)?;
-        let landed = focus::boundary_in_view(&after.graph, graph, frame)?;
-        return Some(own_content_of(&after.graph, landed));
-    }
+fn node_in(graph: &ArchitectureGraph, after: &BoundaryView, id: &ElementId) -> Option<ElementId> {
     focus::boundary_in_view(&after.graph, graph, id)
-}
-
-/// The box carrying a boundary's own content: the boundary itself while it
-/// is a leaf, and the own-content leaf inside it while it is a frame that
-/// grew one. A frame whose content answers no dependency grows none, and
-/// then the frame itself is the nearest the picture comes.
-fn own_content_of(after: &ArchitectureGraph, boundary: ElementId) -> ElementId {
-    focus::contents_of(after, &boundary)
-        .into_iter()
-        .find(|child| is_self_leaf(child))
-        .cloned()
-        .unwrap_or(boundary)
 }
 
 /// Where a selected connection reappears.
@@ -101,9 +75,8 @@ fn own_content_of(after: &ArchitectureGraph, boundary: ElementId) -> ElementId {
 /// A connection with nothing concrete behind it is a planned one, and it
 /// answers as itself wherever the new picture still holds both of its ends.
 /// Where neither answers - a connection the new picture rolls into a
-/// boundary's inside, or one held back at a coarser detail - the boundary it
-/// departs answers, so the reader keeps a subject rather than an empty
-/// panel.
+/// boundary's inside - the boundary it departs answers, so the reader keeps
+/// a subject rather than an empty panel.
 fn edge_in(
     graph: &ArchitectureGraph,
     before: &BoundaryView,
@@ -126,7 +99,7 @@ fn edge_in(
         }),
     };
     carried.or_else(|| {
-        node_in(graph, before, after, &relation.from).map(|id| Carried {
+        node_in(graph, after, &relation.from).map(|id| Carried {
             selection: Selection::Node(id),
             piece: None,
         })
@@ -303,31 +276,6 @@ mod tests {
             ),
             Some(Selection::Node(id("a/one"))),
             "the reader selected the boundary, not what it holds"
-        );
-    }
-
-    #[test]
-    fn the_own_content_of_a_frame_follows_the_frame_it_belongs_to() {
-        assert_eq!(
-            carried(
-                Detail::Items,
-                Detail::Modules,
-                &Selection::Node(id("a/one#self"))
-            ),
-            Some(Selection::Node(id("a/one"))),
-            "the frame is a single box at modules, and it carries its own content"
-        );
-    }
-
-    #[test]
-    fn the_own_content_of_a_frame_stays_own_content_where_the_new_picture_holds_it() {
-        assert_eq!(
-            carried(
-                Detail::Modules,
-                Detail::Items,
-                &Selection::Node(id("c/one#self"))
-            ),
-            Some(Selection::Node(id("c/one#self")))
         );
     }
 

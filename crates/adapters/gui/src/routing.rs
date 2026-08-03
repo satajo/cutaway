@@ -859,6 +859,47 @@ mod tests {
     }
 
     #[test]
+    fn an_edge_ending_at_a_frame_with_painted_children_lands_on_its_border() {
+        let mut view = ArchitectureGraph::new();
+        for element in ["neighbor", "frame", "inside", "beside"] {
+            view.add_element(Element {
+                id: id(element),
+                name: ElementName::new(element).unwrap(),
+                kind: ElementKind::Module,
+            })
+            .unwrap();
+        }
+        for inner in ["inside", "beside"] {
+            view.add_relation(Relation {
+                from: id("frame"),
+                to: id(inner),
+                kind: RelationKind::Contains,
+            })
+            .unwrap();
+        }
+        let layout = frame_and_neighbor();
+        let edges = [depends("neighbor", "frame")];
+
+        let route = routed(&view, &layout, &edges)[0]
+            .clone()
+            .expect("the frame is placed like any box");
+        assert_eq!(
+            route.path.legs(),
+            1,
+            "the frame the edge enters never obstructs its own arrival"
+        );
+        let arrival = route.path.end();
+        assert!(
+            (arrival.x - 300.0).abs() < 0.1,
+            "the edge lands on the frame's left border, children painted or not: {arrival:?}"
+        );
+        assert!(
+            (0.0..=200.0).contains(&arrival.y),
+            "the arrival sits along that border: {arrival:?}"
+        );
+    }
+
+    #[test]
     fn an_edge_between_two_boxes_of_one_summarized_frame_is_not_drawn() {
         let layout = frame_and_neighbor();
         let edges = [depends("inside", "beside")];

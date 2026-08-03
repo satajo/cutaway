@@ -14,7 +14,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, RelationKind};
-use cutaway_lenses::is_self_leaf;
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 use crate::label::{Labels, Renames};
@@ -447,17 +446,8 @@ fn refine_sibling_orders(
     // The sort is stable, so children whose partners pull them to the same
     // place keep the dependency layering they arrived in.
     for kids in orders.values_mut() {
-        kids.sort_by(|a, b| {
-            own_content_first(a, b).then_with(|| in_reading_order(keys[a], keys[b]))
-        });
+        kids.sort_by(|a, b| in_reading_order(keys[a], keys[b]));
     }
-}
-
-/// A frame reads own code first, then parts: the leaf that carries the
-/// frame's own content opens the group, wherever dependencies would place
-/// it.
-fn own_content_first(a: &ElementId, b: &ElementId) -> Ordering {
-    is_self_leaf(b).cmp(&is_self_leaf(a))
 }
 
 /// Which of two points comes first when a grid is read like text: the
@@ -486,8 +476,7 @@ fn subtree(id: &ElementId, orders: &BTreeMap<ElementId, Vec<ElementId>>) -> BTre
     members
 }
 
-/// Siblings ordered by their dependency layering, ties by id, with the
-/// frame's own content ahead of all of them.
+/// Siblings ordered by their dependency layering, ties by id.
 fn ordered_by_layer(siblings: &[ElementId], depends: &[(ElementId, ElementId)]) -> Vec<ElementId> {
     let set: BTreeSet<&ElementId> = siblings.iter().collect();
     let local: Vec<(ElementId, ElementId)> = depends
@@ -497,7 +486,7 @@ fn ordered_by_layer(siblings: &[ElementId], depends: &[(ElementId, ElementId)]) 
         .collect();
     let layer = layers(siblings, &local);
     let mut result: Vec<ElementId> = siblings.to_vec();
-    result.sort_by(|a, b| own_content_first(a, b).then_with(|| (layer[a], a).cmp(&(layer[b], b))));
+    result.sort_by(|a, b| (layer[a], a).cmp(&(layer[b], b)));
     result
 }
 
@@ -612,27 +601,6 @@ mod tests {
         graph
             .add_relation(Relation {
                 from: parent.clone(),
-                to: id.clone(),
-                kind: RelationKind::Contains,
-            })
-            .unwrap();
-        id
-    }
-
-    /// The synthetic leaf a boundary view grows for a frame's own content.
-    fn add_own_content(graph: &mut ArchitectureGraph, frame: &ElementId) -> ElementId {
-        let id = ElementId::new(format!("{frame}#self")).unwrap();
-        graph
-            .add_element(Element {
-                id: id.clone(),
-                name: ElementName::new(cutaway_lenses::own_content_name(ElementKind::Package))
-                    .unwrap(),
-                kind: ElementKind::Package,
-            })
-            .unwrap();
-        graph
-            .add_relation(Relation {
-                from: frame.clone(),
                 to: id.clone(),
                 kind: RelationKind::Contains,
             })
@@ -781,31 +749,6 @@ mod tests {
                 "{} does not read before {}",
                 pair[0].as_str(),
                 pair[1].as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn a_frames_own_content_reads_before_its_parts() {
-        let mut graph = ArchitectureGraph::new();
-        let frame = add_package(&mut graph, "alpha");
-        let own = add_own_content(&mut graph, &frame);
-        let one = add_module(&mut graph, &frame, "alpha/one.rs");
-        let two = add_module(&mut graph, &frame, "alpha/two.rs");
-        // The partners pull the parts to the top of the picture and the
-        // own-content leaf to the bottom: nothing but the pin keeps the
-        // frame's own content at the front.
-        let above = add_package(&mut graph, "a-above");
-        let below = add_package(&mut graph, "z-below");
-        depend(&mut graph, &one, &above);
-        depend(&mut graph, &two, &above);
-        depend(&mut graph, &own, &below);
-
-        let layout = compute(&graph, &no_weights(), &Renames::default());
-        for part in [&one, &two] {
-            assert!(
-                layout.rects[&own].min.y < layout.rects[part].min.y,
-                "{part} reads before the frame's own content"
             );
         }
     }

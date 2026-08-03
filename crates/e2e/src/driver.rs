@@ -7,7 +7,7 @@ use cutaway_architecture::{
     ArchitectureGraph, ElementId, ElementKind, ElementName, Relation, RelationKind,
 };
 use cutaway_inspection::inspect;
-use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view, self_leaf_frame};
+use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{
     GroupStanding, Modification, ModificationKind, Note, Plan, ProposedChange, SplitParts, Subject,
@@ -151,14 +151,6 @@ impl InProcessDriver {
             .ok_or_else(|| format!("no boundary named {name}"))
     }
 
-    /// The element one displayed boundary stands for: itself, or - for a
-    /// frame's own-content box - the frame. The plan records only elements
-    /// the sources can hold.
-    fn element_id(&self, name: &str) -> Result<ElementId, String> {
-        let id = self.boundary_id(name)?;
-        Ok(self_leaf_frame(&id).unwrap_or(id))
-    }
-
     /// Puts one planned element in the plan and in the picture, exactly as
     /// the shell does: the element and its containment, then the view anew,
     /// then the plan on disk.
@@ -207,7 +199,7 @@ impl InProcessDriver {
     /// plan carries whatever the planner gave it, so the addition itself is
     /// what changes.
     fn plan_modification(&mut self, name: &str, kind: ModificationKind) -> Result<(), String> {
-        let subject = self.element_id(name)?;
+        let subject = self.boundary_id(name)?;
         let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
         if graph.element(&subject).is_none() {
             return Err(format!(
@@ -272,9 +264,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn focus_boundary(&mut self, name: &str) -> Result<(), String> {
-        // A frame's own-content box scopes to the frame it belongs to: the
-        // leaf is the lens's invention, and the reader means the frame.
-        let id = self.element_id(name)?;
+        let id = self.boundary_id(name)?;
         let cut = self.cut.as_mut().ok_or("no boundary view yet")?;
         cut.focus(Some(id));
         self.rebuild_view()
@@ -304,20 +294,10 @@ impl ApplicationDriver for InProcessDriver {
                 .element(id)
                 .map_or_else(|| id.to_string(), |element| element.name.to_string())
         };
-        let mut pairs: Vec<(String, String)> = view
-            .provenance
+        view.provenance
             .keys()
             .map(|relation| (name(&relation.from), name(&relation.to)))
-            .collect();
-        // A drawn dependency naming an open frame as a whole still shows -
-        // the plan speaks at every cut - where the architecture's own
-        // whole-frame dependencies wait at a coarser detail.
-        for (pair, concrete) in &view.coarse {
-            if matches!(self.plan.standing_of(concrete), GroupStanding::Added) {
-                pairs.push((name(&pair.from), name(&pair.to)));
-            }
-        }
-        pairs
+            .collect()
     }
 
     fn sever_connection(&mut self, from: &str, to: &str) -> Result<(), String> {
@@ -334,14 +314,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn draw_connection(&mut self, from: &str, to: &str) -> Result<(), String> {
-        // A drawn dependency stores real element ids: a pick on a frame's
-        // own-content box means the frame it belongs to.
-        let pair = self.connection(from, to)?;
-        let relation = Relation {
-            from: self_leaf_frame(&pair.from).unwrap_or(pair.from),
-            to: self_leaf_frame(&pair.to).unwrap_or(pair.to),
-            kind: RelationKind::DependsOn,
-        };
+        let relation = self.connection(from, to)?;
         self.plan
             .propose(ProposedChange::AddRelation(relation))
             .map_err(|error| error.to_string())?;
@@ -377,7 +350,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn plan_element_removal(&mut self, name: &str) -> Result<(), String> {
-        let id = self.element_id(name)?;
+        let id = self.boundary_id(name)?;
         let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
         for change in self.plan.removal_of_element(&id, graph) {
             self.plan
@@ -388,7 +361,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn restore_element(&mut self, name: &str) -> Result<(), String> {
-        let id = self.element_id(name)?;
+        let id = self.boundary_id(name)?;
         let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
         let planned = self.plan.planned_removal_of_element(&id, graph);
         if planned.is_empty() {
@@ -403,7 +376,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn add_element_inside(&mut self, parent: &str, kind: &str, name: &str) -> Result<(), String> {
-        let parent = self.element_id(parent)?;
+        let parent = self.boundary_id(parent)?;
         self.plan_addition(Some(&parent), element_kind(kind)?, name)
     }
 
@@ -435,7 +408,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn plan_merge(&mut self, name: &str, into: &str) -> Result<(), String> {
-        let with = self.element_id(into)?;
+        let with = self.boundary_id(into)?;
         self.plan_modification(name, ModificationKind::Merge { with })
     }
 
@@ -444,7 +417,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn discard_modification(&mut self, name: &str) -> Result<(), String> {
-        let subject = self.element_id(name)?;
+        let subject = self.boundary_id(name)?;
         if self.plan.modification_of(&subject).is_none() {
             return Err(format!("no modification is planned for {name}"));
         }
@@ -453,7 +426,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn modification_of(&self, name: &str) -> Option<String> {
-        let subject = self.element_id(name).ok()?;
+        let subject = self.boundary_id(name).ok()?;
         let modification = self.plan.modification_of(&subject)?;
         Some(match &modification.kind {
             ModificationKind::Rename { to } => format!("rename to {to}"),
@@ -471,7 +444,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn annotate_element(&mut self, name: &str, note: &str) -> Result<(), String> {
-        let subject = self.element_id(name)?;
+        let subject = self.boundary_id(name)?;
         let note = Note::new(note).map_err(|error| error.to_string())?;
         // A modified element is described by the note on its modification:
         // one remark about one element, wherever the plan carries it.
@@ -488,7 +461,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn note_on_element(&self, name: &str) -> Option<String> {
-        let subject = self.element_id(name).ok()?;
+        let subject = self.boundary_id(name).ok()?;
         match self.plan.modification_of(&subject) {
             Some(modification) => modification.note.as_ref(),
             None => self.plan.annotation_of(&Subject::Element(subject.clone())),
@@ -510,12 +483,12 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn element_removal_is_planned(&self, name: &str) -> bool {
-        self.element_id(name)
+        self.boundary_id(name)
             .is_ok_and(|id| self.plan.removal_root_of(&id, self.viewed()).is_some())
     }
 
     fn element_addition_is_planned(&self, name: &str) -> bool {
-        self.element_id(name)
+        self.boundary_id(name)
             .is_ok_and(|id| self.plan.plans_addition_of_element(&id))
     }
 

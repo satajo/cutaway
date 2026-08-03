@@ -1,13 +1,12 @@
 //! What a selection puts in focus.
 //!
-//! Selecting a boundary asks "what does this depend on". Dependency edges
-//! attach only to leaves, so a frame carries no edge of its own: its answer
-//! lies in the edges of everything it contains. A selection therefore
-//! focuses a whole subtree - the selected boundary and its descendants -
-//! together with every edge that touches the subtree and the partners at the
-//! far end of those edges. The frames around the focused elements stay
-//! readable as context, so a highlighted boundary still says which boundary
-//! it sits in.
+//! Selecting a boundary asks "what does this depend on". A frame carries the
+//! edges of its own code, and its parts carry theirs: the whole answer lies
+//! in the subtree. A selection therefore focuses a whole subtree - the
+//! selected boundary and its descendants - together with every edge that
+//! touches the subtree and the partners at the far end of those edges. The
+//! frames around the focused elements stay readable as context, so a
+//! highlighted boundary still says which boundary it sits in.
 //!
 //! The computation is pure view logic: it reads the view graph and the drawn
 //! edges and answers with a strength per element and per edge. The canvas
@@ -122,8 +121,7 @@ pub(crate) fn subtree_of<'a>(
 }
 
 /// The boundaries one boundary directly contains, in id order. A boundary
-/// with contents paints as a frame, and no dependency edge touches a frame:
-/// an empty answer names a leaf.
+/// with contents paints as a frame; an empty answer names a leaf.
 pub(crate) fn contents_of<'a>(
     view: &'a ArchitectureGraph,
     frame: &ElementId,

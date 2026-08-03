@@ -12,14 +12,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, ElementName, Relation};
-use cutaway_lenses::{BoundaryView, Detail, is_self_leaf};
+use cutaway_lenses::{BoundaryView, Detail};
 use cutaway_planning::ModificationKind;
 use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
 use crate::glyph;
 use crate::label::{Labels, kind_name, kind_symbol};
-use crate::{Modifying, Scene, Selection, Session, Standing, detail, focus, real_id};
+use crate::{Modifying, Scene, Selection, Session, Standing, detail, focus};
 
 /// How many rows one list shows before it names the rest. The cap is a
 /// display limit and not a data limit: the count above every list still
@@ -47,9 +47,9 @@ struct Row {
 ///
 /// A list that answers what the reader selected carries the panel and reads
 /// as the way onward it is. A list that stands there whatever the reader
-/// does, such as what waits at a coarser detail or what falls outside every
-/// boundary, is background: dozens of loud rows drown the panel they only
-/// annotate. Both stay clickable; only their voice differs.
+/// does, such as what falls outside every boundary, is background: dozens
+/// of loud rows drown the panel they only annotate. Both stay clickable;
+/// only their voice differs.
 #[derive(Clone, Copy)]
 enum Prominence {
     Primary,
@@ -60,22 +60,11 @@ fn nothing_selected(ui: &mut egui::Ui, session: &mut Session) {
     ui.heading("Boundaries");
     let mut chosen = None;
     if let Ok(Scene { view, .. }) = &session.scene {
-        let labels = Labels::of(&view.graph);
         ui.label(format!(
             "{} boundaries, {} connections.",
             view.graph.elements().count(),
             view.provenance.len()
         ));
-        if !view.coarse.is_empty() {
-            ui.separator();
-            ui.label("Waiting at coarser detail:");
-            ui.small(format!(
-                "{} connections name a boundary with visible children as a whole. \
-                 They show at a coarser detail.",
-                view.coarse.len()
-            ));
-            chosen = list(ui, &coarse_rows(view, &labels), Prominence::Quiet).or(chosen);
-        }
         if !view.unscoped.is_empty() {
             ui.separator();
             ui.label("Outside every boundary:");
@@ -112,10 +101,9 @@ fn help(ui: &mut egui::Ui) {
     );
     ui.label("A box grows with the number of concepts inside it.");
     ui.label(
-        "A boundary that holds other boundaries shows the code it declares itself as a \
-         box of its own, named after what declares it: module code, package code. The \
-         connections of that box are the dependencies of that code alone, not of the \
-         boundaries beside it.",
+        "A connection that ends at a boundary's border speaks about the boundary's own \
+         code or the boundary as a whole; the connections into its parts end at the \
+         parts. What passes between a boundary and its own contents stays inside it.",
     );
     ui.label(
         "A package whose whole content sits in one boundary shows that boundary's \
@@ -170,21 +158,15 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     // The id is the element's path through the sources: a reader knows the
     // boundary by it even where two short names read alike.
     ui.small(egui::RichText::new(id.as_str()).monospace());
-    if let Some(line) = panel.own_content {
-        ui.label(line);
-    }
     plan_controls(ui, session, id);
     modify_controls(ui, session, id);
     detail_controls(ui, session, id);
     note_editor(ui, session);
-    // A frame's own-content box adds inside the frame it belongs to: the
-    // leaf is the lens's invention, and a new boundary joins a real one.
-    let inside = real_id(id);
     add_controls(
         ui,
         session,
         "Add inside:",
-        Some(&inside),
+        Some(id),
         Some(panel.element_kind),
     );
     let mut chosen = None;
@@ -289,7 +271,7 @@ fn plan_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
             }
         }
         Standing::Removed { root } => {
-            let line = if root == real_id(id) {
+            let line = if root == *id {
                 "Planned for removal.".to_owned()
             } else {
                 format!(
@@ -327,7 +309,7 @@ fn plan_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
 /// who marks a modified boundary for removal still sees - and can withdraw -
 /// what they stated before.
 fn modify_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
-    let subject = real_id(id);
+    let subject = id.clone();
     let planned = session.plan.modification_of(&subject).map(|modification| {
         planned_modification(
             &modification.kind,
@@ -672,35 +654,8 @@ struct NodePanel {
     /// What the boundary is, for the panel to decide what may be planned
     /// inside it.
     element_kind: ElementKind,
-    /// What a frame's own-content box stands for, and None for a boundary
-    /// the sources declare: only the box the lens invents needs explaining.
-    own_content: Option<&'static str>,
     contents: Vec<Row>,
     connections: Vec<Row>,
-}
-
-/// What a frame's own-content box holds, in words. The box carries the code
-/// the frame declares beside the boundaries drawn inside it, and its
-/// connections are the dependencies of that code alone.
-fn own_content_line(kind: ElementKind) -> &'static str {
-    match kind {
-        ElementKind::Module => {
-            "The module's top-level code - imports and declarations outside any item. \
-             Its connections are what that code alone uses."
-        }
-        ElementKind::Package => {
-            "The code the package declares beside the boundaries inside it. \
-             Its connections are what that code alone uses."
-        }
-        ElementKind::Project => {
-            "The code the project declares beside the packages inside it. \
-             Its connections are what that code alone uses."
-        }
-        ElementKind::Function | ElementKind::Type => {
-            "The code this boundary declares beside the boundaries inside it. \
-             Its connections are what that code alone uses."
-        }
-    }
 }
 
 fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
@@ -715,7 +670,6 @@ fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
         heading: format!("{} {}", kind_symbol(element.kind), labels.qualified(id)),
         kind: kind_name(element.kind),
         element_kind: element.kind,
-        own_content: is_self_leaf(id).then(|| own_content_line(element.kind)),
         contents: contents_rows(&view.graph, &labels, id),
         connections: connection_rows(view, &labels, id),
     })
@@ -760,9 +714,9 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
         .collect()
 }
 
-/// What a boundary connects to: the drawn edges that touch it or - for a
-/// frame, which carries no edge of its own - the edges that cross its
-/// border. Outgoing first, heaviest first.
+/// What a boundary connects to: the drawn edges that touch it - the edges
+/// on the frame's own border included - and the edges that cross the border
+/// of anything it holds. Outgoing first, heaviest first.
 fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> Vec<Row> {
     let crossing = crossings(view, &focus::subtree_of(&view.graph, id));
     let names = labels.distinct(
@@ -790,30 +744,6 @@ fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> 
                 .iter()
                 .map(|crossing| row(glyph::INWARD, crossing)),
         )
-        .collect()
-}
-
-/// The rolled-up edges this view holds back. Each names a frame as a whole,
-/// so a row selects that frame.
-fn coarse_rows(view: &BoundaryView, labels: &Labels<'_>) -> Vec<Row> {
-    let mut ranked: Vec<(&Relation, usize)> = view
-        .coarse
-        .iter()
-        .map(|(edge, concrete)| (edge, concrete.len()))
-        .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    let names = labels.distinct(ranked.iter().flat_map(|(edge, _)| [&edge.from, &edge.to]));
-    ranked
-        .into_iter()
-        .map(|(edge, concrete)| Row {
-            text: format!(
-                "{} {} {}, {concrete} concrete",
-                names.name(&edge.from),
-                glyph::OUTWARD,
-                names.name(&edge.to)
-            ),
-            target: Some(Selection::Node(edge.to.clone())),
-        })
         .collect()
 }
 
@@ -1034,6 +964,33 @@ mod tests {
     }
 
     #[test]
+    fn a_frames_own_connections_list_beside_the_ones_of_its_parts() {
+        let mut graph = graph();
+        relate(
+            &mut graph,
+            "package:a",
+            "package:c",
+            RelationKind::DependsOn,
+        );
+        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let rows = rows_of(&view, "package:a");
+        assert_eq!(
+            texts(&rows),
+            [
+                format!("{} b/one (3)", glyph::OUTWARD),
+                format!("{} c/one (1)", glyph::OUTWARD),
+                format!("{} package:c (1)", glyph::OUTWARD),
+                format!("{} b/one (1)", glyph::INWARD)
+            ],
+            "the edge attached to the frame itself is one row among the others"
+        );
+        assert_eq!(
+            rows[2].target,
+            Some(Selection::Edge(depends("package:a", "package:c")))
+        );
+    }
+
+    #[test]
     fn a_connection_row_counts_every_concrete_dependency_behind_it() {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
         let rows = rows_of(&view, "a/two");
@@ -1117,27 +1074,6 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].target, Some(Selection::Node(id("a/one"))));
-    }
-
-    #[test]
-    fn hidden_connections_list_the_heaviest_first_and_lead_to_the_boundary_they_name() {
-        let mut graph = graph();
-        add(&mut graph, "c/one#type:Y", ElementKind::Type);
-        relate(&mut graph, "c/one", "c/one#type:Y", RelationKind::Contains);
-        for from in ["package:a", "c/one", "c/one#type:Y"] {
-            relate(&mut graph, from, "package:b", RelationKind::DependsOn);
-        }
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
-        let labels = Labels::of(&view.graph);
-        let rows = coarse_rows(&view, &labels);
-        assert_eq!(
-            texts(&rows),
-            [
-                format!("c/one {} package:b, 2 concrete", glyph::OUTWARD),
-                format!("package:a {} package:b, 1 concrete", glyph::OUTWARD)
-            ]
-        );
-        assert_eq!(rows[0].target, Some(Selection::Node(id("package:b"))));
     }
 
     #[test]

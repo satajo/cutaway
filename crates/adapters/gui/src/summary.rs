@@ -16,7 +16,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId};
-use cutaway_lenses::is_self_leaf;
 
 use crate::canvas::{HAIRLINE, LABEL_SIZE, LEGIBLE_FONT};
 use crate::focus::{Strength, children_of};
@@ -40,9 +39,7 @@ pub(crate) struct Block {
     /// The boundaries the block stands for: the frame itself and everything
     /// below it.
     covers: BTreeSet<ElementId>,
-    /// How many boundaries the block hides. A frame's own content is the
-    /// frame speaking for itself, not a part beside the parts, so it counts
-    /// for nothing here.
+    /// How many boundaries the block hides.
     pub(crate) inside: usize,
 }
 
@@ -104,10 +101,7 @@ pub(crate) fn summarize(view: &ArchitectureGraph, layout: &Layout, zoom: f32) ->
                 summary.stands_for.insert(hidden.clone(), frame.id.clone());
             }
         }
-        let inside = covers
-            .iter()
-            .filter(|id| **id != frame.id && !is_self_leaf(id))
-            .count();
+        let inside = covers.iter().filter(|id| **id != frame.id).count();
         summary
             .blocks
             .insert(frame.id.clone(), Block { covers, inside });
@@ -263,6 +257,11 @@ mod tests {
             Some(&id("package:a")),
             "the block stands for what it hides"
         );
+        assert_eq!(
+            summary.block(&id("package:a")).unwrap().inside,
+            2,
+            "the block counts every boundary it hides"
+        );
     }
 
     #[test]
@@ -304,33 +303,6 @@ mod tests {
         );
         assert!(summary.block(&id("a/inner")).is_some());
         assert!(summary.hides(&id("a/inner/one")));
-    }
-
-    #[test]
-    fn a_summary_block_counts_what_it_hides_and_not_the_frames_own_content() {
-        let mut graph = ArchitectureGraph::new();
-        for element in ["package:a", "package:a#self", "a/one", "a/two"] {
-            add(&mut graph, element);
-        }
-        for inner in ["package:a#self", "a/one", "a/two"] {
-            contain(&mut graph, "package:a", inner);
-        }
-        let layout = Layout {
-            rects: placed(&[
-                ("package:a", 300.0),
-                ("package:a#self", NODE_HEIGHT),
-                ("a/one", NODE_HEIGHT),
-                ("a/two", NODE_HEIGHT),
-            ]),
-            containers: vec![Frame {
-                id: id("package:a"),
-                depth: 0,
-            }],
-            leaves: vec![id("package:a#self"), id("a/one"), id("a/two")],
-        };
-
-        let summary = summarize(&graph, &layout, 0.2);
-        assert_eq!(summary.block(&id("package:a")).unwrap().inside, 2);
     }
 
     #[test]

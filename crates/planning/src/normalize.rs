@@ -4,10 +4,12 @@
 //! detail a picture is cut at, so a markup made on one view stays visible on
 //! every other. Earlier versions of the shell instead recorded a connection
 //! exactly as the picture drew it - a rolled-up boundary pair, or an
-//! endpoint naming the synthetic own-content leaf a boundary lens grows
-//! (an id ending in `#self`). Those names exist in no source graph, so a
-//! plan carrying them silently loses its marks the moment the cut changes,
-//! and hands an agent ids it can never resolve.
+//! endpoint naming the synthetic own-content leaf earlier boundary lenses
+//! grew for a frame (an id ending in `#self`). Those names exist in no
+//! source graph, so a plan carrying them silently loses its marks the
+//! moment the cut changes, and hands an agent ids it can never resolve.
+//! Plan files carrying `#self` ids exist in the wild, so the stripping
+//! stays however the lens itself draws frames today.
 //!
 //! [`Plan::normalized`] is where that legacy dies. It is deterministic, and
 //! its rules are:
@@ -323,6 +325,9 @@ mod tests {
 
     #[test]
     fn a_self_leaf_endpoint_is_stripped_to_the_frame_it_stands_for() {
+        // The stripped forms are the ids the boundary lens attaches edges to
+        // today: an entry a legacy file wrote on a frame's own-content leaf
+        // lands on the frame, and so matches the frame-attached provenance.
         let mut plan = Plan::new();
         plan.propose(ProposedChange::RemoveRelation(depends(
             "a/one",

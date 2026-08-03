@@ -2,14 +2,14 @@ Feature: The boundary lens
 
   The architecture appears as boundaries at an adjustable level of detail:
   packages, the modules within them, or the individual items within the
-  modules. Connections attach only to boundaries without visible children.
-  A boundary that contains other boundaries shows the code it declares
-  itself as a box named after what declares it - "module code", "package
-  code" - and a dependency that names such a boundary as a whole waits at a
-  coarser detail. A package whose whole content sits in one boundary shows
-  that boundary's parts directly, without a box around them that says
-  nothing the package does not already say. Dependencies inside one boundary
-  stay out of sight at that level.
+  modules. Connections attach to the nearest visible boundary, single boxes
+  and boundaries with visible children alike. A connection that ends at a
+  boundary's border speaks about the boundary's own code or the boundary as
+  a whole; the connections into its parts end at the parts. What passes
+  between a boundary and its own contents stays inside it. A package whose
+  whole content sits in one boundary shows that boundary's parts directly,
+  without a box around them that says nothing the package does not already
+  say.
 
   Scenario: Package dependencies declared in manifests appear as connections
     Given a package "app" at "crates/app" depending on "engine"
@@ -34,12 +34,24 @@ Feature: The boundary lens
     And the boundaries are viewed at "packages" level
     Then a connection goes from "app" to "engine"
 
-  Scenario: A package's own code shows as a box beside the modules inside it
-    Given a package "engine" at "crates/engine"
+  Scenario: A boundary's own code connects from the boundary itself
+    Given a package "app" at "crates/app" depending on "engine"
+    And a package "engine" at "crates/engine"
+    And a source file "crates/app/src/lib.rs" containing:
+      """
+      mod wiring;
+      use engine::run;
+      """
+    And a source file "crates/app/src/wiring.rs" containing:
+      """
+      """
+    And a source file "crates/app/tests/behaviour.rs" containing:
+      """
+      """
     And a source file "crates/engine/src/lib.rs" containing:
       """
       mod physics;
-      use crate::physics::step;
+      pub fn run() {}
       """
     And a source file "crates/engine/src/physics.rs" containing:
       """
@@ -47,7 +59,7 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "modules" level
-    Then a connection goes from "package code" to "physics"
+    Then a connection goes from "crate" to "engine"
 
   Scenario: A package whose whole content sits in one boundary shows its parts directly
     Given a package "engine" at "crates/engine"
@@ -89,9 +101,29 @@ Feature: The boundary lens
     Then the boundaries include "crate"
     And the boundary "engine" contains "crate"
     And the boundary "crate" contains "physics"
-    And a connection goes from "module code" to "physics"
 
-  Scenario: A dependency on a whole boundary waits at a coarser detail
+  Scenario: What passes between a boundary and its own contents stays inside it
+    Given a package "engine" at "crates/engine"
+    And a source file "crates/engine/src/lib.rs" containing:
+      """
+      mod physics;
+      mod tests;
+      pub fn run() {}
+      """
+    And a source file "crates/engine/src/physics.rs" containing:
+      """
+      pub fn step() {}
+      """
+    And a source file "crates/engine/src/tests.rs" containing:
+      """
+      use crate::run;
+      """
+    When the project is inspected
+    And the boundaries are viewed at "modules" level
+    Then the boundaries include "tests"
+    And no connection goes from "tests" to "engine"
+
+  Scenario: A dependency on a whole boundary shows at every detail
     Given a package "app" at "crates/app" depending on "engine"
     And a package "engine" at "crates/engine"
     And a source file "crates/app/src/lib.rs" containing:
@@ -102,7 +134,7 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "modules" level
-    Then no connection goes from "app" to "engine"
+    Then a connection goes from "app" to "engine"
     When the boundaries are viewed at "packages" level
     Then a connection goes from "app" to "engine"
 
@@ -134,7 +166,7 @@ Feature: The boundary lens
     And the boundaries do not include "physics"
     And a connection goes from "wiring" to "engine"
 
-  Scenario: Collapsing a boundary lets a dependency on it as a whole appear again
+  Scenario: Collapsing a boundary keeps the dependency on it as a whole
     Given a package "app" at "crates/app" depending on "engine"
     And a package "engine" at "crates/engine"
     And a source file "crates/engine/src/lib.rs" containing:
@@ -142,22 +174,23 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "modules" level
-    Then no connection goes from "app" to "engine"
+    Then a connection goes from "app" to "engine"
     When the boundary "engine" is collapsed
     Then the boundaries do not include "crate"
     And a connection goes from "app" to "engine"
 
   Scenario: Item detail exposes individual declarations
-    Given a package "engine" at "crates/engine"
+    Given a package "app" at "crates/app" depending on "engine"
+    And a package "engine" at "crates/engine"
+    And a source file "crates/app/src/lib.rs" containing:
+      """
+      use engine::run;
+      """
     And a source file "crates/engine/src/lib.rs" containing:
       """
-      mod physics;
-      use crate::physics::step;
-      """
-    And a source file "crates/engine/src/physics.rs" containing:
-      """
-      pub fn step() {}
+      pub fn run() {}
       """
     When the project is inspected
     And the boundaries are viewed at "items" level
-    Then a connection goes from "package code" to "step"
+    Then the boundaries include "run"
+    And a connection goes from "crate" to "run"

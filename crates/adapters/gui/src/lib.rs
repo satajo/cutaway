@@ -53,7 +53,7 @@ use std::sync::mpsc;
 use cutaway_architecture::{
     ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
 };
-use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view, self_leaf_frame};
+use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{
     GroupStanding, Modification, ModificationKind, Note, Plan, ProposedChange, SplitParts, Subject,
@@ -252,16 +252,11 @@ impl Session {
         session
     }
 
-    /// The element behind an id. The view graph answers first: it holds the
-    /// synthetic `self` leaves the full graph never sees. The architecture
-    /// the picture shows answers next, so an element below the current
-    /// detail - and a planned one - still has a name.
+    /// The element behind an id, read from the architecture the picture
+    /// shows: it holds every element a view can draw, so an element below
+    /// the current detail - and a planned one - still has a name.
     fn element_of(&self, id: &ElementId) -> Option<&Element> {
-        self.scene
-            .as_ref()
-            .ok()
-            .and_then(|scene| scene.view.graph.element(id))
-            .or_else(|| self.viewed.element(id))
+        self.viewed.element(id)
     }
 
     /// Paints the cut anew, leaving the camera where it is: opening or
@@ -389,10 +384,9 @@ impl Session {
 
     /// Scopes the picture to one boundary: it becomes the whole picture, its
     /// dependency partners stand at the border as single closed boxes, and
-    /// everything else leaves. A frame's own-content box scopes to the frame
-    /// it belongs to, which is the boundary the reader means.
+    /// everything else leaves.
     fn focus(&mut self, id: &ElementId) {
-        self.scoped_to(Some(real_id(id)));
+        self.scoped_to(Some(id.clone()));
     }
 
     /// Puts the whole project back in the picture.
@@ -421,7 +415,7 @@ impl Session {
         let Some(scope) = &self.cut.scope else {
             return true;
         };
-        focus::subtree_of(&self.viewed, scope).contains(&real_id(id))
+        focus::subtree_of(&self.viewed, scope).contains(id)
     }
 
     /// The detail governing what a boundary shows inside it; None while the
@@ -478,9 +472,9 @@ impl Session {
     /// element the plan is already changing.
     fn current_note_text(&self, selection: &Selection) -> String {
         let note = match selection {
-            Selection::Node(id) => match self.plan.modification_of(&real_id(id)) {
+            Selection::Node(id) => match self.plan.modification_of(id) {
                 Some(modification) => modification.note.as_ref(),
-                None => self.plan.annotation_of(&Subject::Element(real_id(id))),
+                None => self.plan.annotation_of(&Subject::Element(id.clone())),
             },
             Selection::Edge(relation) => {
                 let concrete = self.concrete_behind(relation);
@@ -598,7 +592,7 @@ impl Session {
         let note = Note::new(self.note_draft.clone()).ok();
         let result = match &selection {
             Selection::Node(id) => {
-                let id = real_id(id);
+                let id = id.clone();
                 if let Some(modification) = self.plan.modification_of(&id) {
                     let described = Modification {
                         note: note.clone(),
@@ -660,8 +654,8 @@ impl Session {
     }
 
     /// Severs a rendered connection: proposes the removal of every concrete
-    /// dependency behind it, the ones waiting at a coarser detail included,
-    /// so the mark holds at whatever cut those dependencies reattach. On a
+    /// dependency behind it, so the mark holds at whatever cut those
+    /// dependencies reattach. On a
     /// partly severed connection this completes the removal of the rest; on
     /// a drawn one it erases the additions instead.
     fn sever(&mut self, relation: &Relation) {
@@ -740,9 +734,8 @@ impl Session {
     /// it holds are severed in the same act, because the element cannot
     /// leave while they stand.
     fn plan_removal(&mut self, id: &ElementId) {
-        let id = real_id(id);
         let mut result = Ok(());
-        for change in self.plan.removal_of_element(&id, &self.graph) {
+        for change in self.plan.removal_of_element(id, &self.graph) {
             result = result.and(self.plan.propose(change));
         }
         match result {
@@ -754,8 +747,7 @@ impl Session {
     /// Withdraws the planned removal of one element: the entry on the
     /// element, and every severing planned with it.
     fn restore_element(&mut self, id: &ElementId) {
-        let id = real_id(id);
-        let planned = self.plan.planned_removal_of_element(&id, &self.graph);
+        let planned = self.plan.planned_removal_of_element(id, &self.graph);
         if planned.is_empty() {
             self.status = Some("no removal is planned there".to_owned());
             return;
@@ -822,8 +814,7 @@ impl Session {
     /// them. A note on an erased element goes with it - the element it
     /// explains is gone.
     fn erase_element(&mut self, id: &ElementId) {
-        let id = real_id(id);
-        let planned = self.plan.planned_addition_of_element(&id, &self.viewed);
+        let planned = self.plan.planned_addition_of_element(id, &self.viewed);
         if planned.is_empty() {
             self.status = Some("no addition is planned there".to_owned());
             return;
@@ -851,7 +842,7 @@ impl Session {
     /// only in the plan carries whatever name and place the reader gave it,
     /// so the addition itself is what they edit.
     fn propose_modification(&mut self, subject: &ElementId, kind: ModificationKind) {
-        let subject = real_id(subject);
+        let subject = subject.clone();
         if self.graph.element(&subject).is_none() {
             self.status = Some(format!(
                 "{subject} exists only in the plan; change the planned element itself"
@@ -911,7 +902,7 @@ impl Session {
     /// on the canvas, exactly as drawing a dependency does: a merge names
     /// two boundaries, and the picture is where the second one is found.
     fn begin_merge(&mut self, subject: &ElementId) {
-        let subject = real_id(subject);
+        let subject = subject.clone();
         if self.graph.element(&subject).is_none() {
             self.status = Some(format!(
                 "{subject} exists only in the plan; change the planned element itself"
@@ -927,7 +918,7 @@ impl Session {
         let Some(subject) = self.merging.clone() else {
             return;
         };
-        let target = real_id(target);
+        let target = target.clone();
         if target == subject {
             self.status = Some("an element cannot merge into itself".to_owned());
             return;
@@ -943,7 +934,7 @@ impl Session {
     }
 
     fn discard_modification(&mut self, subject: &ElementId) {
-        let subject = real_id(subject);
+        let subject = subject.clone();
         if self.plan.modification_of(&subject).is_none() {
             self.status = Some("no modification is planned there".to_owned());
             return;
@@ -962,7 +953,7 @@ impl Session {
     /// boundary erases them with it, and the button says so beforehand.
     fn planned_inside(&self, id: &ElementId) -> usize {
         self.plan
-            .planned_addition_of_element(&real_id(id), &self.viewed)
+            .planned_addition_of_element(id, &self.viewed)
             .iter()
             .filter(|change| matches!(change, ProposedChange::AddElement(_)))
             .count()
@@ -980,19 +971,15 @@ impl Session {
     }
 
     fn draw_edge(&mut self, from: ElementId, to: ElementId) {
-        let picked = Relation {
+        let relation = Relation {
             from,
             to,
             kind: RelationKind::DependsOn,
         };
-        if edge_exists(&self.scene, &picked) {
+        if edge_exists(&self.scene, &relation) {
             self.status = Some("that dependency already exists".to_owned());
             return;
         }
-        // A pick on a frame's own-content box means the frame: the leaf is
-        // the lens's invention, and the plan records only elements the
-        // sources can hold.
-        let relation = frame_pair(&picked);
         if relation.from == relation.to {
             self.status = Some("a boundary cannot depend on itself".to_owned());
             return;
@@ -1019,15 +1006,14 @@ impl Session {
     }
 
     /// The rendered connection carrying one concrete relation at this cut:
-    /// the rolled-up edge whose provenance holds it, or the coarse pair it
-    /// waits under. None while the relation is interior to one boundary.
+    /// the rolled-up edge whose provenance holds it. None while the relation
+    /// is interior to one boundary.
     fn rendered_for(&self, concrete: &Relation) -> Option<Relation> {
         let scene = self.scene.as_ref().ok()?;
         scene
             .view
             .provenance
             .iter()
-            .chain(scene.view.coarse.iter())
             .find(|(_, behind)| behind.contains(concrete))
             .map(|(edge, _)| edge.clone())
     }
@@ -1083,20 +1069,17 @@ enum Standing {
     Added,
 }
 
-/// How the plan stands toward one box of the picture. A frame's own-content
-/// leaf answers as the frame it belongs to: the leaf is the lens's
-/// invention, and the plan speaks about the frame.
+/// How the plan stands toward one box of the picture.
 ///
 /// A removal reaches everything inside the boundary it names, so the answer
 /// follows the containment of the viewed architecture rather than the plan's
 /// entries alone: one entry marks a whole subtree, and nothing inside it
 /// needs an entry of its own.
 fn standing_of(plan: &Plan, viewed: &ArchitectureGraph, id: &ElementId) -> Standing {
-    let id = real_id(id);
-    if let Some(root) = plan.removal_root_of(&id, viewed) {
+    if let Some(root) = plan.removal_root_of(id, viewed) {
         return Standing::Removed { root };
     }
-    if plan.plans_addition_of_element(&id) {
+    if plan.plans_addition_of_element(id) {
         return Standing::Added;
     }
     Standing::Existing
@@ -1119,29 +1102,13 @@ fn node_statuses(
                 Standing::Removed { .. } => NodeStatus::Removed,
                 Standing::Added => NodeStatus::Added,
                 Standing::Existing => {
-                    plan.modification_of(&real_id(&element.id))?;
+                    plan.modification_of(&element.id)?;
                     NodeStatus::Modified
                 }
             };
             Some((element.id.clone(), status))
         })
         .collect()
-}
-
-/// The element an id truly names: itself, or - for a frame's own-content
-/// leaf - the frame. Nothing the plan records may carry a self-leaf id,
-/// because no source graph holds one.
-fn real_id(id: &ElementId) -> ElementId {
-    self_leaf_frame(id).unwrap_or_else(|| id.clone())
-}
-
-/// A rendered edge named by the boundaries the self leaves stand for.
-fn frame_pair(relation: &Relation) -> Relation {
-    Relation {
-        from: real_id(&relation.from),
-        to: real_id(&relation.to),
-        kind: relation.kind,
-    }
 }
 
 /// Every connection one frame draws, with what the plan says about each.
@@ -1151,37 +1118,19 @@ fn frame_pair(relation: &Relation) -> Relation {
 /// cut, the dependencies do not, so a planned removal keeps its mark when a
 /// boundary opens and the same dependencies reattach elsewhere.
 fn edge_visuals(view: &BoundaryView, plan: &Plan) -> Vec<EdgeVisual> {
-    let mut edges = Vec::new();
-    let mut rendered_pairs = BTreeSet::new();
-    for relation in view.provenance.keys() {
-        rendered_pairs.insert(frame_pair(relation));
-        let concrete = view.concrete_behind(relation);
-        let status = status_of_group(plan, &concrete);
-        edges.push(EdgeVisual {
-            relation: relation.clone(),
-            status,
-            annotated: note_behind(plan, status, &concrete).is_some(),
-            weight: weight_of(plan, status, &concrete),
-        });
-    }
-    // A planned addition naming an open frame as a whole would wait at a
-    // coarser detail, as the architecture's own whole-frame dependencies
-    // do; but a drawn dependency is the plan speaking, and the plan speaks
-    // at every cut, so it attaches to the frame's border instead. A pair a
-    // rendered edge already answers for stays out, or it would draw twice.
-    for (pair, concrete) in &view.coarse {
-        if matches!(plan.standing_of(concrete), GroupStanding::Added)
-            && !rendered_pairs.contains(pair)
-        {
-            edges.push(EdgeVisual {
-                relation: pair.clone(),
-                status: EdgeStatus::Drawn,
-                annotated: note_behind(plan, EdgeStatus::Drawn, concrete).is_some(),
-                weight: concrete.len(),
-            });
-        }
-    }
-    edges
+    view.provenance
+        .keys()
+        .map(|relation| {
+            let concrete = view.concrete_behind(relation);
+            let status = status_of_group(plan, &concrete);
+            EdgeVisual {
+                relation: relation.clone(),
+                status,
+                annotated: note_behind(plan, status, &concrete).is_some(),
+                weight: weight_of(plan, status, &concrete),
+            }
+        })
+        .collect()
 }
 
 fn status_of_group(plan: &Plan, concrete: &BTreeSet<Relation>) -> EdgeStatus {
@@ -1697,33 +1646,6 @@ mod tests {
         assert_eq!(statuses.get(&id("b/one")), None);
     }
 
-    #[test]
-    fn a_frames_own_content_carries_the_mark_of_the_frame_it_belongs_to() {
-        let mut graph = two_packages();
-        add(&mut graph, "a/one#type:X", ElementKind::Type);
-        graph
-            .add_relation(Relation {
-                from: id("a/one"),
-                to: id("a/one#type:X"),
-                kind: RelationKind::Contains,
-            })
-            .unwrap();
-        let plan = {
-            let mut plan = Plan::new();
-            for change in Plan::new().removal_of_element(&id("a/one"), &graph) {
-                plan.propose(change).unwrap();
-            }
-            plan
-        };
-
-        let statuses = statuses(&graph, &plan, &Cut::uniform(Detail::Items));
-        assert_eq!(
-            statuses.get(&id("a/one#self")),
-            Some(&NodeStatus::Removed),
-            "the lens's own-content leaf stands for its frame, mark included"
-        );
-    }
-
     fn modifying(plan: &mut Plan, subject: &str, kind: ModificationKind) {
         plan.plan_modification(Modification {
             subject: id(subject),
@@ -1901,7 +1823,7 @@ mod tests {
         assert_eq!(
             edges.len(),
             1,
-            "the whole-frame addition does not wait at a coarser detail"
+            "the whole-frame addition attaches to the frame's border like any dependency"
         );
         assert_eq!(edges[0].relation, depends("a/one", "package:b"));
         assert_eq!(edges[0].status, EdgeStatus::Drawn);

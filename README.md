@@ -24,9 +24,10 @@ sources of its `HEAD` commit (Cargo manifests, module structure, imports),
 and draws the boundary lens at an adjustable level of detail: packages, the
 modules within them, or the individual items within the modules, as nested
 boxes with the dependencies that cross boundary lines as arrows. Arrows
-attach only to boxes without visible children; a box that contains others
-shows its own code as a `self` box, and a dependency on a whole box waits at
-a coarser detail. Existing connections are monochrome; severing one turns it
+attach to the nearest visible box, framed boxes included: an arrow that ends
+at a box speaks about the box's own code or the box as a whole, and what
+passes between a box and its own contents stays inside it. Existing
+connections are monochrome; severing one turns it
 red, drawing a new one turns it green, and any connection or boundary can
 carry a note. All markup saves immediately to
 `cutaway.json` in the root of the inspected repository — a versioned JSON
