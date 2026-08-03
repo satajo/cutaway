@@ -3,11 +3,13 @@
 use std::collections::BTreeSet;
 
 use cutaway_analyzer_rust::RustSourceAnalyzer;
-use cutaway_architecture::{ArchitectureGraph, ElementId, Relation, RelationKind};
+use cutaway_architecture::{
+    ArchitectureGraph, ElementId, ElementKind, ElementName, Relation, RelationKind,
+};
 use cutaway_inspection::inspect;
 use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view, self_leaf_frame};
 use cutaway_planning::ports::plan_store::PlanStore;
-use cutaway_planning::{GroupStanding, Note, Plan, ProposedChange, Subject};
+use cutaway_planning::{GroupStanding, Note, Plan, ProposedChange, Subject, addition_of_element};
 
 use crate::fakes::{InMemoryPlanStore, InMemorySourceTree};
 
@@ -28,11 +30,36 @@ pub trait ApplicationDriver {
     fn sever_connection(&mut self, from: &str, to: &str) -> Result<(), String>;
     fn draw_connection(&mut self, from: &str, to: &str) -> Result<(), String>;
     fn annotate_connection(&mut self, from: &str, to: &str, note: &str) -> Result<(), String>;
+    /// Marks one boundary, everything inside it, and the couplings crossing
+    /// its border for removal.
+    fn plan_element_removal(&mut self, name: &str) -> Result<(), String>;
+    /// Withdraws a planned removal, the severings planned with it included.
+    fn restore_element(&mut self, name: &str) -> Result<(), String>;
+    /// Plans a new boundary inside another. `kind` is `module`, `type`, or
+    /// `function`.
+    fn add_element_inside(&mut self, parent: &str, kind: &str, name: &str) -> Result<(), String>;
+    /// Plans a new package at the root of the project.
+    fn add_package(&mut self, name: &str) -> Result<(), String>;
+    /// What one boundary directly holds, by display name.
+    fn contents_of(&self, name: &str) -> Vec<String>;
+    fn element_removal_is_planned(&self, name: &str) -> bool;
+    fn element_addition_is_planned(&self, name: &str) -> bool;
     fn removal_is_planned(&self, from: &str, to: &str) -> bool;
     fn addition_is_planned(&self, from: &str, to: &str) -> bool;
     fn note_on_connection(&self, from: &str, to: &str) -> Option<String>;
     fn saved_plan(&self) -> Option<Plan>;
     fn working_plan(&self) -> Plan;
+}
+
+/// The kind a scenario names in words.
+fn element_kind(kind: &str) -> Result<ElementKind, String> {
+    match kind {
+        "package" => Ok(ElementKind::Package),
+        "module" => Ok(ElementKind::Module),
+        "type" => Ok(ElementKind::Type),
+        "function" => Ok(ElementKind::Function),
+        other => Err(format!("unknown element kind {other}")),
+    }
 }
 
 /// Drives the application cores in-process, with the same analyzer the
@@ -41,6 +68,10 @@ pub trait ApplicationDriver {
 pub struct InProcessDriver {
     sources: InMemorySourceTree,
     graph: Option<ArchitectureGraph>,
+    /// The architecture the picture shows: the inspected graph with the
+    /// plan's own additions drawn in. The lens reads this, and so does every
+    /// question about where a planned element sits.
+    viewed: Option<ArchitectureGraph>,
     cut: Option<Cut>,
     view: Option<BoundaryView>,
     plan: Plan,
@@ -52,15 +83,20 @@ impl InProcessDriver {
         self.view.as_ref().expect("a boundary view is active")
     }
 
+    fn viewed(&self) -> &ArchitectureGraph {
+        self.viewed.as_ref().expect("a project is inspected")
+    }
+
     /// Paints the current cut anew, exactly as the GUI does after the reader
     /// opens or closes a boundary: the lens views the architecture with the
-    /// plan's added dependencies drawn in, so a drawn connection rolls up
-    /// at every cut the way the concrete ones do.
+    /// plan's own additions drawn in, so a planned element and a drawn
+    /// connection roll up at every cut the way the concrete ones do.
     fn rebuild_view(&mut self) -> Result<(), String> {
         let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
         let cut = self.cut.as_ref().ok_or("no boundary view yet")?;
-        let viewed = self.plan.with_planned_dependencies(graph);
+        let viewed = self.plan.viewed_architecture(graph);
         let view = boundary_view(&viewed, cut).map_err(|error| error.to_string())?;
+        self.viewed = Some(viewed);
         self.view = Some(view);
         Ok(())
     }
@@ -86,6 +122,35 @@ impl InProcessDriver {
             .find(|element| element.name.as_str() == name)
             .map(|element| element.id.clone())
             .ok_or_else(|| format!("no boundary named {name}"))
+    }
+
+    /// The element one displayed boundary stands for: itself, or - for a
+    /// frame's own-content box - the frame. The plan records only elements
+    /// the sources can hold.
+    fn element_id(&self, name: &str) -> Result<ElementId, String> {
+        let id = self.boundary_id(name)?;
+        Ok(self_leaf_frame(&id).unwrap_or(id))
+    }
+
+    /// Puts one planned element in the plan and in the picture, exactly as
+    /// the shell does: the element and its containment, then the view anew,
+    /// then the plan on disk.
+    fn plan_addition(
+        &mut self,
+        parent: Option<&ElementId>,
+        kind: ElementKind,
+        name: &str,
+    ) -> Result<(), String> {
+        let name = ElementName::new(name).map_err(|error| error.to_string())?;
+        let changes =
+            addition_of_element(parent, kind, &name).map_err(|error| error.to_string())?;
+        for change in changes {
+            self.plan
+                .propose(change)
+                .map_err(|error| error.to_string())?;
+        }
+        self.rebuild_view()?;
+        self.save()
     }
 
     fn connection(&self, from: &str, to: &str) -> Result<Relation, String> {
@@ -121,6 +186,7 @@ impl ApplicationDriver for InProcessDriver {
     fn inspect_project(&mut self) -> Result<(), String> {
         let graph =
             inspect(&self.sources, &[&RustSourceAnalyzer]).map_err(|error| error.to_string())?;
+        self.viewed = Some(self.plan.viewed_architecture(&graph));
         self.graph = Some(graph);
         Ok(())
     }
@@ -231,6 +297,73 @@ impl ApplicationDriver for InProcessDriver {
             }
         }
         self.save()
+    }
+
+    fn plan_element_removal(&mut self, name: &str) -> Result<(), String> {
+        let id = self.element_id(name)?;
+        let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
+        for change in self.plan.removal_of_element(&id, graph) {
+            self.plan
+                .propose(change)
+                .map_err(|error| error.to_string())?;
+        }
+        self.save()
+    }
+
+    fn restore_element(&mut self, name: &str) -> Result<(), String> {
+        let id = self.element_id(name)?;
+        let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
+        let planned = self.plan.planned_removal_of_element(&id, graph);
+        if planned.is_empty() {
+            return Err(format!("no removal is planned for {name}"));
+        }
+        for change in planned {
+            self.plan
+                .retract(&change)
+                .map_err(|error| error.to_string())?;
+        }
+        self.save()
+    }
+
+    fn add_element_inside(&mut self, parent: &str, kind: &str, name: &str) -> Result<(), String> {
+        let parent = self.element_id(parent)?;
+        self.plan_addition(Some(&parent), element_kind(kind)?, name)
+    }
+
+    fn add_package(&mut self, name: &str) -> Result<(), String> {
+        // A package hangs under the project root, exactly as an inspected
+        // one does.
+        let root = self
+            .graph
+            .as_ref()
+            .ok_or("no project inspected yet")?
+            .elements()
+            .find(|element| element.kind == ElementKind::Project)
+            .map(|element| element.id.clone());
+        self.plan_addition(root.as_ref(), ElementKind::Package, name)
+    }
+
+    fn contents_of(&self, name: &str) -> Vec<String> {
+        let Ok(id) = self.boundary_id(name) else {
+            return Vec::new();
+        };
+        let view = self.view();
+        view.graph
+            .relations()
+            .filter(|relation| relation.kind == RelationKind::Contains && relation.from == id)
+            .filter_map(|relation| view.graph.element(&relation.to))
+            .map(|element| element.name.to_string())
+            .collect()
+    }
+
+    fn element_removal_is_planned(&self, name: &str) -> bool {
+        self.element_id(name)
+            .is_ok_and(|id| self.plan.removal_root_of(&id, self.viewed()).is_some())
+    }
+
+    fn element_addition_is_planned(&self, name: &str) -> bool {
+        self.element_id(name)
+            .is_ok_and(|id| self.plan.plans_addition_of_element(&id))
     }
 
     fn removal_is_planned(&self, from: &str, to: &str) -> bool {

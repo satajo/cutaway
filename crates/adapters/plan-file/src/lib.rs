@@ -13,6 +13,23 @@
 //! carry both; loading a plan against a known base graph expands and strips
 //! them through `cutaway_planning`'s normalization (`Plan::normalized`).
 //! This store stays a dumb serializer and applies none of that itself.
+//!
+//! A `remove-element` entry takes the containment subtree of the element
+//! with it: the entry for the root of a subtree is the whole intent, and
+//! the parts inside it carry no entry of their own. The `remove-relation`
+//! entries beside it spell out the external couplings that must go first -
+//! every dependency crossing the border of that subtree, in both
+//! directions. The couplings interior to the subtree need no entry: they
+//! leave with the code that holds them.
+//!
+//! An `add-element` entry names an element that exists in no source tree
+//! yet, so its id is provisional: derived from the parent, the kind and the
+//! name, in the shape a real id would take (`package:<name>`,
+//! `<parent>/<name>`, `<parent>#<kind>:<name>`). Realize the element at
+//! whatever source path the implementation calls for; the next inspection
+//! replaces the provisional id with the real one. The `add-relation`
+//! entry of kind `contains` beside it says which boundary the new element
+//! belongs to.
 
 mod format;
 

@@ -1,4 +1,6 @@
-use cutaway_architecture::{ArchitectureGraph, Relation, RelationKind};
+use std::collections::BTreeSet;
+
+use cutaway_architecture::{ArchitectureGraph, ElementId, Relation, RelationKind};
 
 use crate::annotation::{Annotation, Note, Subject};
 use crate::change_set::{ChangeSet, ProposedChange};
@@ -131,26 +133,41 @@ impl Plan {
         changes
     }
 
-    /// The base architecture with this plan's added dependencies drawn in,
-    /// for viewing: a lens rolls a planned dependency up exactly as it rolls
-    /// a concrete one, so a drawn connection reattaches at every cut the way
-    /// the real ones do.
+    /// The base architecture with this plan's additions drawn into it, for
+    /// viewing: a lens rolls a planned element and a planned dependency up
+    /// exactly as it rolls the real ones, so what the plan adds stands in
+    /// the picture at every cut, the way what the sources declare does.
     ///
-    /// Only `DependsOn` additions enter - the containment tree stays the one
-    /// the sources declare - and an addition the graph rejects (an endpoint
-    /// the base does not hold yet, or a relation it already carries) stays
-    /// out of the picture without failing it: the plan may run ahead of the
-    /// architecture, and a picture must still stand. Removals stay out too:
-    /// a severed dependency still exists, and the picture marks it instead
-    /// of hiding it.
+    /// The planned elements enter first, so the containment that puts them
+    /// where they belong finds them. An addition the graph rejects - an
+    /// endpoint the base does not hold, an id it already carries - stays out
+    /// of the picture without failing it: the plan may run ahead of the
+    /// architecture, and a picture must still stand. A containment naming an
+    /// element the base already holds a parent for stays out for the same
+    /// reason: a second parent makes "the boundary that holds this" have two
+    /// answers, and no lens can draw that.
+    ///
+    /// Removals stay out: a severed dependency and an element planned for
+    /// removal both still exist, and the picture marks them instead of
+    /// hiding them.
     #[must_use]
-    pub fn with_planned_dependencies(&self, base: &ArchitectureGraph) -> ArchitectureGraph {
+    pub fn viewed_architecture(&self, base: &ArchitectureGraph) -> ArchitectureGraph {
         let mut graph = base.clone();
+        for planned in &self.changes {
+            if let ProposedChange::AddElement(element) = &planned.change {
+                let _ = graph.add_element(element.clone());
+            }
+        }
+        let mut held: BTreeSet<ElementId> = graph
+            .relations()
+            .filter(|relation| relation.kind == RelationKind::Contains)
+            .map(|relation| relation.to.clone())
+            .collect();
         for planned in &self.changes {
             let ProposedChange::AddRelation(relation) = &planned.change else {
                 continue;
             };
-            if relation.kind != RelationKind::DependsOn {
+            if relation.kind == RelationKind::Contains && !held.insert(relation.to.clone()) {
                 continue;
             }
             let _ = graph.add_relation(relation.clone());
@@ -309,11 +326,41 @@ mod tests {
         plan.propose(ProposedChange::AddRelation(relation("a", "b")))
             .unwrap();
 
-        let viewed = plan.with_planned_dependencies(&base);
+        let viewed = plan.viewed_architecture(&base);
         assert!(viewed.relations().any(|r| *r == relation("a", "b")));
         assert!(
             base.relations().next().is_none(),
             "the base architecture stays untouched"
+        );
+    }
+
+    #[test]
+    fn a_planned_element_joins_the_graph_a_lens_views_with_its_containment() {
+        use cutaway_architecture::{Element, ElementKind, ElementName};
+        let base = graph_of(&["a"], &[]);
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddElement(Element {
+            id: ElementId::new("a/new").unwrap(),
+            name: ElementName::new("new").unwrap(),
+            kind: ElementKind::Module,
+        }))
+        .unwrap();
+        plan.propose(ProposedChange::AddRelation(Relation {
+            from: ElementId::new("a").unwrap(),
+            to: ElementId::new("a/new").unwrap(),
+            kind: RelationKind::Contains,
+        }))
+        .unwrap();
+
+        let viewed = plan.viewed_architecture(&base);
+        assert!(viewed.element(&ElementId::new("a/new").unwrap()).is_some());
+        assert_eq!(
+            viewed
+                .relations()
+                .filter(|r| r.kind == RelationKind::Contains)
+                .count(),
+            1,
+            "the element enters before the containment that names it"
         );
     }
 
@@ -323,7 +370,30 @@ mod tests {
         let mut plan = Plan::new();
         plan.propose(ProposedChange::AddRelation(relation("a", "missing")))
             .unwrap();
-        assert_eq!(plan.with_planned_dependencies(&base), base);
+        assert_eq!(plan.viewed_architecture(&base), base);
+    }
+
+    #[test]
+    fn a_planned_containment_of_an_element_that_already_has_one_stays_out() {
+        let mut base = graph_of(&["a", "b", "c"], &[]);
+        base.add_relation(Relation {
+            from: ElementId::new("a").unwrap(),
+            to: ElementId::new("b").unwrap(),
+            kind: RelationKind::Contains,
+        })
+        .unwrap();
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddRelation(Relation {
+            from: ElementId::new("c").unwrap(),
+            to: ElementId::new("b").unwrap(),
+            kind: RelationKind::Contains,
+        }))
+        .unwrap();
+        assert_eq!(
+            plan.viewed_architecture(&base),
+            base,
+            "one boundary holds an element, and a second answer draws no picture"
+        );
     }
 
     #[test]
@@ -333,9 +403,22 @@ mod tests {
         plan.propose(ProposedChange::RemoveRelation(relation("a", "b")))
             .unwrap();
         assert_eq!(
-            plan.with_planned_dependencies(&base),
+            plan.viewed_architecture(&base),
             base,
             "a severed dependency still exists; the picture marks it instead of hiding it"
+        );
+    }
+
+    #[test]
+    fn an_element_planned_for_removal_stays_in_the_viewed_graph() {
+        let base = graph_of(&["a", "b"], &[("a", "b")]);
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::RemoveElement(ElementId::new("b").unwrap()))
+            .unwrap();
+        assert_eq!(
+            plan.viewed_architecture(&base),
+            base,
+            "the picture marks what is going instead of hiding it"
         );
     }
 

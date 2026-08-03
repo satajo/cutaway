@@ -7,6 +7,8 @@
 //! which pixelates text; the camera instead picks the font size each frame,
 //! so labels stay sharp at every magnification.
 
+use std::collections::BTreeMap;
+
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
 use cutaway_lenses::is_self_leaf;
 use eframe::egui::emath::TSTransform;
@@ -51,6 +53,18 @@ pub struct EdgeVisual {
     pub weight: usize,
 }
 
+/// What the plan does to one box the picture draws. A box no [`Content`]
+/// names stands as the architecture has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeStatus {
+    /// The element itself, or a boundary that holds it, is planned for
+    /// removal: red, exactly as a severed connection reads.
+    Removed,
+    /// The element exists only in the plan: green, exactly as a drawn
+    /// connection reads.
+    Added,
+}
+
 /// What the user clicked on the canvas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanvasAction {
@@ -66,6 +80,8 @@ pub struct Content<'a> {
     pub view: &'a ArchitectureGraph,
     pub layout: &'a Layout,
     pub edges: &'a [EdgeVisual],
+    /// The boxes the plan has touched. Everything else stands as it is.
+    pub nodes: &'a BTreeMap<ElementId, NodeStatus>,
     pub selected_edge: Option<&'a Relation>,
     pub selected_node: Option<&'a ElementId>,
     pub draw_source: Option<&'a ElementId>,
@@ -540,6 +556,18 @@ fn washes(visuals: &egui::Visuals) -> [Color32; 2] {
     ]
 }
 
+/// The ink a box draws its border and its name in: the plan's colour where
+/// the plan has touched the box, the picture's own ink everywhere else. The
+/// plan speaks before the focus dims, so a marked box still fades into the
+/// background when the reader asks about something else.
+fn node_ink(base: Color32, status: Option<&NodeStatus>) -> Color32 {
+    match status {
+        None => base,
+        Some(NodeStatus::Removed) => SEVERED,
+        Some(NodeStatus::Added) => DRAWN,
+    }
+}
+
 fn shade(color: Color32, strength: Strength) -> Color32 {
     match strength {
         Strength::Focused => color,
@@ -614,9 +642,10 @@ fn paint_containers(
         } else {
             1.0
         };
+        let ink = node_ink(paint.base, content.nodes.get(id));
         let border = Stroke::new(
             paint.stroke_width(width),
-            shade(paint.base.gamma_multiply(0.6), strength),
+            shade(ink.gamma_multiply(0.6), strength),
         );
         let fill = match block {
             Some(_) => paint.base.gamma_multiply(BLOCK),
@@ -630,7 +659,7 @@ fn paint_containers(
             StrokeKind::Middle,
         );
         match block {
-            Some(block) => paint_block_text(paint, rect, id, block, strength),
+            Some(block) => paint_block_text(paint, rect, id, block, strength, ink),
             None => {
                 if let Some(font) = paint.font() {
                     paint.painter.text(
@@ -638,7 +667,7 @@ fn paint_containers(
                         Align2::LEFT_TOP,
                         paint.labels.label(id).text(),
                         font,
-                        shade(paint.base, strength),
+                        shade(ink, strength),
                     );
                 }
             }
@@ -670,8 +699,9 @@ fn paint_block_text(
     id: &ElementId,
     block: &Block,
     strength: Strength,
+    ink: Color32,
 ) {
-    let named = shade(paint.base, strength);
+    let named = shade(ink, strength);
     let text = paint.labels.label(id).text();
     let comfortable = FontId::proportional(LABEL_SIZE);
     let measured = paint
@@ -685,7 +715,7 @@ fn paint_block_text(
     let font = FontId::proportional(size);
     let name = paint.painter.layout_no_wrap(text, font.clone(), named);
     let center = rect.center();
-    let counted = shade(paint.base.gamma_multiply(GLYPH), strength);
+    let counted = shade(ink.gamma_multiply(GLYPH), strength);
     let count = (block.inside > 0).then(|| {
         paint.painter.layout_no_wrap(
             format!("{} inside", block.inside),
@@ -866,7 +896,8 @@ fn paint_leaves(
         // dim border and no fill until the pointer or the selection reaches
         // it.
         let secondary = is_self_leaf(id) && !hover && !selected;
-        let ink = if secondary {
+        let ink = node_ink(paint.base, content.nodes.get(id));
+        let presence = if secondary {
             OWN_CONTENT
         } else if hover {
             1.0
@@ -883,15 +914,13 @@ fn paint_leaves(
             },
             Stroke::new(
                 paint.stroke_width(width),
-                shade(paint.base.gamma_multiply(ink), strength),
+                shade(ink.gamma_multiply(presence), strength),
             ),
             StrokeKind::Middle,
         );
         if let Some(font) = paint.font() {
             let color = shade(
-                paint
-                    .base
-                    .gamma_multiply(if secondary { OWN_CONTENT } else { 1.0 }),
+                ink.gamma_multiply(if secondary { OWN_CONTENT } else { 1.0 }),
                 strength,
             );
             paint_leaf_label(

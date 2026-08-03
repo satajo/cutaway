@@ -5,7 +5,14 @@
 //! [`ProjectOpener`] and every opened project carries its own
 //! [`PlanStore`]. The boundary canvas shows the architecture at an
 //! adjustable level of detail; the user severs, draws, and annotates
-//! connections, and every markup lands in the project's plan immediately.
+//! connections, marks whole boundaries for removal, and plans new ones, and
+//! every markup lands in the project's plan immediately.
+//!
+//! What the plan adds stands in the picture beside what the sources declare:
+//! the lens views the architecture with the plan's own additions drawn in,
+//! so a planned boundary takes a box, receives connections, and rolls up
+//! exactly as a real one does. What the plan removes stays in the picture
+//! too, marked red: the reader must see what is going.
 //!
 //! The toolbar's three stops set the detail of the whole picture, and single
 //! boundaries open or close on top of it: a double click on a boundary, or
@@ -33,14 +40,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use cutaway_architecture::{ArchitectureGraph, Element, ElementId, Relation, RelationKind};
+use cutaway_architecture::{
+    ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
+};
 use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view, self_leaf_frame};
 use cutaway_planning::ports::plan_store::PlanStore;
-use cutaway_planning::{GroupStanding, Note, Plan, ProposedChange, Subject};
+use cutaway_planning::{GroupStanding, Note, Plan, ProposedChange, Subject, addition_of_element};
 use eframe::egui::{self, Rect};
 
 use crate::camera::Camera;
-use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual};
+use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual, NodeStatus};
 use crate::continuity::Piece;
 use crate::label::Labels;
 use crate::layout::Layout;
@@ -122,6 +131,10 @@ struct Scene {
 
 struct Session {
     graph: ArchitectureGraph,
+    /// The architecture the picture shows: the sources' graph with the
+    /// plan's own additions drawn into it. The lens reads this, and so does
+    /// every question about where a planned element sits.
+    viewed: ArchitectureGraph,
     plan: Plan,
     store: Box<dyn PlanStore>,
     /// Where the picture cuts the hierarchy: the detail of the whole, and
@@ -142,11 +155,33 @@ struct Session {
     viewport: Rect,
     selection: Option<Selection>,
     note_draft: String,
+    /// The element the reader is composing in the inspector's add field.
+    addition: Addition,
     drawing: bool,
     draw_source: Option<ElementId>,
     status: Option<String>,
     /// Searching the whole architecture by name, whatever the picture shows.
     palette: Palette,
+}
+
+/// What the reader is composing in the inspector's add field: the name, and
+/// the kind of boundary it will be. The kind outlives one frame, so a reader
+/// who picks "type" and types a name still adds a type.
+#[derive(Debug, Clone)]
+struct Addition {
+    name: String,
+    kind: ElementKind,
+}
+
+impl Default for Addition {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            // A module is what fits inside most boundaries; a panel that
+            // cannot hold a module offers its own kinds and picks the first.
+            kind: ElementKind::Module,
+        }
+    }
 }
 
 impl Session {
@@ -157,6 +192,7 @@ impl Session {
         // or extends it, so every markup matches by provenance from here on.
         let plan = project.plan.normalized(&project.graph);
         let mut session = Self {
+            viewed: project.graph.clone(),
             graph: project.graph,
             plan,
             store: project.store,
@@ -167,6 +203,7 @@ impl Session {
             viewport: Rect::NOTHING,
             selection: None,
             note_draft: String::new(),
+            addition: Addition::default(),
             drawing: false,
             draw_source: None,
             status: None,
@@ -177,28 +214,30 @@ impl Session {
     }
 
     /// The element behind an id. The view graph answers first: it holds the
-    /// synthetic `self` leaves the full graph never sees.
+    /// synthetic `self` leaves the full graph never sees. The architecture
+    /// the picture shows answers next, so an element below the current
+    /// detail - and a planned one - still has a name.
     fn element_of(&self, id: &ElementId) -> Option<&Element> {
         self.scene
             .as_ref()
             .ok()
             .and_then(|scene| scene.view.graph.element(id))
-            .or_else(|| self.graph.element(id))
+            .or_else(|| self.viewed.element(id))
     }
 
     /// Paints the cut anew, leaving the camera where it is: opening or
     /// closing one boundary changes what the picture holds, not what the
     /// reader looks at. Whatever the new cut no longer shows is dropped.
     ///
-    /// The lens views the architecture with the plan's added dependencies
-    /// drawn in, so a drawn connection rolls up and reattaches at every cut
-    /// exactly as the concrete ones do. Augmenting the graph before lensing,
-    /// rather than mapping planned endpoints through the view here, keeps
-    /// the lens pure and this shell thin, and planned elements will later
-    /// enter the picture the same way.
+    /// The lens views the architecture with the plan's own additions drawn
+    /// in - planned elements, their containment, and drawn dependencies - so
+    /// what the plan adds rolls up and reattaches at every cut exactly as
+    /// the concrete architecture does. Augmenting the graph before lensing,
+    /// rather than mapping planned parts through the view here, keeps the
+    /// lens pure and this shell thin.
     fn rebuild_view(&mut self) {
-        let viewed = self.plan.with_planned_dependencies(&self.graph);
-        self.scene = boundary_view(&viewed, &self.cut)
+        self.viewed = self.plan.viewed_architecture(&self.graph);
+        self.scene = boundary_view(&self.viewed, &self.cut)
             .map_err(|error| error.to_string())
             .map(|view| {
                 let layout = layout::compute(&view.graph, &self.weights);
@@ -566,6 +605,151 @@ impl Session {
         }
     }
 
+    fn standing(&self, id: &ElementId) -> Standing {
+        standing_of(&self.plan, &self.viewed, id)
+    }
+
+    /// What the plan does to each box the picture draws. A box the plan
+    /// leaves alone stays out of the answer.
+    fn node_statuses(&self) -> BTreeMap<ElementId, NodeStatus> {
+        match &self.scene {
+            Ok(scene) => node_statuses(&scene.view.graph, &self.viewed, &self.plan),
+            Err(_) => BTreeMap::new(),
+        }
+    }
+
+    /// Plans the removal of one element: the element itself, and with it
+    /// everything it contains. The couplings that cross the border of what
+    /// it holds are severed in the same act, because the element cannot
+    /// leave while they stand.
+    fn plan_removal(&mut self, id: &ElementId) {
+        let id = real_id(id);
+        let mut result = Ok(());
+        for change in self.plan.removal_of_element(&id, &self.graph) {
+            result = result.and(self.plan.propose(change));
+        }
+        match result {
+            Ok(()) => self.save_plan(),
+            Err(error) => self.status = Some(error.to_string()),
+        }
+    }
+
+    /// Withdraws the planned removal of one element: the entry on the
+    /// element, and every severing planned with it.
+    fn restore_element(&mut self, id: &ElementId) {
+        let id = real_id(id);
+        let planned = self.plan.planned_removal_of_element(&id, &self.graph);
+        if planned.is_empty() {
+            self.status = Some("no removal is planned there".to_owned());
+            return;
+        }
+        let mut result = Ok(());
+        for change in planned {
+            result = result.and(self.plan.retract(&change));
+        }
+        match result {
+            Ok(()) => self.save_plan(),
+            Err(error) => self.status = Some(error.to_string()),
+        }
+    }
+
+    /// Plans a new element inside a boundary, or - with no boundary - at the
+    /// root of the project. The element enters the picture at once: the
+    /// viewed architecture carries the plan's additions, so the reader draws
+    /// dependencies to it and annotates it exactly as they would a boundary
+    /// the sources declare.
+    fn add_element(&mut self, parent: Option<&ElementId>, kind: ElementKind) {
+        let name = match ElementName::new(self.addition.name.trim()) {
+            Ok(name) => name,
+            Err(error) => {
+                self.status = Some(error.to_string());
+                return;
+            }
+        };
+        let changes = match addition_of_element(parent, kind, &name) {
+            Ok(changes) => changes,
+            Err(error) => {
+                self.status = Some(error.to_string());
+                return;
+            }
+        };
+        let Some(ProposedChange::AddElement(element)) = changes.first() else {
+            return;
+        };
+        let added = element.id.clone();
+        if self.viewed.element(&added).is_some() {
+            self.status = Some(format!("{added} is already there"));
+            return;
+        }
+        let mut result = Ok(());
+        for change in changes {
+            result = result.and(self.plan.propose(change));
+        }
+        match result {
+            Ok(()) => {
+                self.addition.name.clear();
+                self.save_plan();
+                self.rebuild_view();
+                if self.shows(&added) {
+                    let selection = Selection::Node(added);
+                    self.select(Some(selection.clone()));
+                    self.reveal(&selection);
+                }
+            }
+            Err(error) => self.status = Some(error.to_string()),
+        }
+    }
+
+    /// Erases a planned element: the element, every planned element inside
+    /// it, their containment, and every dependency drawn to or from any of
+    /// them. A note on an erased element goes with it - the element it
+    /// explains is gone.
+    fn erase_element(&mut self, id: &ElementId) {
+        let id = real_id(id);
+        let planned = self.plan.planned_addition_of_element(&id, &self.viewed);
+        if planned.is_empty() {
+            self.status = Some("no addition is planned there".to_owned());
+            return;
+        }
+        let mut result = Ok(());
+        for change in planned {
+            if let ProposedChange::AddElement(element) = &change {
+                self.plan
+                    .clear_annotation(&Subject::Element(element.id.clone()));
+            }
+            result = result.and(self.plan.retract(&change));
+        }
+        match result {
+            Ok(()) => self.save_plan(),
+            Err(error) => self.status = Some(error.to_string()),
+        }
+        // The elements left the viewed graph, so the picture sheds their
+        // boxes, and with them the selection.
+        self.rebuild_view();
+        self.select(None);
+    }
+
+    /// How many planned elements sit inside a planned one. Erasing the
+    /// boundary erases them with it, and the button says so beforehand.
+    fn planned_inside(&self, id: &ElementId) -> usize {
+        self.plan
+            .planned_addition_of_element(&real_id(id), &self.viewed)
+            .iter()
+            .filter(|change| matches!(change, ProposedChange::AddElement(_)))
+            .count()
+            .saturating_sub(1)
+    }
+
+    /// The element every package hangs under, where the architecture names
+    /// one. A planned package joins the project exactly as the inspected
+    /// ones do.
+    fn project_root(&self) -> Option<ElementId> {
+        self.graph
+            .elements()
+            .find(|element| element.kind == ElementKind::Project)
+            .map(|element| element.id.clone())
+    }
+
     fn draw_edge(&mut self, from: ElementId, to: ElementId) {
         let picked = Relation {
             from,
@@ -653,6 +837,57 @@ impl Session {
             }
         }
     }
+}
+
+/// How the plan stands toward one element of the picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Standing {
+    /// The architecture holds it and the plan leaves it alone.
+    Existing,
+    /// Planned for removal, by the entry on this element or on a boundary
+    /// above it: a removal takes everything the element holds with it, so
+    /// the root of the removal is what a restore acts on.
+    Removed { root: ElementId },
+    /// The element exists only in the plan.
+    Added,
+}
+
+/// How the plan stands toward one box of the picture. A frame's own-content
+/// leaf answers as the frame it belongs to: the leaf is the lens's
+/// invention, and the plan speaks about the frame.
+///
+/// A removal reaches everything inside the boundary it names, so the answer
+/// follows the containment of the viewed architecture rather than the plan's
+/// entries alone: one entry marks a whole subtree, and nothing inside it
+/// needs an entry of its own.
+fn standing_of(plan: &Plan, viewed: &ArchitectureGraph, id: &ElementId) -> Standing {
+    let id = real_id(id);
+    if let Some(root) = plan.removal_root_of(&id, viewed) {
+        return Standing::Removed { root };
+    }
+    if plan.plans_addition_of_element(&id) {
+        return Standing::Added;
+    }
+    Standing::Existing
+}
+
+/// What the plan does to each box of one picture. A box the plan leaves
+/// alone stays out of the answer, so the canvas paints it as it always did.
+fn node_statuses(
+    view: &ArchitectureGraph,
+    viewed: &ArchitectureGraph,
+    plan: &Plan,
+) -> BTreeMap<ElementId, NodeStatus> {
+    view.elements()
+        .filter_map(|element| {
+            let status = match standing_of(plan, viewed, &element.id) {
+                Standing::Existing => return None,
+                Standing::Removed { .. } => NodeStatus::Removed,
+                Standing::Added => NodeStatus::Added,
+            };
+            Some((element.id.clone(), status))
+        })
+        .collect()
 }
 
 /// The element an id truly names: itself, or - for a frame's own-content
@@ -976,6 +1211,7 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
         Ok(scene) => scene,
     };
     let edges = session.edges();
+    let nodes = session.node_statuses();
     let (selected_edge, selected_node) = match &session.selection {
         Some(Selection::Edge(relation)) => (Some(relation), None),
         Some(Selection::Node(id)) => (None, Some(id)),
@@ -987,6 +1223,7 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
             view: &scene.view.graph,
             layout: &scene.layout,
             edges: &edges,
+            nodes: &nodes,
             selected_edge,
             selected_node,
             draw_source: session.draw_source.as_ref(),
@@ -1107,8 +1344,123 @@ mod tests {
     }
 
     fn visuals(graph: &ArchitectureGraph, plan: &Plan, cut: &Cut) -> Vec<EdgeVisual> {
-        let view = boundary_view(&plan.with_planned_dependencies(graph), cut).unwrap();
+        let view = boundary_view(&plan.viewed_architecture(graph), cut).unwrap();
         edge_visuals(&view, plan)
+    }
+
+    fn statuses(
+        graph: &ArchitectureGraph,
+        plan: &Plan,
+        cut: &Cut,
+    ) -> BTreeMap<ElementId, NodeStatus> {
+        let viewed = plan.viewed_architecture(graph);
+        let view = boundary_view(&viewed, cut).unwrap();
+        node_statuses(&view.graph, &viewed, plan)
+    }
+
+    fn removing_package_a() -> Plan {
+        let mut plan = Plan::new();
+        for change in Plan::new().removal_of_element(&id("package:a"), &two_packages()) {
+            plan.propose(change).unwrap();
+        }
+        plan
+    }
+
+    #[test]
+    fn a_boundary_planned_for_removal_marks_everything_inside_it() {
+        let statuses = statuses(
+            &two_packages(),
+            &removing_package_a(),
+            &Cut::uniform(Detail::Modules),
+        );
+        for inside in ["package:a", "a/one", "a/two"] {
+            assert_eq!(
+                statuses.get(&id(inside)),
+                Some(&NodeStatus::Removed),
+                "{inside} goes with the package that holds it"
+            );
+        }
+        assert_eq!(statuses.get(&id("package:b")), None);
+        assert_eq!(statuses.get(&id("b/one")), None);
+    }
+
+    #[test]
+    fn a_frames_own_content_carries_the_mark_of_the_frame_it_belongs_to() {
+        let mut graph = two_packages();
+        add(&mut graph, "a/one#type:X", ElementKind::Type);
+        graph
+            .add_relation(Relation {
+                from: id("a/one"),
+                to: id("a/one#type:X"),
+                kind: RelationKind::Contains,
+            })
+            .unwrap();
+        let plan = {
+            let mut plan = Plan::new();
+            for change in Plan::new().removal_of_element(&id("a/one"), &graph) {
+                plan.propose(change).unwrap();
+            }
+            plan
+        };
+
+        let statuses = statuses(&graph, &plan, &Cut::uniform(Detail::Items));
+        assert_eq!(
+            statuses.get(&id("a/one#self")),
+            Some(&NodeStatus::Removed),
+            "the lens's own-content leaf stands for its frame, mark included"
+        );
+    }
+
+    fn planning_a_module(parent: &str, name: &str) -> Plan {
+        let mut plan = Plan::new();
+        for change in addition_of_element(
+            Some(&id(parent)),
+            ElementKind::Module,
+            &ElementName::new(name).unwrap(),
+        )
+        .unwrap()
+        {
+            plan.propose(change).unwrap();
+        }
+        plan
+    }
+
+    #[test]
+    fn a_planned_element_stands_in_the_picture_marked_as_planned() {
+        let plan = planning_a_module("package:a", "wiring");
+        let statuses = statuses(&two_packages(), &plan, &Cut::uniform(Detail::Modules));
+        assert_eq!(
+            statuses.get(&id("package:a/wiring")),
+            Some(&NodeStatus::Added)
+        );
+    }
+
+    #[test]
+    fn a_dependency_drawn_to_a_planned_element_draws_at_every_cut() {
+        let mut plan = planning_a_module("package:a", "wiring");
+        plan.propose(ProposedChange::AddRelation(depends(
+            "b/one",
+            "package:a/wiring",
+        )))
+        .unwrap();
+        let graph = two_packages();
+
+        let fine = visuals(&graph, &plan, &Cut::uniform(Detail::Modules));
+        assert!(
+            fine.iter()
+                .any(|edge| edge.relation == depends("b/one", "package:a/wiring")
+                    && edge.status == EdgeStatus::Drawn),
+            "the planned element is in the viewed graph, so the lens draws to it: {fine:?}"
+        );
+
+        let coarse = visuals(&graph, &plan, &Cut::uniform(Detail::Packages));
+        assert!(
+            coarse
+                .iter()
+                .any(|edge| edge.relation == depends("package:b", "package:a")
+                    && edge.status == EdgeStatus::Drawn),
+            "and rolls it up to the packages exactly as a concrete one: {coarse:?}"
+        );
     }
 
     fn removing(relations: &[Relation]) -> Plan {

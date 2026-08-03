@@ -10,10 +10,13 @@
 
 mod annotation;
 mod change_set;
+mod containment;
+mod element;
 mod normalize;
 mod plan;
 pub mod ports;
 
 pub use annotation::{Annotation, InvalidNote, Note, Subject};
 pub use change_set::{ChangeSet, ChangeSetError, ProposedChange};
+pub use element::{ProvisionalIdError, addition_of_element, provisional_id};
 pub use plan::{GroupStanding, Plan, PlanError, PlannedChange};

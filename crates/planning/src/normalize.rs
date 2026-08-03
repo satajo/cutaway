@@ -29,17 +29,23 @@
 //! - Relation additions only lose `#self` marks: a drawn dependency already
 //!   names the elements the planner picked, and it may run ahead of the
 //!   base graph on purpose.
+//! - An element removal naming neither an element of the base graph nor an
+//!   element this plan adds is stale and drops: the sources no longer hold
+//!   what it asks to remove, so the entry states no work.
+//! - Element additions always survive: an addition names an element that
+//!   exists nowhere but the plan, which is the point of it.
 //! - Relation-subject annotations expand exactly as removals do, the note
 //!   landing on every concrete relation; element subjects only lose `#self`
 //!   marks. Where expansions overlap, the later annotation replaces the
 //!   earlier on the shared subjects, as [`Plan::annotate`] always has.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, Relation, RelationKind};
 
 use crate::annotation::Subject;
 use crate::change_set::ProposedChange;
+use crate::containment::{containment_parents, lies_within};
 use crate::plan::Plan;
 
 /// How older plan files spelled the boundary lens's own-content leaf. No
@@ -56,7 +62,7 @@ impl Plan {
         let parents = containment_parents(base);
         let mut normalized = Plan::new();
         for planned in self.changes() {
-            for change in concrete_changes(&planned.change, base, &parents) {
+            for change in concrete_changes(&planned.change, self, base, &parents) {
                 if normalized.propose(change.clone()).is_err() {
                     // The first occurrence of a change stands, note included.
                     continue;
@@ -84,10 +90,12 @@ impl Plan {
     }
 }
 
-/// The concrete changes one stored change stands for. Only a dependency
-/// removal expands; everything else merely loses `#self` marks.
+/// The concrete changes one stored change stands for. A dependency removal
+/// expands, an element removal the architecture no longer answers for
+/// drops, and everything else merely loses `#self` marks.
 fn concrete_changes(
     change: &ProposedChange,
+    plan: &Plan,
     base: &ArchitectureGraph,
     parents: &BTreeMap<ElementId, ElementId>,
 ) -> Vec<ProposedChange> {
@@ -97,7 +105,17 @@ fn concrete_changes(
             element.id = stripped(&element.id);
             vec![ProposedChange::AddElement(element)]
         }
-        ProposedChange::RemoveElement(id) => vec![ProposedChange::RemoveElement(stripped(id))],
+        ProposedChange::RemoveElement(id) => {
+            let id = stripped(id);
+            // A removal answers for an element of the architecture, or for
+            // one this plan adds and then takes back out; anything else
+            // names something no longer there.
+            if base.element(&id).is_some() || plan.plans_addition_of_element(&id) {
+                vec![ProposedChange::RemoveElement(id)]
+            } else {
+                Vec::new()
+            }
+        }
         ProposedChange::AddRelation(relation) => {
             vec![ProposedChange::AddRelation(stripped_relation(relation))]
         }
@@ -136,29 +154,6 @@ fn concrete_forms(
         .collect()
 }
 
-/// Whether an element is the boundary itself or sits anywhere inside it,
-/// following the `Contains` relations upward.
-fn lies_within(
-    element: &ElementId,
-    boundary: &ElementId,
-    parents: &BTreeMap<ElementId, ElementId>,
-) -> bool {
-    // Containment is a tree in every graph a lens accepts, but a walk that
-    // trusts that and meets a cycle never ends; the seen set bounds it.
-    let mut seen = BTreeSet::new();
-    let mut current = Some(element);
-    while let Some(id) = current {
-        if id == boundary {
-            return true;
-        }
-        if !seen.insert(id.clone()) {
-            return false;
-        }
-        current = parents.get(id);
-    }
-    false
-}
-
 fn stripped(id: &ElementId) -> ElementId {
     id.as_str()
         .strip_suffix(LEGACY_SELF_LEAF_SUFFIX)
@@ -172,14 +167,6 @@ fn stripped_relation(relation: &Relation) -> Relation {
         to: stripped(&relation.to),
         kind: relation.kind,
     }
-}
-
-/// The containment parent of every contained element of the base graph.
-fn containment_parents(base: &ArchitectureGraph) -> BTreeMap<ElementId, ElementId> {
-    base.relations()
-        .filter(|relation| relation.kind == RelationKind::Contains)
-        .map(|relation| (relation.to.clone(), relation.from.clone()))
-        .collect()
 }
 
 #[cfg(test)]
@@ -462,6 +449,40 @@ mod tests {
                 "{id} slipped through"
             );
         }
+    }
+
+    #[test]
+    fn an_element_removal_the_architecture_no_longer_holds_is_dropped_as_stale() {
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::RemoveElement(id("a/gone")))
+            .unwrap();
+        assert!(plan.normalized(&base()).is_empty());
+    }
+
+    #[test]
+    fn an_element_removal_naming_an_element_of_the_architecture_survives() {
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::RemoveElement(id("a/one")))
+            .unwrap();
+        assert_eq!(plan.normalized(&base()), plan);
+    }
+
+    #[test]
+    fn a_planned_element_can_be_planned_away_again() {
+        let planned = Element {
+            id: id("package:a/new"),
+            name: ElementName::new("new").unwrap(),
+            kind: ElementKind::Module,
+        };
+        let mut plan = Plan::new();
+        plan.propose(ProposedChange::AddElement(planned)).unwrap();
+        plan.propose(ProposedChange::RemoveElement(id("package:a/new")))
+            .unwrap();
+        assert_eq!(
+            plan.normalized(&base()),
+            plan,
+            "an addition runs ahead of the architecture, and so does a removal that answers it"
+        );
     }
 
     #[test]

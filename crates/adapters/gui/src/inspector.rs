@@ -11,14 +11,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
+use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation};
 use cutaway_lenses::{BoundaryView, Detail, is_self_leaf};
 use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
 use crate::glyph;
 use crate::label::{self, Labels, kind_name, kind_symbol};
-use crate::{Scene, Selection, Session, detail, focus};
+use crate::{Scene, Selection, Session, Standing, detail, focus, real_id};
 
 /// How many rows one list shows before it names the rest. The cap is a
 /// display limit and not a data limit: the count above every list still
@@ -93,6 +93,12 @@ fn nothing_selected(ui: &mut egui::Ui, session: &mut Session) {
     if let Some(target) = chosen {
         go_to(session, &target);
     }
+    // A package belongs to the project rather than to any boundary in the
+    // picture, so the panel that stands for the picture as a whole is where
+    // one is planned. It hangs under the project root exactly as an
+    // inspected package does.
+    let root = session.project_root();
+    add_controls(ui, session, "Add a package:", root.as_ref(), None);
     ui.separator();
     help(ui);
 }
@@ -128,6 +134,11 @@ fn help(ui: &mut egui::Ui) {
          mark by its arrowhead.",
     );
     ui.label(
+        "A boundary planned for removal turns red with everything inside it, and \
+         a boundary that exists only in the plan turns green. Select a boundary \
+         to plan its removal, or to plan a new one inside it.",
+    );
+    ui.label(
         "Drag or scroll to pan, ctrl+scroll or pinch to zoom; press Home, click Fit, \
          or double-click the background to bring the whole picture back.",
     );
@@ -142,8 +153,19 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     // The id is the element's path through the sources: a reader knows the
     // boundary by it even where two short names read alike.
     ui.small(egui::RichText::new(id.as_str()).monospace());
+    plan_controls(ui, session, id);
     detail_controls(ui, session, id);
     note_editor(ui, session);
+    // A frame's own-content box adds inside the frame it belongs to: the
+    // leaf is the lens's invention, and a new boundary joins a real one.
+    let inside = real_id(id);
+    add_controls(
+        ui,
+        session,
+        "Add inside:",
+        Some(&inside),
+        Some(panel.element_kind),
+    );
     let mut chosen = None;
     if !panel.contents.is_empty() {
         ui.separator();
@@ -221,6 +243,121 @@ fn edge(ui: &mut egui::Ui, session: &mut Session, relation: &Relation) {
     ui.small("Click a row to jump to its source.");
     if let Some(target) = list(ui, &panel.provenance, Prominence::Primary) {
         go_to(session, &target);
+    }
+}
+
+/// What the plan does to this boundary, and the one act that changes it.
+///
+/// A removal takes everything inside the boundary with it, so an element
+/// below one names the boundary that takes it and restores that boundary
+/// instead of itself: the entry the plan carries sits at the root of the
+/// subtree, and that is what a restore withdraws.
+fn plan_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
+    ui.separator();
+    match session.standing(id) {
+        Standing::Existing => {
+            if ui
+                .button("Plan removal")
+                .on_hover_text(
+                    "Mark this boundary and everything inside it for removal, \
+                     and sever every dependency that crosses its border.",
+                )
+                .clicked()
+            {
+                session.plan_removal(id);
+            }
+        }
+        Standing::Removed { root } => {
+            let line = if root == real_id(id) {
+                "Planned for removal.".to_owned()
+            } else {
+                format!(
+                    "Planned for removal: goes with {}.",
+                    Labels::of(&session.viewed).qualified(&root)
+                )
+            };
+            ui.colored_label(canvas::SEVERED, line);
+            if ui.button("Restore").clicked() {
+                session.restore_element(&root);
+            }
+        }
+        Standing::Added => {
+            ui.colored_label(canvas::DRAWN, "Planned addition.");
+            let inside = session.planned_inside(id);
+            let erase = if inside == 0 {
+                "Erase".to_owned()
+            } else {
+                format!("Erase (takes {inside} inside)")
+            };
+            if ui.button(erase).clicked() {
+                session.erase_element(id);
+            }
+        }
+    }
+}
+
+/// The kinds of boundary a reader may plan inside one of this kind: the
+/// project takes packages, a package takes modules, a module takes further
+/// modules and the items declared in it. An item holds nothing the picture
+/// draws, so nothing is planned inside one.
+fn addable_kinds(parent: Option<ElementKind>) -> &'static [ElementKind] {
+    match parent {
+        None | Some(ElementKind::Project) => &[ElementKind::Package],
+        Some(ElementKind::Package) => &[ElementKind::Module],
+        Some(ElementKind::Module) => &[
+            ElementKind::Module,
+            ElementKind::Type,
+            ElementKind::Function,
+        ],
+        Some(ElementKind::Function | ElementKind::Type) => &[],
+    }
+}
+
+/// The field that plans a new boundary: its kind, its name, and the act that
+/// puts it in the plan. `parent` is the boundary the new one sits in, and
+/// None plans at the root of the project.
+///
+/// The name goes through [`cutaway_architecture::ElementName`] like every
+/// other name in the architecture, so an unusable one is refused with the
+/// reason the toolbar shows rather than half-planned.
+fn add_controls(
+    ui: &mut egui::Ui,
+    session: &mut Session,
+    heading: &str,
+    parent: Option<&ElementId>,
+    parent_kind: Option<ElementKind>,
+) {
+    let kinds = addable_kinds(parent_kind);
+    let Some(&first) = kinds.first() else {
+        return;
+    };
+    if !kinds.contains(&session.addition.kind) {
+        session.addition.kind = first;
+    }
+    ui.separator();
+    ui.label(heading);
+    if kinds.len() > 1 {
+        ui.horizontal(|ui| {
+            for kind in kinds {
+                if ui
+                    .selectable_label(session.addition.kind == *kind, kind_name(*kind))
+                    .clicked()
+                {
+                    session.addition.kind = *kind;
+                }
+            }
+        });
+    }
+    let mut asked = false;
+    ui.horizontal(|ui| {
+        let field = ui.text_edit_singleline(&mut session.addition.name);
+        // A name is finished by the key that finishes every other field, or
+        // by the button beside it.
+        asked = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        asked |= ui.button("Add").clicked();
+    });
+    if asked {
+        session.add_element(parent, session.addition.kind);
     }
 }
 
@@ -361,6 +498,9 @@ fn link(ui: &mut egui::Ui, text: &str, prominence: Prominence) -> egui::Response
 struct NodePanel {
     heading: String,
     kind: &'static str,
+    /// What the boundary is, for the panel to decide what may be planned
+    /// inside it.
+    element_kind: ElementKind,
     contents: Vec<Row>,
     connections: Vec<Row>,
 }
@@ -374,6 +514,7 @@ fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
     Some(NodePanel {
         heading: format!("{} {}", kind_symbol(element.kind), labels.qualified(id)),
         kind: kind_name(element.kind),
+        element_kind: element.kind,
         contents: contents_rows(&view.graph, &labels, id),
         connections: connection_rows(view, &labels, id),
     })

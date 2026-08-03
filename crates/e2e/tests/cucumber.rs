@@ -92,6 +92,67 @@ fn the_connection_is_annotated(world: &mut CutawayWorld, from: String, to: Strin
         .expect("annotating succeeds");
 }
 
+#[when(expr = "the removal of {string} is planned")]
+fn the_removal_of_an_element_is_planned(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .plan_element_removal(&name)
+        .expect("planning the removal succeeds");
+}
+
+#[when(expr = "the removal of {string} is restored")]
+fn the_removal_of_an_element_is_restored(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .restore_element(&name)
+        .expect("restoring succeeds");
+}
+
+#[when(expr = "a {string} named {string} is planned inside {string}")]
+fn an_element_is_planned_inside(
+    world: &mut CutawayWorld,
+    kind: String,
+    name: String,
+    parent: String,
+) {
+    world
+        .driver
+        .add_element_inside(&parent, &kind, &name)
+        .expect("planning the element succeeds");
+}
+
+#[when(expr = "a package named {string} is planned")]
+fn a_package_is_planned(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .add_package(&name)
+        .expect("planning the package succeeds");
+}
+
+#[then(expr = "the plan marks {string} for removal")]
+fn the_plan_marks_an_element_for_removal(world: &mut CutawayWorld, name: String) {
+    assert!(world.driver.element_removal_is_planned(&name));
+}
+
+#[then(expr = "the plan does not mark {string} for removal")]
+fn the_plan_does_not_mark_an_element_for_removal(world: &mut CutawayWorld, name: String) {
+    assert!(!world.driver.element_removal_is_planned(&name));
+}
+
+#[then(expr = "the plan proposes an element {string}")]
+fn the_plan_proposes_an_element(world: &mut CutawayWorld, name: String) {
+    assert!(world.driver.element_addition_is_planned(&name));
+}
+
+#[then(expr = "the boundary {string} contains {string}")]
+fn the_boundary_contains(world: &mut CutawayWorld, frame: String, inside: String) {
+    let contents = world.driver.contents_of(&frame);
+    assert!(
+        contents.contains(&inside),
+        "expected {frame} to contain {inside}, it holds {contents:?}"
+    );
+}
+
 #[then(expr = "the boundaries are {string}")]
 fn the_boundaries_are(world: &mut CutawayWorld, expected: String) {
     let mut names = world.driver.boundary_names();
@@ -139,6 +200,11 @@ fn no_connection_goes(world: &mut CutawayWorld, from: String, to: String) {
 #[then(expr = "the plan marks the connection from {string} to {string} for removal")]
 fn the_plan_marks_for_removal(world: &mut CutawayWorld, from: String, to: String) {
     assert!(world.driver.removal_is_planned(&from, &to));
+}
+
+#[then(expr = "the plan leaves the connection from {string} to {string} alone")]
+fn the_plan_leaves_a_connection_alone(world: &mut CutawayWorld, from: String, to: String) {
+    assert!(!world.driver.removal_is_planned(&from, &to));
 }
 
 #[then(expr = "the plan proposes a connection from {string} to {string}")]
