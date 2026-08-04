@@ -1,5 +1,5 @@
 {
-  description = "Cutaway - cutaway drawings of software architecture";
+  description = "Software architecture viewer and change planner";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -50,6 +50,13 @@
             wrapProgram $out/bin/cutaway \
               --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath (guiRuntimeLibs pkgs)}
           '';
+
+          meta = {
+            description = "Software architecture viewer and change planner";
+            homepage = "https://github.com/satajo/cutaway";
+            license = pkgs.lib.licenses.gpl3Plus;
+            mainProgram = "cutaway";
+          };
         };
       });
 
