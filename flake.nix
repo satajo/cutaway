@@ -42,9 +42,30 @@
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
 
-          nativeBuildInputs = [ pkgs.makeWrapper ];
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+            pkgs.copyDesktopItems
+          ];
           # The git adapter tests create throwaway repositories with the git CLI.
           nativeCheckInputs = [ pkgs.git ];
+
+          # The launcher entry that desktop environments list Cutaway under.
+          desktopItems = pkgs.lib.optionals pkgs.stdenv.isLinux [
+            (pkgs.makeDesktopItem {
+              name = "cutaway";
+              desktopName = "Cutaway";
+              genericName = "Software Architecture Viewer";
+              comment = "Software architecture viewer and change planner";
+              exec = "cutaway";
+              icon = "cutaway";
+              terminal = false;
+              categories = [ "Development" ];
+            })
+          ];
+
+          postInstall = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            install -Dm444 assets/icon.svg $out/share/icons/hicolor/scalable/apps/cutaway.svg
+          '';
 
           postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             wrapProgram $out/bin/cutaway \

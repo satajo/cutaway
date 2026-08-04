@@ -39,7 +39,7 @@ model only.
 With Nix (flakes enabled):
 
 ```sh
-nix profile install github:satajo/cutaway
+nix profile add github:satajo/cutaway
 ```
 
 Or run without installing:
