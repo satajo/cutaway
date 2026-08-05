@@ -1068,6 +1068,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 name = "cutaway"
 version = "0.1.0"
 dependencies = [
+ "cutaway-analyzer-go",
  "cutaway-analyzer-rust",
  "cutaway-architecture",
  "cutaway-gui",
@@ -1076,6 +1077,17 @@ dependencies = [
  "cutaway-plan-file",
  "cutaway-planning",
  "cutaway-source-git",
+]
+
+[[package]]
+name = "cutaway-analyzer-go"
+version = "0.1.0"
+dependencies = [
+ "cutaway-architecture",
+ "cutaway-inspection",
+ "thiserror 2.0.19",
+ "tree-sitter",
+ "tree-sitter-go",
 ]
 
 [[package]]
@@ -5260,6 +5272,16 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-go"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea"
+dependencies = [
+ "cc",
  "tree-sitter-language",
 ]
 

@@ -49,6 +49,8 @@ crates/
     src/ports/         PlanStore.
   adapters/            Named role-first (<port concept>-<technology>), so the
                        adapters of one port sit together in any sorted listing.
+    analyzer-go/       Driven adapter: Go ecosystem as a SourceAnalyzer
+                       (go.mod manifests, sources via tree-sitter).
     analyzer-rust/     Driven adapter: Rust ecosystem as a SourceAnalyzer
                        (Cargo manifests via toml, sources via tree-sitter).
     plan-file/         Driven adapter: PlanStore as cutaway.json in the root of
@@ -72,9 +74,9 @@ crates/
 - The GUI receives capabilities (`ProjectOpener`, the opened project's
   `PlanStore`) from the composition root; it never constructs adapters
   itself.
-- Nothing outside `crates/adapters/analyzer-rust` knows which languages exist. A new
-  language = a new analyzer crate under `crates/adapters/` + wiring in the
-  composition root.
+- Only the analyzer crates under `crates/adapters/` know which languages
+  exist, one language each. A new language = a new analyzer crate under
+  `crates/adapters/` + wiring in the composition root.
 - Element ids are deterministic and derive only from source paths, kinds,
   and names (`project:<name>`, `package:<name>`, `<path>`,
   `<path>#<kind>:<name>`), so graphs of different versions align.

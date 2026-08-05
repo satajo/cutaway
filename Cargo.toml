@@ -6,6 +6,7 @@ members = [
   "crates/comparison",
   "crates/lenses",
   "crates/planning",
+  "crates/adapters/analyzer-go",
   "crates/adapters/analyzer-rust",
   "crates/adapters/gui",
   "crates/adapters/plan-file",
@@ -26,6 +27,7 @@ cutaway-inspection = { path = "crates/inspection" }
 cutaway-comparison = { path = "crates/comparison" }
 cutaway-lenses = { path = "crates/lenses" }
 cutaway-planning = { path = "crates/planning" }
+cutaway-analyzer-go = { path = "crates/adapters/analyzer-go" }
 cutaway-analyzer-rust = { path = "crates/adapters/analyzer-rust" }
 cutaway-gui = { path = "crates/adapters/gui" }
 cutaway-plan-file = { path = "crates/adapters/plan-file" }
@@ -45,6 +47,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "1.1"
 tree-sitter = "0.26"
+tree-sitter-go = "0.25"
 tree-sitter-rust = "0.24"
 
 [workspace.lints.clippy]
