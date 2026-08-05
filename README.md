@@ -19,9 +19,10 @@ disk and talks to nothing else.
 
 ## Status
 
-Early but usable. The application opens a git repository, inspects the Rust
-sources of its `HEAD` commit (Cargo manifests, module structure, imports),
-and draws the boundary lens at an adjustable level of detail: packages, the
+Early but usable. The application opens a git repository, inspects the
+Rust, Go, TypeScript, and JavaScript sources of its `HEAD` commit (package
+manifests, module structure, imports), and draws the boundary lens at an
+adjustable level of detail: packages, the
 modules within them, or the individual items within the modules, as nested
 boxes with the dependencies that cross boundary lines as arrows. Arrows
 attach to the nearest visible box, framed boxes included: an arrow that ends

@@ -8,6 +8,7 @@ use std::path::Path;
 
 use cutaway_analyzer_go::GoSourceAnalyzer;
 use cutaway_analyzer_rust::RustSourceAnalyzer;
+use cutaway_analyzer_typescript::TypeScriptSourceAnalyzer;
 use cutaway_inspection::inspect;
 use cutaway_lenses::{Cut, Detail, boundary_view};
 use cutaway_source_git::GitSourceTree;
@@ -21,7 +22,15 @@ fn the_boundary_lens_shows_cutaways_own_packages() {
         .expect("the crate sits two levels below the repository root");
 
     let tree = GitSourceTree::open(repository).unwrap();
-    let graph = inspect(&tree, &[&RustSourceAnalyzer, &GoSourceAnalyzer]).unwrap();
+    let graph = inspect(
+        &tree,
+        &[
+            &RustSourceAnalyzer,
+            &GoSourceAnalyzer,
+            &TypeScriptSourceAnalyzer,
+        ],
+    )
+    .unwrap();
 
     let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
     let packages: Vec<&str> = view

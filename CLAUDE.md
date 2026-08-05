@@ -53,6 +53,9 @@ crates/
                        (go.mod manifests, sources via tree-sitter).
     analyzer-rust/     Driven adapter: Rust ecosystem as a SourceAnalyzer
                        (Cargo manifests via toml, sources via tree-sitter).
+    analyzer-typescript/ Driven adapter: TypeScript and JavaScript ecosystem as a
+                       SourceAnalyzer (package.json via serde_json, sources via
+                       tree-sitter).
     plan-file/         Driven adapter: PlanStore as cutaway.json in the root of
                        the planned repository. The format is the agent contract.
     source-git/        Driven adapter: git repository as a SourceTree (gix).

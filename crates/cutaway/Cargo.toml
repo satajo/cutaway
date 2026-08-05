@@ -16,6 +16,7 @@ cutaway-plan-file.workspace = true
 cutaway-planning.workspace = true
 cutaway-analyzer-go.workspace = true
 cutaway-analyzer-rust.workspace = true
+cutaway-analyzer-typescript.workspace = true
 
 [dev-dependencies]
 cutaway-architecture.workspace = true

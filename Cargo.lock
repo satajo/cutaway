@@ -1070,6 +1070,7 @@ version = "0.1.0"
 dependencies = [
  "cutaway-analyzer-go",
  "cutaway-analyzer-rust",
+ "cutaway-analyzer-typescript",
  "cutaway-architecture",
  "cutaway-gui",
  "cutaway-inspection",
@@ -1100,6 +1101,18 @@ dependencies = [
  "toml",
  "tree-sitter",
  "tree-sitter-rust",
+]
+
+[[package]]
+name = "cutaway-analyzer-typescript"
+version = "0.1.0"
+dependencies = [
+ "cutaway-architecture",
+ "cutaway-inspection",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tree-sitter",
+ "tree-sitter-typescript",
 ]
 
 [[package]]
@@ -5296,6 +5309,16 @@ name = "tree-sitter-rust"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
 dependencies = [
  "cc",
  "tree-sitter-language",

@@ -8,6 +8,7 @@ members = [
   "crates/planning",
   "crates/adapters/analyzer-go",
   "crates/adapters/analyzer-rust",
+  "crates/adapters/analyzer-typescript",
   "crates/adapters/gui",
   "crates/adapters/plan-file",
   "crates/adapters/source-git",
@@ -29,6 +30,7 @@ cutaway-lenses = { path = "crates/lenses" }
 cutaway-planning = { path = "crates/planning" }
 cutaway-analyzer-go = { path = "crates/adapters/analyzer-go" }
 cutaway-analyzer-rust = { path = "crates/adapters/analyzer-rust" }
+cutaway-analyzer-typescript = { path = "crates/adapters/analyzer-typescript" }
 cutaway-gui = { path = "crates/adapters/gui" }
 cutaway-plan-file = { path = "crates/adapters/plan-file" }
 cutaway-source-git = { path = "crates/adapters/source-git" }
@@ -49,6 +51,7 @@ toml = "1.1"
 tree-sitter = "0.26"
 tree-sitter-go = "0.25"
 tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

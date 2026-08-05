@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use cutaway_analyzer_go::GoSourceAnalyzer;
 use cutaway_analyzer_rust::RustSourceAnalyzer;
+use cutaway_analyzer_typescript::TypeScriptSourceAnalyzer;
 use cutaway_gui::OpenedProject;
 use cutaway_inspection::inspect;
 use cutaway_plan_file::JsonPlanStore;
@@ -16,8 +17,15 @@ use cutaway_source_git::GitSourceTree;
 fn main() -> ExitCode {
     let opener = Box::new(|path: &Path| {
         let tree = GitSourceTree::open(path).map_err(|error| error.to_string())?;
-        let graph = inspect(&tree, &[&RustSourceAnalyzer, &GoSourceAnalyzer])
-            .map_err(|error| error.to_string())?;
+        let graph = inspect(
+            &tree,
+            &[
+                &RustSourceAnalyzer,
+                &GoSourceAnalyzer,
+                &TypeScriptSourceAnalyzer,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
         let store = JsonPlanStore::for_repository(path);
         let plan = store
             .load()
