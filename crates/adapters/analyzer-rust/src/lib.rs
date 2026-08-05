@@ -10,7 +10,9 @@
 //!
 //! Modules are files: the module tree of a package derives from the `src/`
 //! file layout (`foo.rs` or `foo/mod.rs`), and inline `mod` blocks stay
-//! items of their enclosing file. The crate root file is the package's own
+//! items of their enclosing file. Only declarations with a visibility
+//! modifier become items: a bare declaration is the module's internals, and
+//! a path that names one lands on the module. The crate root file is the package's own
 //! code rather than a module of its own: its declarations are the package's
 //! items, its child modules are the package's modules, and an import that
 //! resolves to it lands on the package. Imports resolve down to the deepest
@@ -37,7 +39,7 @@ use cutaway_inspection::ports::source_analyzer::{
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
-use crate::declarations::DeclarationIndex;
+use crate::declarations::{Declaration, DeclarationIndex};
 use crate::imports::Import;
 use crate::manifest::DiscoveredPackage;
 use crate::modules::{ModuleCatalog, ModuleSurface, ResolvedTarget};
@@ -48,7 +50,7 @@ pub struct RustSourceAnalyzer;
 /// What one source file contributes before import resolution.
 struct ParsedFile {
     path: SourcePath,
-    declarations: Vec<Element>,
+    declarations: Vec<Declaration>,
     imports: Vec<Import>,
     /// Qualified paths the file mentions outside its `use` declarations.
     references: Vec<Vec<String>>,
@@ -118,8 +120,13 @@ impl SourceAnalyzer for RustSourceAnalyzer {
                 .module_of(&file.path)
                 .expect("the first pass kept only cataloged files");
             for declaration in file.declarations {
+                // Only the module's surface joins the architecture; bare
+                // declarations are its internals.
+                if !declaration.public {
+                    continue;
+                }
                 elements.push(AnalyzedElement {
-                    element: declaration,
+                    element: declaration.element,
                     parent: Some(module.id()),
                 });
             }

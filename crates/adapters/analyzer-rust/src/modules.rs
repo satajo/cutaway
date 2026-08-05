@@ -393,7 +393,14 @@ impl ModuleCatalog {
             return Resolution::claimed(ResolvedTarget::Element(module.id()));
         };
         if let Some(item) = surface.declarations.declaration(&module.path, name) {
-            return Resolution::claimed(ResolvedTarget::Element(item.clone()));
+            // A private item is the module's internals: what names it
+            // depends on the module.
+            let target = if item.public {
+                item.id.clone()
+            } else {
+                module.id()
+            };
+            return Resolution::claimed(ResolvedTarget::Element(target));
         }
         // Re-exports may point at each other, directly or in a ring. Taking
         // each (module, name) hop at most once along a chain ends such a ring

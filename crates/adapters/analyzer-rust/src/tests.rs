@@ -430,7 +430,7 @@ fn top_level_declarations_belong_to_their_module() {
         ("crates/b/src/lib.rs", "mod api;\n"),
         (
             "crates/b/src/api.rs",
-            "pub fn connect() {}\npub struct Session;\nmod internal {}\n",
+            "pub fn connect() {}\npub struct Session;\npub mod inner {}\n",
         ),
     ]);
     let declared: Vec<_> = structure
@@ -449,8 +449,39 @@ fn top_level_declarations_belong_to_their_module() {
         [
             ("connect".to_owned(), ElementKind::Function),
             ("Session".to_owned(), ElementKind::Type),
-            ("internal".to_owned(), ElementKind::Module),
+            ("inner".to_owned(), ElementKind::Module),
         ]
+    );
+}
+
+#[test]
+fn declarations_without_a_visibility_modifier_stay_out_of_the_architecture() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        (
+            "crates/b/src/lib.rs",
+            "pub fn run() {}\nfn helper() {}\nstruct Secret;\nmod tests {}\n",
+        ),
+    ]);
+    let items: Vec<_> = structure
+        .elements
+        .iter()
+        .filter(|e| e.element.kind != ElementKind::Package)
+        .map(|e| e.element.name.as_str().to_owned())
+        .collect();
+    assert_eq!(items, ["run"]);
+}
+
+#[test]
+fn a_path_naming_a_private_item_lands_on_its_module() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        ("crates/a/src/lib.rs", "mod foo;\nfn secret() {}\n"),
+        ("crates/a/src/foo.rs", "use super::secret;\n"),
+    ]);
+    assert!(
+        dependencies(&structure)
+            .contains(&("crates/a/src/foo.rs".to_owned(), "package:a".to_owned()))
     );
 }
 

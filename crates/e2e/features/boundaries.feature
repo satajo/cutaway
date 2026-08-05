@@ -202,3 +202,15 @@ Feature: The boundary lens
     And the boundaries are viewed at "items" level
     Then the boundaries include "run"
     And a connection goes from "app" to "run"
+
+  Scenario: Item detail shows only what reaches beyond its module
+    Given a package "engine" at "crates/engine"
+    And a source file "crates/engine/src/lib.rs" containing:
+      """
+      pub fn run() {}
+      fn helper() {}
+      """
+    When the project is inspected
+    And the boundaries are viewed at "items" level
+    Then the boundaries include "run"
+    And the boundaries do not include "helper"
