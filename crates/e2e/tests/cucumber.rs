@@ -18,6 +18,9 @@ fn a_package(world: &mut CutawayWorld, name: String, dir: String) {
     );
 }
 
+// Only a dependency the code exercises appears in the picture, so the step
+// writes both the manifest declaration and a root source file that uses the
+// dependency. A scenario that states its own root file replaces the latter.
 #[given(expr = "a package {string} at {string} depending on {string}")]
 fn a_package_depending_on(world: &mut CutawayWorld, name: String, dir: String, dependency: String) {
     world.driver.add_source_file(
@@ -25,6 +28,10 @@ fn a_package_depending_on(world: &mut CutawayWorld, name: String, dir: String, d
         &format!(
             "[package]\nname = \"{name}\"\n\n[dependencies]\n{dependency} = {{ path = \"x\" }}\n"
         ),
+    );
+    world.driver.add_source_file(
+        &format!("{dir}/src/lib.rs"),
+        &format!("use {};\n", dependency.replace('-', "_")),
     );
 }
 

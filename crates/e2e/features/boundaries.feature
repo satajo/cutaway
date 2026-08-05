@@ -11,13 +11,27 @@ Feature: The boundary lens
   declarations are the package's items and its child modules sit directly
   inside the package.
 
-  Scenario: Package dependencies declared in manifests appear as connections
+  Scenario: A dependency between packages appears as a connection
     Given a package "app" at "crates/app" depending on "engine"
     And a package "engine" at "crates/engine"
     When the project is inspected
     And the boundaries are viewed at "packages" level
     Then the boundaries are "app, engine"
     And a connection goes from "app" to "engine"
+
+  Scenario: A manifest dependency no code exercises draws no connection
+    Given a source file "crates/app/Cargo.toml" containing:
+      """
+      [package]
+      name = "app"
+
+      [dependencies]
+      engine = { path = "../engine" }
+      """
+    And a package "engine" at "crates/engine"
+    When the project is inspected
+    And the boundaries are viewed at "packages" level
+    Then no connection goes from "app" to "engine"
 
   Scenario: Imports in code roll up to package connections
     Given a package "app" at "crates/app"
@@ -127,12 +141,6 @@ Feature: The boundary lens
   Scenario: A dependency on a whole boundary shows at every detail
     Given a package "app" at "crates/app" depending on "engine"
     And a package "engine" at "crates/engine"
-    And a source file "crates/app/src/lib.rs" containing:
-      """
-      """
-    And a source file "crates/engine/src/lib.rs" containing:
-      """
-      """
     When the project is inspected
     And the boundaries are viewed at "modules" level
     Then a connection goes from "app" to "engine"

@@ -64,11 +64,79 @@ fn packages_are_discovered_from_their_manifests() {
 }
 
 #[test]
-fn manifest_dependencies_link_workspace_packages_and_ignore_external_ones() {
+fn a_manifest_dependency_no_code_exercises_yields_no_relation() {
     let structure = analyze(&[MANIFEST_A, MANIFEST_B]);
-    assert_eq!(
-        dependencies(&structure),
-        [("package:a".to_owned(), "package:b-lib".to_owned())]
+    assert!(dependencies(&structure).is_empty());
+}
+
+#[test]
+fn a_qualified_path_in_a_function_body_witnesses_the_dependency() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        (
+            "crates/a/src/lib.rs",
+            "pub fn go() {\n    b_lib::util::init();\n}\n",
+        ),
+        ("crates/b/src/lib.rs", "pub mod util;\n"),
+        ("crates/b/src/util.rs", "pub fn init() {}\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "package:a".to_owned(),
+        "crates/b/src/util.rs#function:init".to_owned()
+    )));
+}
+
+#[test]
+fn a_qualified_path_in_a_type_position_witnesses_the_dependency() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        (
+            "crates/a/src/lib.rs",
+            "pub fn go(thing: b_lib::util::Thing) {\n    let _ = thing;\n}\n",
+        ),
+        ("crates/b/src/lib.rs", "pub mod util;\n"),
+        ("crates/b/src/util.rs", "pub struct Thing;\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "package:a".to_owned(),
+        "crates/b/src/util.rs#type:Thing".to_owned()
+    )));
+}
+
+#[test]
+fn a_qualified_path_to_a_child_module_witnesses_the_use_within_the_package() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        (
+            "crates/a/src/lib.rs",
+            "mod foo;\npub fn go() {\n    foo::helper();\n}\n",
+        ),
+        ("crates/a/src/foo.rs", "pub fn helper() {}\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "package:a".to_owned(),
+        "crates/a/src/foo.rs#function:helper".to_owned()
+    )));
+}
+
+#[test]
+fn a_qualified_macro_invocation_witnesses_the_package_it_names() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        (
+            "crates/a/src/lib.rs",
+            "pub fn go() {\n    b_lib::mac!();\n}\n",
+        ),
+        (
+            "crates/b/src/lib.rs",
+            "#[macro_export]\nmacro_rules! mac {\n    () => {};\n}\n",
+        ),
+    ]);
+    assert!(
+        dependencies(&structure).contains(&("package:a".to_owned(), "package:b-lib".to_owned()))
     );
 }
 

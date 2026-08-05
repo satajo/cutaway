@@ -2,10 +2,11 @@
 //! [`cutaway_inspection::ports::source_analyzer::SourceAnalyzer`] for Rust
 //! projects.
 //!
-//! The analyzer reads two kinds of truth and emits both:
-//! - Cargo manifests *declare* packages and their dependencies.
-//! - Source text *shows* modules, their declarations, and the dependencies
-//!   their `use` declarations actually exercise.
+//! Cargo manifests locate the packages; the source text alone witnesses
+//! what depends on what, through `use` declarations and every qualified
+//! path the code mentions. A dependency the manifest declares but nothing
+//! names produces no relation: the sources are the one truth about
+//! coupling.
 //!
 //! Modules are files: the module tree of a package derives from the `src/`
 //! file layout (`foo.rs` or `foo/mod.rs`), and inline `mod` blocks stay
@@ -49,6 +50,8 @@ struct ParsedFile {
     path: SourcePath,
     declarations: Vec<Element>,
     imports: Vec<Import>,
+    /// Qualified paths the file mentions outside its `use` declarations.
+    references: Vec<Vec<String>>,
 }
 
 impl SourceAnalyzer for RustSourceAnalyzer {
@@ -64,15 +67,6 @@ impl SourceAnalyzer for RustSourceAnalyzer {
                 element: package_element(package),
                 parent: enclosing_package(&packages, index).map(|p| package_id(&packages[p])),
             });
-            for dependency in &package.dependencies {
-                if let Some(target) = packages.iter().find(|p| &p.name == dependency) {
-                    relations.insert(Relation {
-                        from: package_id(package),
-                        to: package_id(target),
-                        kind: RelationKind::DependsOn,
-                    });
-                }
-            }
         }
 
         for module in catalog.modules() {
@@ -106,10 +100,12 @@ impl SourceAnalyzer for RustSourceAnalyzer {
             declaration_index.add(&file.path, &declarations);
             let imports = imports::declared(root, text);
             reexports.add(&file.path, &imports);
+            let references = imports::referenced(root, text);
             parsed.push(ParsedFile {
                 path: file.path.clone(),
                 declarations,
                 imports,
+                references,
             });
         }
 
@@ -127,8 +123,10 @@ impl SourceAnalyzer for RustSourceAnalyzer {
                     parent: Some(module.id()),
                 });
             }
-            for import in file.imports {
-                let Some(target) = catalog.resolve(module, &import.path, &packages, surface) else {
+            let imported = file.imports.iter().map(|import| import.path.as_slice());
+            let referenced = file.references.iter().map(Vec::as_slice);
+            for path in imported.chain(referenced) {
+                let Some(target) = catalog.resolve(module, path, &packages, surface) else {
                     continue;
                 };
                 let to = match target {

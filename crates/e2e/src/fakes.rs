@@ -16,11 +16,15 @@ pub struct InMemorySourceTree {
 }
 
 impl InMemorySourceTree {
+    /// One file per path: adding a path again replaces its contents, so a
+    /// later step refines what an earlier one laid down.
     pub fn add_file(&mut self, path: SourcePath, contents: impl Into<Vec<u8>>) {
-        self.files.push(SourceFile {
-            path,
-            contents: contents.into(),
-        });
+        let contents = contents.into();
+        if let Some(existing) = self.files.iter_mut().find(|file| file.path == path) {
+            existing.contents = contents;
+            return;
+        }
+        self.files.push(SourceFile { path, contents });
     }
 }
 

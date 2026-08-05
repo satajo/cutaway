@@ -1,5 +1,7 @@
-//! `use` declaration extraction: every name a file imports, the path that
-//! name points at, and whether the file re-exports it.
+//! Path extraction: every name a file imports through its `use`
+//! declarations, and every qualified path the rest of the file mentions.
+//! Both witness dependencies - code that writes `engine::physics::step()`
+//! depends on it whether or not a `use` brought the name in.
 
 /// One name a `use` declaration brings into its module.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,44 @@ pub fn declared(root: tree_sitter::Node<'_>, text: &str) -> Vec<Import> {
                 .map(move |leaf| leaf.into_import(reexport))
         })
         .collect()
+}
+
+/// Collects every qualified path the file mentions outside its `use`
+/// declarations: in expressions, type positions, attributes, and macro
+/// names. Paths inside macro arguments are token soup to the parser and
+/// stay unseen.
+///
+/// A collected path that is a strict prefix of another is dropped: the
+/// syntax tree nests a path inside every longer path over it, and the
+/// longest one witnesses the same dependency most precisely.
+pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    collect_referenced(root, text, &mut paths);
+    let all = paths.clone();
+    paths.retain(|path| {
+        !all.iter()
+            .any(|other| other.len() > path.len() && other[..path.len()] == path[..])
+    });
+    paths
+}
+
+fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Vec<String>>) {
+    match node.kind() {
+        // `use` paths carry binding and re-export semantics; `declared`
+        // reads them.
+        "use_declaration" => return,
+        "scoped_identifier" | "scoped_type_identifier" => {
+            out.extend(leaves_of(node, text).into_iter().map(|leaf| leaf.path));
+        }
+        _ => {}
+    }
+    // The walk descends into scoped paths too: their own path child only
+    // repeats a prefix (dropped above), while turbofish arguments hold
+    // genuinely new paths.
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_referenced(child, text, out);
+    }
 }
 
 fn collect_use_declarations<'tree>(

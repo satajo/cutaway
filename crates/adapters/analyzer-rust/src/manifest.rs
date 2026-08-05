@@ -1,4 +1,6 @@
-//! Cargo manifest reading: which packages exist and what they declare.
+//! Cargo manifest reading: which packages exist and where they live.
+//! Dependency declarations stay unread - the sources alone witness what a
+//! package depends on.
 
 use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
 use cutaway_inspection::ports::source_tree::SourceFile;
@@ -10,10 +12,6 @@ pub struct DiscoveredPackage {
     /// Directory of the manifest, `""` for the repository root, no trailing
     /// slash otherwise.
     pub dir: String,
-    /// Names of the crates the manifest depends on, across normal, dev, and
-    /// build dependencies. Renamed dependencies (`alias = { package = "x" }`)
-    /// contribute their real crate name.
-    pub dependencies: Vec<String>,
 }
 
 /// Finds every `Cargo.toml` that declares a `[package]`. A workspace-only
@@ -49,29 +47,8 @@ pub fn discover_packages(
                 .strip_suffix("Cargo.toml")
                 .map_or("", |d| d.trim_end_matches('/'))
                 .to_owned(),
-            dependencies: declared_dependencies(&table),
         });
     }
     packages.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(packages)
-}
-
-fn declared_dependencies(table: &toml::Table) -> Vec<String> {
-    let mut dependencies = Vec::new();
-    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-        let Some(entries) = table.get(section).and_then(toml::Value::as_table) else {
-            continue;
-        };
-        for (alias, spec) in entries {
-            let name = spec
-                .as_table()
-                .and_then(|spec| spec.get("package"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or(alias);
-            dependencies.push(name.to_owned());
-        }
-    }
-    dependencies.sort();
-    dependencies.dedup();
-    dependencies
 }
