@@ -15,24 +15,6 @@
 //! containment - one holding the other - is the outer boundary's internal
 //! wiring, not architecture, and it is dropped from the picture.
 //!
-//! # A package filled by one frame
-//!
-//! A package whose whole visible content is one frame draws three boxes
-//! where a single boundary is at stake. That frame is therefore merged into
-//! the package: it leaves the picture, what it holds attaches to the
-//! package, and its own code speaks from the package itself. A frame with
-//! a visible boundary beside it stays, because there the frame tells one
-//! part of the package from another, and a package holding one boundary that
-//! frames nothing keeps that boundary, because a single box is what the
-//! reader came for. Only a boundary directly inside a package merges, and
-//! only one level deep: no chain of frames folds away.
-//!
-//! A merged frame is no boundary of the picture. It carries no detail of its
-//! own, [`Cut::expand`] and [`Cut::collapse`] refuse it, an override naming
-//! it opens nothing, and a dependency that names it as a whole attaches to
-//! the package that absorbed it, exactly as a dependency naming the package
-//! itself does.
-//!
 //! # A cut that is not uniform
 //!
 //! A [`Cut`] carries the detail of the picture as a whole together with an
@@ -269,7 +251,7 @@ pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryVie
             .get(&element.id)
             .is_some_and(|detail| detail.shows(element.kind))
     };
-    let standing: BTreeSet<ElementId> = graph
+    let visible: BTreeSet<ElementId> = graph
         .elements()
         .filter(|element| match &scoped {
             None => shown(element),
@@ -277,11 +259,6 @@ pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryVie
         })
         .map(|element| element.id.clone())
         .collect();
-    // A frame that fills its package alone leaves the picture before
-    // anything reads the visible set, so what it holds nests under the
-    // package and its own code attaches to the package itself.
-    let merged = merged_into_packages(graph, &parents, &standing);
-    let visible: BTreeSet<ElementId> = standing.difference(&merged).cloned().collect();
     let detail_within: BTreeMap<ElementId, Detail> = visible
         .iter()
         .map(|id| {
@@ -455,50 +432,6 @@ impl Scoped {
     fn touches(&self, relation: &Relation) -> bool {
         self.holds(&relation.from) || self.holds(&relation.to)
     }
-}
-
-/// The frames the picture merges into the package that holds them.
-///
-/// A package whose whole visible content is one frame draws three boxes
-/// where a single boundary is at stake: the package, the frame, and what the
-/// frame holds. The frame therefore leaves the visible set, so everything it
-/// holds attaches to the package and its own code speaks from the package
-/// itself. A frame with a visible boundary beside it stays: there the frame
-/// tells one part of the package from another.
-///
-/// Only a boundary directly inside a package merges, and only into that
-/// package. One containment level, so no chain of frames folds away and the
-/// reader keeps every level the sources put between the package and its
-/// content.
-fn merged_into_packages(
-    graph: &ArchitectureGraph,
-    parents: &BTreeMap<ElementId, ElementId>,
-    visible: &BTreeSet<ElementId>,
-) -> BTreeSet<ElementId> {
-    let mut children: BTreeMap<&ElementId, usize> = BTreeMap::new();
-    for id in visible {
-        if let Some(parent) = parents.get(id) {
-            *children.entry(parent).or_default() += 1;
-        }
-    }
-    let fills_a_package = |id: &ElementId| {
-        let Some(package) = parents.get(id) else {
-            return false;
-        };
-        // The package must stand in this picture. A picture scoped to the
-        // frame draws no package around it, and a boundary merges into
-        // nothing.
-        visible.contains(package)
-            && graph
-                .element(package)
-                .is_some_and(|element| element.kind == ElementKind::Package)
-            && children.get(package) == Some(&1)
-    };
-    visible
-        .iter()
-        .filter(|id| children.contains_key(*id) && fills_a_package(id))
-        .cloned()
-        .collect()
 }
 
 /// The boundaries above an element, nearest first.
@@ -738,9 +671,7 @@ mod tests {
     /// project ⊃ {package:a ⊃ {a/lib ⊃ a/util, a/beside},
     ///            package:b ⊃ {b/lib, b/beside}}, with a/util depending on
     /// b/lib. The two `beside` modules hold nothing and depend on nothing:
-    /// they stand beside the root modules so that each package holds more
-    /// than one boundary, which is what keeps those root modules boundaries
-    /// of their own.
+    /// they stand beside the deeper modules as plain structure.
     fn fixture() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         graph
@@ -986,144 +917,6 @@ mod tests {
         assert_eq!(
             view.unscoped,
             BTreeSet::from([relation("stray", "b/lib", RelationKind::DependsOn)])
-        );
-    }
-
-    /// project ⊃ {package:one ⊃ root ⊃ root/deep, package:two ⊃ two/lib},
-    /// where root is the whole visible content of package:one at modules
-    /// detail. root's own code depends on two/lib, and two/lib depends on
-    /// root as a whole.
-    fn filled_package() -> ArchitectureGraph {
-        let mut graph = ArchitectureGraph::new();
-        for (id, kind) in [
-            ("project", ElementKind::Project),
-            ("package:one", ElementKind::Package),
-            ("package:two", ElementKind::Package),
-            ("root", ElementKind::Module),
-            ("root/deep", ElementKind::Module),
-            ("two/lib", ElementKind::Module),
-        ] {
-            graph.add_element(element(id, kind)).unwrap();
-        }
-        for (from, to) in [
-            ("project", "package:one"),
-            ("project", "package:two"),
-            ("package:one", "root"),
-            ("root", "root/deep"),
-            ("package:two", "two/lib"),
-        ] {
-            graph
-                .add_relation(relation(from, to, RelationKind::Contains))
-                .unwrap();
-        }
-        for (from, to) in [("root", "two/lib"), ("two/lib", "root")] {
-            graph
-                .add_relation(relation(from, to, RelationKind::DependsOn))
-                .unwrap();
-        }
-        graph
-    }
-
-    #[test]
-    fn a_frame_that_fills_its_package_alone_leaves_the_picture() {
-        let view = boundary_view(&filled_package(), &Cut::uniform(Detail::Modules)).unwrap();
-
-        assert!(view.graph.element(&id("root")).is_none());
-        assert!(
-            view.graph
-                .relations()
-                .any(|r| *r == relation("package:one", "root/deep", RelationKind::Contains)),
-            "what the merged frame held stands directly inside the package"
-        );
-    }
-
-    #[test]
-    fn a_frame_with_a_boundary_beside_it_keeps_its_own_box() {
-        let view = boundary_view(&fixture(), &Cut::uniform(Detail::Modules)).unwrap();
-
-        assert!(view.graph.element(&id("a/lib")).is_some());
-        assert!(
-            view.graph
-                .relations()
-                .any(|r| *r == relation("a/lib", "a/util", RelationKind::Contains)),
-            "a frame that tells one part of its package from another stands"
-        );
-    }
-
-    #[test]
-    fn a_package_holding_one_boundary_with_nothing_inside_it_keeps_that_boundary() {
-        let view = boundary_view(&filled_package(), &Cut::uniform(Detail::Modules)).unwrap();
-
-        assert!(
-            view.graph.element(&id("two/lib")).is_some(),
-            "only a frame merges: a boundary the picture draws as one box is \
-             what the reader came for"
-        );
-    }
-
-    #[test]
-    fn the_own_code_of_a_merged_frame_attaches_to_the_package_itself() {
-        let view = boundary_view(&filled_package(), &Cut::uniform(Detail::Modules)).unwrap();
-
-        let rolled = relation("package:one", "two/lib", RelationKind::DependsOn);
-        assert_eq!(
-            view.provenance[&rolled],
-            BTreeSet::from([relation("root", "two/lib", RelationKind::DependsOn)])
-        );
-    }
-
-    #[test]
-    fn a_dependency_naming_a_merged_frame_attaches_to_the_package_that_absorbed_it() {
-        let view = boundary_view(&filled_package(), &Cut::uniform(Detail::Modules)).unwrap();
-
-        assert_eq!(
-            view.provenance[&relation("two/lib", "package:one", RelationKind::DependsOn)],
-            BTreeSet::from([relation("two/lib", "root", RelationKind::DependsOn)]),
-            "the merged frame's contents stand inside the package, so the \
-             package is what the dependency names"
-        );
-    }
-
-    #[test]
-    fn a_merged_frame_is_no_boundary_the_reader_opens_or_closes() {
-        let graph = filled_package();
-        let mut cut = Cut::uniform(Detail::Modules);
-        let view = boundary_view(&graph, &cut).unwrap();
-
-        assert!(!view.detail_within.contains_key(&id("root")));
-        assert!(!cut.expand(&view, &id("root")));
-        assert!(!cut.collapse(&view, &id("root")));
-        assert_eq!(cut, Cut::uniform(Detail::Modules));
-    }
-
-    #[test]
-    fn an_override_on_a_merged_frame_leaves_the_package_merged() {
-        let view = boundary_view(
-            &filled_package(),
-            &cut(Detail::Modules, [("root", Detail::Items)]),
-        )
-        .unwrap();
-
-        assert!(view.graph.element(&id("root")).is_none());
-        assert!(
-            view.graph
-                .relations()
-                .any(|r| *r == relation("package:one", "root/deep", RelationKind::Contains)),
-            "a boundary the picture does not draw is no boundary to open"
-        );
-    }
-
-    #[test]
-    fn a_picture_scoped_to_a_package_merges_the_frame_that_fills_it() {
-        let view = boundary_view(
-            &filled_package(),
-            &scoped(Detail::Modules, "package:one", []),
-        )
-        .unwrap();
-
-        assert_eq!(
-            drawn(&view),
-            ids(["package:one", "root/deep", "package:two"])
         );
     }
 

@@ -6,10 +6,10 @@ Feature: The boundary lens
   and boundaries with visible children alike. A connection that ends at a
   boundary's border speaks about the boundary's own code or the boundary as
   a whole; the connections into its parts end at the parts. What passes
-  between a boundary and its own contents stays inside it. A package whose
-  whole content sits in one boundary shows that boundary's parts directly,
-  without a box around them that says nothing the package does not already
-  say.
+  between a boundary and its own contents stays inside it. A package's root
+  source file is the package's own code, not a boundary of its own: its
+  declarations are the package's items and its child modules sit directly
+  inside the package.
 
   Scenario: Package dependencies declared in manifests appear as connections
     Given a package "app" at "crates/app" depending on "engine"
@@ -59,9 +59,10 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "modules" level
-    Then a connection goes from "crate" to "engine"
+    Then a connection goes from "app" to "engine"
+    And no connection goes from "wiring" to "engine"
 
-  Scenario: A package whose whole content sits in one boundary shows its parts directly
+  Scenario: The root source file's modules sit directly inside the package
     Given a package "engine" at "crates/engine"
     And a source file "crates/engine/src/lib.rs" containing:
       """
@@ -82,7 +83,7 @@ Feature: The boundary lens
     And the boundary "engine" contains "physics"
     And the boundary "engine" contains "render"
 
-  Scenario: A boundary with another beside it keeps its own box
+  Scenario: An integration test file keeps a box of its own beside the modules
     Given a package "engine" at "crates/engine"
     And a source file "crates/engine/src/lib.rs" containing:
       """
@@ -98,9 +99,9 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed at "modules" level
-    Then the boundaries include "crate"
-    And the boundary "engine" contains "crate"
-    And the boundary "crate" contains "physics"
+    Then the boundaries do not include "crate"
+    And the boundary "engine" contains "physics"
+    And the boundary "engine" contains "tests/behaviour.rs"
 
   Scenario: What passes between a boundary and its own contents stays inside it
     Given a package "engine" at "crates/engine"
@@ -176,8 +177,7 @@ Feature: The boundary lens
     And the boundaries are viewed at "modules" level
     Then a connection goes from "app" to "engine"
     When the boundary "engine" is collapsed
-    Then the boundaries do not include "crate"
-    And a connection goes from "app" to "engine"
+    Then a connection goes from "app" to "engine"
 
   Scenario: Item detail exposes individual declarations
     Given a package "app" at "crates/app" depending on "engine"
@@ -193,4 +193,4 @@ Feature: The boundary lens
     When the project is inspected
     And the boundaries are viewed at "items" level
     Then the boundaries include "run"
-    And a connection goes from "crate" to "run"
+    And a connection goes from "app" to "run"

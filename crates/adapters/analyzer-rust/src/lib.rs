@@ -9,9 +9,12 @@
 //!
 //! Modules are files: the module tree of a package derives from the `src/`
 //! file layout (`foo.rs` or `foo/mod.rs`), and inline `mod` blocks stay
-//! items of their enclosing file. Imports resolve down to the deepest file
-//! module that exists, and one segment further onto a top-level declaration
-//! of that module when the path continues. A module that re-exports the
+//! items of their enclosing file. The crate root file is the package's own
+//! code rather than a module of its own: its declarations are the package's
+//! items, its child modules are the package's modules, and an import that
+//! resolves to it lands on the package. Imports resolve down to the deepest
+//! file module that exists, and one segment further onto a top-level
+//! declaration of that module when the path continues. A module that re-exports the
 //! named item instead of declaring it forwards the import onwards, so
 //! facades (`pub use element::Element;`) resolve to the item behind them.
 //! Targets outside the project (std, third-party crates) are not part of
@@ -73,8 +76,11 @@ impl SourceAnalyzer for RustSourceAnalyzer {
         }
 
         for module in catalog.modules() {
+            let Some(element) = module.element() else {
+                continue;
+            };
             elements.push(AnalyzedElement {
-                element: module.element(),
+                element,
                 parent: catalog.parent_of(module, &packages),
             });
         }

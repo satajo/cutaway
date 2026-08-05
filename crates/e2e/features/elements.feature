@@ -32,7 +32,8 @@ Feature: Planning whole elements
   Scenario: A planned removal reaches everything inside the boundary
     When the removal of "model" is planned
     And the boundary "model" is expanded
-    Then the plan marks "crate" for removal
+    And the boundary "model" is expanded
+    Then the plan marks "run" for removal
 
   Scenario: Restoring a planned removal clears the marks
     When the removal of "model" is planned

@@ -106,11 +106,6 @@ fn help(ui: &mut egui::Ui) {
          parts. What passes between a boundary and its own contents stays inside it.",
     );
     ui.label(
-        "A package whose whole content sits in one boundary shows that boundary's \
-         parts directly, without a box around them that says nothing the package does \
-         not already say.",
-    );
-    ui.label(
         "Double-click a boundary to open it one level deeper than the rest of the \
          picture; select it to expand or collapse it from here.",
     );

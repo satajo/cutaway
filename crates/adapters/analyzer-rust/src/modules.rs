@@ -7,6 +7,13 @@
 //! outside `src/` (tests, benches, examples, `build.rs`) are crate roots of
 //! their own, contained directly by the package. Files outside every package
 //! attach to the project root.
+//!
+//! The crate root is the package's own code, not a module of its own: to
+//! every consumer the package and its root namespace are one boundary, named
+//! by the package. The root file therefore dissolves into the package - it
+//! is no element, its declarations are the package's items, its child
+//! modules are the package's modules, and a path that resolves to it lands
+//! on the package.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,28 +30,42 @@ use crate::reexports::ReexportTable;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     path: SourcePath,
+    /// The element this file speaks as: its own path, or the package for a
+    /// crate root that dissolves into it.
+    id: ElementId,
     /// Index into the discovered packages; None for files outside every
     /// package.
     package: Option<usize>,
     /// The logical module path within the package's `src/` tree
     /// (`[]` = crate root); None for files that are crate roots of their own.
     segments: Option<Vec<String>>,
-    /// Human-facing name: the `::`-joined module path, or the file path
-    /// relative to its package for standalone crate roots.
+    /// Human-facing name: the `::`-joined module path, the package name for
+    /// a crate root, or the file path relative to its package for standalone
+    /// crate roots.
     name: String,
 }
 
 impl Module {
     pub fn id(&self) -> ElementId {
-        ElementId::new(self.path.as_str()).expect("a source path is never empty")
+        self.id.clone()
     }
 
-    pub fn element(&self) -> Element {
-        Element {
+    /// The module element this file contributes, and None for a crate root:
+    /// that file dissolves into its package, which is an element already.
+    pub fn element(&self) -> Option<Element> {
+        if self.is_crate_root() {
+            return None;
+        }
+        Some(Element {
             id: self.id(),
             name: ElementName::new(&self.name).expect("a module name is never empty"),
             kind: ElementKind::Module,
-        }
+        })
+    }
+
+    /// Whether this file is the root of its package's `src/` module tree.
+    fn is_crate_root(&self) -> bool {
+        self.segments.as_ref().is_some_and(Vec::is_empty)
     }
 }
 
@@ -155,9 +176,18 @@ impl ModuleCatalog {
             });
 
             let name = match &segments {
-                Some(s) if s.is_empty() => "crate".to_owned(),
+                Some(s) if s.is_empty() => packages
+                    [package.expect("a src/ tree lies within a package")]
+                .name
+                .clone(),
                 Some(s) => s.join("::"),
                 None => relative.to_owned(),
+            };
+            let id = match &segments {
+                Some(s) if s.is_empty() => {
+                    package_id(&packages[package.expect("a src/ tree lies within a package")])
+                }
+                _ => ElementId::new(path).expect("a source path is never empty"),
             };
 
             let index = catalog.modules.len();
@@ -177,6 +207,7 @@ impl ModuleCatalog {
             catalog.by_path.insert(file.path.clone(), index);
             catalog.modules.push(Module {
                 path: file.path.clone(),
+                id,
                 package,
                 segments,
                 name,
@@ -194,7 +225,8 @@ impl ModuleCatalog {
     }
 
     /// The containing element of a module: the nearest ancestor module in the
-    /// `src/` tree, else its package, else nothing (the project root).
+    /// `src/` tree - the package itself when that ancestor is the crate root -
+    /// else its package, else nothing (the project root).
     pub fn parent_of(&self, module: &Module, packages: &[DiscoveredPackage]) -> Option<ElementId> {
         if let (Some(package), Some(segments)) = (module.package, module.segments.as_ref()) {
             let mut prefix = segments.clone();

@@ -34,14 +34,19 @@ Feature: Planning on the boundary view
       """
     And a source file "crates/model/src/lib.rs" containing:
       """
+      mod runner;
+      pub use runner::run;
+      """
+    And a source file "crates/model/src/runner.rs" containing:
+      """
       pub fn run() {}
       """
     When the project is inspected
     And the boundaries are viewed at "packages" level
     And the connection from "viewer" to "model" is severed
     And the boundary "model" is expanded
-    Then a connection goes from "viewer" to "crate"
-    And the plan marks the connection from "viewer" to "crate" for removal
+    Then a connection goes from "viewer" to "runner"
+    And the plan marks the connection from "viewer" to "runner" for removal
     And the saved plan equals the working plan
 
   Scenario: A drawn dependency stays visible when the picture closes around it

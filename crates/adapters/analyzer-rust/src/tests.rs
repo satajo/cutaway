@@ -81,16 +81,42 @@ fn the_module_tree_follows_the_src_file_layout() {
         ("crates/a/src/foo/bar.rs", "pub struct Baz;\n"),
     ]);
     assert_eq!(
-        parent_of(&structure, "crates/a/src/lib.rs"),
-        Some("package:a".to_owned())
-    );
-    assert_eq!(
         parent_of(&structure, "crates/a/src/foo.rs"),
-        Some("crates/a/src/lib.rs".to_owned())
+        Some("package:a".to_owned())
     );
     assert_eq!(
         parent_of(&structure, "crates/a/src/foo/bar.rs"),
         Some("crates/a/src/foo.rs".to_owned())
+    );
+}
+
+#[test]
+fn the_crate_root_dissolves_into_its_package() {
+    let structure = analyze(&[MANIFEST_B, ("crates/b/src/lib.rs", "pub struct Session;\n")]);
+    assert!(
+        structure
+            .elements
+            .iter()
+            .all(|e| e.element.id.as_str() != "crates/b/src/lib.rs"),
+        "the crate root is no element of its own"
+    );
+    assert_eq!(
+        parent_of(&structure, "crates/b/src/lib.rs#type:Session"),
+        Some("package:b-lib".to_owned()),
+        "the crate root's declarations are the package's items"
+    );
+}
+
+#[test]
+fn an_import_resolving_to_the_crate_root_lands_on_the_package() {
+    let structure = analyze(&[
+        ("crates/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+        MANIFEST_B,
+        ("crates/a/src/lib.rs", "use b_lib::Undeclared;\n"),
+        ("crates/b/src/lib.rs", ""),
+    ]);
+    assert!(
+        dependencies(&structure).contains(&("package:a".to_owned(), "package:b-lib".to_owned()))
     );
 }
 
@@ -106,7 +132,7 @@ fn use_crate_paths_resolve_onto_the_declared_item() {
         ("crates/a/src/foo/bar.rs", "pub struct Baz;\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/a/src/foo/bar.rs#type:Baz".to_owned()
     )));
 }
@@ -122,10 +148,10 @@ fn an_import_of_an_undeclared_name_stops_at_the_deepest_file_module() {
         ("crates/a/src/foo.rs", "pub mod bar;\n"),
         ("crates/a/src/foo/bar.rs", "pub use other::Reexported;\n"),
     ]);
-    assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
-        "crates/a/src/foo/bar.rs".to_owned()
-    )));
+    assert!(
+        dependencies(&structure)
+            .contains(&("package:a".to_owned(), "crates/a/src/foo/bar.rs".to_owned()))
+    );
 }
 
 #[test]
@@ -144,7 +170,7 @@ fn an_import_through_a_facade_reexport_resolves_onto_the_declared_item() {
         ),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/b/src/element.rs#type:Element".to_owned()
     )));
 }
@@ -162,7 +188,7 @@ fn a_renamed_reexport_resolves_onto_the_item_it_forwards_to() {
         ("crates/b/src/inner.rs", "pub struct Thing;\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/b/src/inner.rs#type:Thing".to_owned()
     )));
 }
@@ -184,7 +210,7 @@ fn a_chain_of_reexports_resolves_onto_the_item_at_its_end() {
         ("crates/b/src/middle/deep.rs", "pub struct Thing;\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/b/src/middle/deep.rs#type:Thing".to_owned()
     )));
 }
@@ -199,10 +225,10 @@ fn reexports_pointing_at_each_other_stop_at_the_module_closing_the_cycle() {
         ("crates/b/src/one.rs", "pub use crate::two::Thing;\n"),
         ("crates/b/src/two.rs", "pub use crate::one::Thing;\n"),
     ]);
-    assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
-        "crates/b/src/one.rs".to_owned()
-    )));
+    assert!(
+        dependencies(&structure)
+            .contains(&("package:a".to_owned(), "crates/b/src/one.rs".to_owned()))
+    );
 }
 
 #[test]
@@ -215,7 +241,7 @@ fn a_wildcard_reexport_forwards_a_name_its_module_does_not_declare() {
         ("crates/b/src/inner.rs", "pub struct Thing;\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/b/src/inner.rs#type:Thing".to_owned()
     )));
 }
@@ -230,12 +256,9 @@ fn a_private_use_keeps_the_name_out_of_the_modules_surface() {
         ("crates/b/src/inner.rs", "pub struct Thing;\n"),
     ]);
     let dependencies = dependencies(&structure);
-    assert!(dependencies.contains(&(
-        "crates/a/src/lib.rs".to_owned(),
-        "crates/b/src/lib.rs".to_owned()
-    )));
+    assert!(dependencies.contains(&("package:a".to_owned(), "package:b-lib".to_owned())));
     assert!(!dependencies.contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/b/src/inner.rs#type:Thing".to_owned()
     )));
 }
@@ -248,7 +271,7 @@ fn a_path_starting_at_an_item_of_the_importing_module_resolves_onto_it() {
         ("crates/a/src/foo.rs", "pub struct Bar;\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/a/src/foo.rs#type:Bar".to_owned()
     )));
 }
@@ -267,7 +290,7 @@ fn an_import_into_an_inline_module_stops_at_that_module() {
         ),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/a/src/foo.rs#module:inner".to_owned()
     )));
 }
@@ -282,7 +305,7 @@ fn use_of_another_workspace_package_resolves_into_its_declarations() {
         ("crates/b/src/util.rs", "pub struct Thing;\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs".to_owned(),
+        "package:a".to_owned(),
         "crates/b/src/util.rs#type:Thing".to_owned()
     )));
 }
@@ -336,8 +359,9 @@ fn std_and_third_party_imports_stay_outside_the_architecture() {
 fn top_level_declarations_belong_to_their_module() {
     let structure = analyze(&[
         MANIFEST_B,
+        ("crates/b/src/lib.rs", "mod api;\n"),
         (
-            "crates/b/src/lib.rs",
+            "crates/b/src/api.rs",
             "pub fn connect() {}\npub struct Session;\nmod internal {}\n",
         ),
     ]);
@@ -348,7 +372,7 @@ fn top_level_declarations_belong_to_their_module() {
             e.parent
                 .as_ref()
                 .map(cutaway_architecture::ElementId::as_str)
-                == Some("crates/b/src/lib.rs")
+                == Some("crates/b/src/api.rs")
         })
         .map(|e| (e.element.name.as_str().to_owned(), e.element.kind))
         .collect();
