@@ -4,8 +4,13 @@
 //! In Go the unit of encapsulation is the directory, not the file: the files
 //! of one directory share a namespace, compile together, and are imported
 //! together under one path. A directory that directly holds `.go` files is
-//! therefore one Go package and one module element; the individual files are
-//! no boundary and no element.
+//! therefore one Go package and one module element.
+//!
+//! Within that boundary the files still carry the internal organization of
+//! the package, so a directory of several files gives each file a module
+//! element of its own, named by the file stem. A directory of one file has no
+//! internal organization to show: that file dissolves into the directory, the
+//! way the module root directory dissolves into its package.
 //!
 //! The module root directory is the module's own code, not a directory of
 //! its own: to every importer the module and its root namespace are one
@@ -66,6 +71,36 @@ impl Directory {
     }
 }
 
+/// One buildable `.go` file, placed in its directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoFile {
+    /// Index into the catalog's directories that holds this file.
+    directory: usize,
+    /// The element this file's code speaks as: its own module among several
+    /// files, or the directory it dissolves into when it is the only one.
+    id: ElementId,
+    /// The file stem, and None for a file that dissolves into its directory.
+    name: Option<String>,
+}
+
+impl GoFile {
+    pub fn id(&self) -> ElementId {
+        self.id.clone()
+    }
+
+    /// The module element this file contributes, and None for the only file
+    /// of a directory: one file adds no grouping the directory does not
+    /// already show.
+    pub fn element(&self) -> Option<Element> {
+        let name = self.name.as_ref()?;
+        Some(Element {
+            id: self.id(),
+            name: ElementName::new(name).expect("a go file name has a non-empty stem"),
+            kind: ElementKind::Module,
+        })
+    }
+}
+
 /// Where an import path led: the directory, so that a qualified reference
 /// can ask what that directory declares, and the element that speaks for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,17 +112,16 @@ pub struct ResolvedImport {
 pub struct DirectoryCatalog {
     directories: Vec<Directory>,
     by_path: BTreeMap<String, usize>,
-    /// Source path -> directory index, for the files the go tool builds.
+    files: Vec<GoFile>,
+    /// Source path -> file index, for the files the go tool builds.
     by_file: BTreeMap<SourcePath, usize>,
 }
 
 impl DirectoryCatalog {
     pub fn build(modules: &[DiscoveredModule], files: &[SourceFile]) -> Self {
-        let mut catalog = Self {
-            directories: Vec::new(),
-            by_path: BTreeMap::new(),
-            by_file: BTreeMap::new(),
-        };
+        let mut directories: Vec<Directory> = Vec::new();
+        let mut by_path: BTreeMap<String, usize> = BTreeMap::new();
+        let mut placed: Vec<(SourcePath, usize)> = Vec::new();
         for file in files {
             let path = file.path.as_str();
             if file.path.extension() != Some("go") {
@@ -102,7 +136,7 @@ impl DirectoryCatalog {
                 continue;
             }
             let directory = parent_dir(path).to_owned();
-            let index = if let Some(index) = catalog.by_path.get(&directory) {
+            let index = if let Some(index) = by_path.get(&directory) {
                 *index
             } else {
                 let name = strip_dir(&directory, &modules[module].dir).to_owned();
@@ -111,31 +145,67 @@ impl DirectoryCatalog {
                 } else {
                     ElementId::new(&directory).expect("a non-root directory path is not empty")
                 };
-                let index = catalog.directories.len();
-                catalog.directories.push(Directory {
+                let index = directories.len();
+                directories.push(Directory {
                     path: directory.clone(),
                     module,
                     id,
                     name,
                 });
-                catalog.by_path.insert(directory, index);
+                by_path.insert(directory, index);
                 index
             };
-            catalog.by_file.insert(file.path.clone(), index);
+            placed.push((file.path.clone(), index));
         }
-        catalog
+
+        // Whether a file is a boundary of its own follows from how many files
+        // share its directory, so no file can be decided before all of them
+        // are placed.
+        let mut siblings = vec![0usize; directories.len()];
+        for (_, index) in &placed {
+            siblings[*index] += 1;
+        }
+        let mut catalog_files = Vec::new();
+        let mut by_file = BTreeMap::new();
+        for (path, index) in placed {
+            let name = (siblings[index] > 1).then(|| stem(path.as_str()).to_owned());
+            let id = if name.is_some() {
+                ElementId::new(path.as_str()).expect("a source path is never empty")
+            } else {
+                directories[index].id()
+            };
+            by_file.insert(path, catalog_files.len());
+            catalog_files.push(GoFile {
+                directory: index,
+                id,
+                name,
+            });
+        }
+
+        Self {
+            directories,
+            by_path,
+            files: catalog_files,
+            by_file,
+        }
     }
 
     pub fn directories(&self) -> impl Iterator<Item = &Directory> {
         self.directories.iter()
     }
 
-    /// The directory a file belongs to, and None for every file the go tool
-    /// leaves out of the build.
-    pub fn directory_of(&self, path: &SourcePath) -> Option<&Directory> {
-        self.by_file
-            .get(path)
-            .map(|index| &self.directories[*index])
+    pub fn files(&self) -> impl Iterator<Item = &GoFile> {
+        self.files.iter()
+    }
+
+    /// The file, and None for every file the go tool leaves out of the build.
+    pub fn file(&self, path: &SourcePath) -> Option<&GoFile> {
+        self.by_file.get(path).map(|index| &self.files[*index])
+    }
+
+    /// The directory a file belongs to.
+    pub fn directory_of(&self, file: &GoFile) -> &Directory {
+        &self.directories[file.directory]
     }
 
     /// The containing element of a directory: the nearest ancestor directory
@@ -250,6 +320,13 @@ fn is_outside_the_build(relative: &str) -> bool {
 
 fn parent_dir(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(head, _)| head)
+}
+
+/// The file name without the `.go` extension. The go tool builds no file
+/// whose name starts with `.` or `_`, so the stem is never empty here.
+fn stem(path: &str) -> &str {
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    file_name.strip_suffix(".go").unwrap_or(file_name)
 }
 
 fn join(dir: &str, rest: &str) -> String {

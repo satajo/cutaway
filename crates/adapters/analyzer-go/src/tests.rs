@@ -1,6 +1,6 @@
 use cutaway_architecture::{ElementId, ElementKind, RelationKind};
 use cutaway_inspection::ports::source_analyzer::{
-    SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
@@ -41,7 +41,16 @@ fn dependencies(structure: &SourceStructure) -> Vec<(String, String)> {
         .collect()
 }
 
-fn items_of(structure: &SourceStructure, parent: &str) -> Vec<(String, ElementKind)> {
+fn element(structure: &SourceStructure, id: &str) -> AnalyzedElement {
+    structure
+        .elements
+        .iter()
+        .find(|e| e.element.id.as_str() == id)
+        .expect("the element exists")
+        .clone()
+}
+
+fn children_of(structure: &SourceStructure, parent: &str) -> Vec<(String, ElementKind)> {
     structure
         .elements
         .iter()
@@ -258,7 +267,7 @@ fn exported_declarations_become_items_and_unexported_ones_stay_internals() {
         ),
     ]);
     assert_eq!(
-        items_of(&structure, "alpha/server"),
+        children_of(&structure, "alpha/server"),
         [
             ("Start".to_owned(), ElementKind::Function),
             ("Handler".to_owned(), ElementKind::Type),
@@ -279,7 +288,7 @@ fn methods_do_not_become_items() {
         ),
     ]);
     assert_eq!(
-        items_of(&structure, "alpha/server"),
+        children_of(&structure, "alpha/server"),
         [("Handler".to_owned(), ElementKind::Type)],
         "a method belongs to its type, not to the directory's namespace"
     );
@@ -300,15 +309,162 @@ fn test_files_declare_nothing_but_their_imports_witness_dependencies() {
         ),
     ]);
     assert!(
-        items_of(&structure, "alpha/server").is_empty(),
+        children_of(&structure, "alpha/server/server_test.go").is_empty(),
         "nothing a test file declares can be imported, so nothing of it is surface"
     );
     let dependencies = dependencies(&structure);
-    assert!(dependencies.contains(&("alpha/server".to_owned(), "alpha/internal/store".to_owned())));
     assert!(dependencies.contains(&(
-        "alpha/server".to_owned(),
+        "alpha/server/server_test.go".to_owned(),
+        "alpha/internal/store".to_owned()
+    )));
+    assert!(dependencies.contains(&(
+        "alpha/server/server_test.go".to_owned(),
         "alpha/internal/store/store.go#function:Open".to_owned()
     )));
+}
+
+#[test]
+fn a_test_file_is_a_module_among_the_files_of_its_directory() {
+    let structure = analyze(&[
+        ALPHA,
+        ("alpha/server/server.go", "package server\n"),
+        ("alpha/server/server_test.go", "package server\n"),
+    ]);
+    let test_file = element(&structure, "alpha/server/server_test.go");
+    assert_eq!(test_file.element.kind, ElementKind::Module);
+    assert_eq!(test_file.element.name.as_str(), "server_test");
+    assert_eq!(
+        test_file.parent.as_ref().map(ElementId::as_str),
+        Some("alpha/server"),
+        "a test file is built with its directory, so it counts among its files"
+    );
+}
+
+#[test]
+fn every_file_of_a_directory_of_several_is_a_module_within_it() {
+    let structure = analyze(&[
+        ALPHA,
+        ("alpha/internal/server/serve.go", "package server\n"),
+        ("alpha/internal/server/routes.go", "package server\n"),
+    ]);
+    for (id, name) in [
+        ("alpha/internal/server/serve.go", "serve"),
+        ("alpha/internal/server/routes.go", "routes"),
+    ] {
+        let file = element(&structure, id);
+        assert_eq!(file.element.kind, ElementKind::Module);
+        assert_eq!(file.element.name.as_str(), name);
+        assert_eq!(
+            file.parent.as_ref().map(ElementId::as_str),
+            Some("alpha/internal/server")
+        );
+    }
+}
+
+#[test]
+fn the_only_file_of_a_directory_dissolves_into_it() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/main.go",
+            "package main\n\nimport \"example.com/alpha/server\"\n",
+        ),
+        (
+            "alpha/server/server.go",
+            "package server\n\ntype Handler struct{}\n",
+        ),
+    ]);
+    assert!(
+        !has_element(&structure, "alpha/server/server.go"),
+        "one file groups nothing the directory does not already show"
+    );
+    assert_eq!(
+        children_of(&structure, "alpha/server"),
+        [("Handler".to_owned(), ElementKind::Type)],
+        "the lone file's declarations are the directory's items"
+    );
+    assert!(dependencies(&structure).contains(&(
+        "package:example.com/alpha".to_owned(),
+        "alpha/server".to_owned()
+    )));
+}
+
+#[test]
+fn an_exported_declaration_belongs_to_the_file_that_declares_it() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/server/serve.go",
+            "package server\n\nfunc Serve() {}\n",
+        ),
+        (
+            "alpha/server/routes.go",
+            "package server\n\ntype Router struct{}\n\nfunc route() {}\n",
+        ),
+    ]);
+    assert_eq!(
+        children_of(&structure, "alpha/server/serve.go"),
+        [("Serve".to_owned(), ElementKind::Function)]
+    );
+    assert_eq!(
+        children_of(&structure, "alpha/server/routes.go"),
+        [("Router".to_owned(), ElementKind::Type)]
+    );
+}
+
+#[test]
+fn an_import_witnesses_the_dependency_from_the_file_that_states_it() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/server/serve.go",
+            "package server\n\nimport \"example.com/alpha/internal/store\"\n\nvar _ = store.Open\n",
+        ),
+        ("alpha/server/routes.go", "package server\n"),
+        (
+            "alpha/internal/store/store.go",
+            "package store\n\nfunc Open() {}\n",
+        ),
+    ]);
+    let dependencies = dependencies(&structure);
+    assert!(dependencies.contains(&(
+        "alpha/server/serve.go".to_owned(),
+        "alpha/internal/store".to_owned()
+    )));
+    assert!(dependencies.contains(&(
+        "alpha/server/serve.go".to_owned(),
+        "alpha/internal/store/store.go#function:Open".to_owned()
+    )));
+    assert!(
+        !dependencies.iter().any(|(from, _)| from == "alpha/server"),
+        "the directory states no import of its own; its files do"
+    );
+}
+
+#[test]
+fn the_files_of_the_module_root_sit_directly_in_the_package() {
+    let structure = analyze(&[
+        ALPHA,
+        ("alpha/main.go", "package main\n"),
+        ("alpha/config.go", "package main\n\ntype Config struct{}\n"),
+    ]);
+    assert!(
+        !has_element(&structure, "alpha"),
+        "the module root directory is still no element of its own"
+    );
+    assert_eq!(
+        parent_of(&structure, "alpha/main.go"),
+        Some("package:example.com/alpha".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "alpha/config.go"),
+        Some("package:example.com/alpha".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "alpha/config.go#type:Config"),
+        Some("alpha/config.go".to_owned()),
+        "the root's declarations still belong to the file that declares them"
+    );
 }
 
 #[test]
@@ -506,7 +662,7 @@ func run(ctx interface{ Done() <-chan struct{} }) {
 "#;
     let structure = analyze(&[ALPHA, ("alpha/server/server.go", src)]);
     assert_eq!(
-        items_of(&structure, "alpha/server"),
+        children_of(&structure, "alpha/server"),
         [
             ("Number".to_owned(), ElementKind::Type),
             ("Set".to_owned(), ElementKind::Type),

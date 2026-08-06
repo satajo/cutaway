@@ -9,18 +9,23 @@
 //!
 //! Directories are the boundaries. Go compiles and imports a whole
 //! directory at once and lets its files share one namespace, so the
-//! directory is a module element and the file is none. The module root
-//! directory is the module's own code rather than a directory of its own:
-//! its declarations are the package's items, its subdirectories are the
-//! package's modules, and an import that resolves to it lands on the
+//! directory is a module element. Inside it the files carry the internal
+//! organization of the package: a directory of several files gives each file
+//! a module of its own, and a directory of one file lets that file dissolve
+//! into it, because one file groups nothing. The module root directory is
+//! the module's own code rather than a directory of its own: its
+//! declarations are the package's items, its subdirectories and files are
+//! the package's modules, and an import that resolves to it lands on the
 //! package. Imports resolve down to the deepest directory that exists, and a
 //! qualified name one step further onto a declaration of that directory.
 //!
 //! Capitalization decides what joins the architecture: an upper-case name
-//! leaves its directory and becomes an item, a lower-case one is the
-//! directory's internals, and a reference naming it lands on the directory.
-//! Test files declare nothing importable, so they contribute no items -
-//! their imports and references still witness what their directory needs.
+//! leaves its directory and becomes an item of the file that declares it, a
+//! lower-case one is the directory's internals, and a reference naming it
+//! lands on the directory. Every dependency starts at the file that states
+//! the import or the reference. Test files declare nothing importable, so
+//! they contribute no items - their imports and references still witness
+//! what they need.
 //! Targets outside the project (the standard library, third-party modules)
 //! are not part of the architecture and produce no relation.
 //!
@@ -60,25 +65,8 @@ impl SourceAnalyzer for GoSourceAnalyzer {
         let modules = manifest::discover_modules(files)?;
         let catalog = DirectoryCatalog::build(&modules, files);
 
-        let mut elements = Vec::new();
+        let mut elements = containment(&modules, &catalog);
         let mut relations = BTreeSet::new();
-
-        for (index, module) in modules.iter().enumerate() {
-            elements.push(AnalyzedElement {
-                element: module_element(module),
-                parent: enclosing_module(&modules, index).map(|m| module_id(&modules[m])),
-            });
-        }
-
-        for directory in catalog.directories() {
-            let Some(element) = directory.element() else {
-                continue;
-            };
-            elements.push(AnalyzedElement {
-                element,
-                parent: Some(catalog.parent_of(directory, &modules)),
-            });
-        }
 
         // Two passes over the sources: an import binds the package clause
         // name of its target and a reference resolves against that target's
@@ -87,7 +75,7 @@ impl SourceAnalyzer for GoSourceAnalyzer {
         let mut declaration_index = DeclarationIndex::default();
         let mut package_names = PackageNames::default();
         for file in files {
-            let Some(directory) = catalog.directory_of(&file.path) else {
+            let Some(directory) = catalog.file(&file.path).map(|f| catalog.directory_of(f)) else {
                 continue;
             };
             let text = std::str::from_utf8(&file.contents).map_err(|_| {
@@ -119,9 +107,12 @@ impl SourceAnalyzer for GoSourceAnalyzer {
         }
 
         for file in parsed {
-            let directory = catalog
-                .directory_of(&file.path)
-                .expect("the first pass kept only cataloged files");
+            // What the file's code speaks as: the file's own module, or the
+            // directory the file dissolved into.
+            let from = catalog
+                .file(&file.path)
+                .expect("the first pass kept only cataloged files")
+                .id();
             for declaration in file.declarations {
                 // Only the directory's surface joins the architecture;
                 // unexported declarations are its internals.
@@ -130,7 +121,7 @@ impl SourceAnalyzer for GoSourceAnalyzer {
                 }
                 elements.push(AnalyzedElement {
                     element: declaration.element,
-                    parent: Some(directory.id()),
+                    parent: Some(from.clone()),
                 });
             }
 
@@ -139,7 +130,7 @@ impl SourceAnalyzer for GoSourceAnalyzer {
                 let Some(target) = catalog.resolve(&import.path, &modules) else {
                     continue;
                 };
-                depend(&mut relations, &directory.id(), &target.id);
+                depend(&mut relations, &from, &target.id);
                 match &import.binding {
                     Binding::Alias(alias) => {
                         qualifiers.insert(alias.clone(), target);
@@ -168,7 +159,7 @@ impl SourceAnalyzer for GoSourceAnalyzer {
                     // directory.
                     _ => target.id.clone(),
                 };
-                depend(&mut relations, &directory.id(), &to);
+                depend(&mut relations, &from, &to);
             }
         }
 
@@ -179,8 +170,38 @@ impl SourceAnalyzer for GoSourceAnalyzer {
     }
 }
 
-/// Records a dependency unless it points at the element it starts from: a
-/// directory needing itself says nothing.
+/// Everything the structure of the sources alone says, before any file is
+/// read: the modules, the directories that hold code, and the files of every
+/// directory that holds more than one.
+fn containment(modules: &[DiscoveredModule], catalog: &DirectoryCatalog) -> Vec<AnalyzedElement> {
+    let mut elements = Vec::new();
+    for (index, module) in modules.iter().enumerate() {
+        elements.push(AnalyzedElement {
+            element: module_element(module),
+            parent: enclosing_module(modules, index).map(|m| module_id(&modules[m])),
+        });
+    }
+    for directory in catalog.directories() {
+        if let Some(element) = directory.element() {
+            elements.push(AnalyzedElement {
+                element,
+                parent: Some(catalog.parent_of(directory, modules)),
+            });
+        }
+    }
+    for file in catalog.files() {
+        if let Some(element) = file.element() {
+            elements.push(AnalyzedElement {
+                element,
+                parent: Some(catalog.directory_of(file).id()),
+            });
+        }
+    }
+    elements
+}
+
+/// Records a dependency unless it points at the element it starts from: an
+/// element needing itself says nothing.
 fn depend(relations: &mut BTreeSet<Relation>, from: &ElementId, to: &ElementId) {
     if from == to {
         return;
