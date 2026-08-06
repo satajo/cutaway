@@ -80,14 +80,6 @@ impl Path {
         }
         points
     }
-
-    /// The same run with every point placed elsewhere, e.g. carried from the
-    /// world into the view of a camera.
-    pub(crate) fn transformed(&self, place: impl Fn(Pos2) -> Pos2) -> Self {
-        Self {
-            legs: self.legs.iter().map(|leg| leg.map(&place)).collect(),
-        }
-    }
 }
 
 /// One edge as the canvas draws it.

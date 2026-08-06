@@ -15,11 +15,13 @@
 //! Layout measures the label the canvas paints, so both ask this module and
 //! no box is ever too narrow for its text.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
+use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind};
 use cutaway_planning::{ModificationKind, Plan};
 
+use crate::focus::Containment;
 use crate::glyph;
 
 /// The text of one box: the name, and the kind glyph in front of it when
@@ -69,8 +71,7 @@ impl Renames {
 /// containment resolves once and every box then answers directly.
 pub(crate) struct Labels<'a> {
     view: &'a ArchitectureGraph,
-    frame_of: BTreeMap<&'a ElementId, &'a ElementId>,
-    frames: BTreeSet<&'a ElementId>,
+    containment: Cow<'a, Containment>,
     renames: &'a Renames,
 }
 
@@ -82,18 +83,25 @@ impl<'a> Labels<'a> {
 
     /// The labels of a view with a plan's renames written into them.
     pub(crate) fn renaming(view: &'a ArchitectureGraph, renames: &'a Renames) -> Self {
-        let mut frame_of = BTreeMap::new();
-        let mut frames = BTreeSet::new();
-        for relation in view.relations() {
-            if relation.kind == RelationKind::Contains {
-                frame_of.insert(&relation.to, &relation.from);
-                frames.insert(&relation.from);
-            }
-        }
         Self {
             view,
-            frame_of,
-            frames,
+            containment: Cow::Owned(Containment::of(view)),
+            renames,
+        }
+    }
+
+    /// The same labels over a containment the caller already resolved for
+    /// this very view. A picture asks for its labels every frame and its
+    /// containment stands between rebuilds, so the labels borrow it instead
+    /// of walking the view again.
+    pub(crate) fn over(
+        view: &'a ArchitectureGraph,
+        containment: &'a Containment,
+        renames: &'a Renames,
+    ) -> Self {
+        Self {
+            view,
+            containment: Cow::Borrowed(containment),
             renames,
         }
     }
@@ -139,7 +147,7 @@ impl<'a> Labels<'a> {
         // Containment is a tree, but a walk that trusts that and meets a
         // cycle never ends; the seen set bounds it.
         let mut seen = BTreeSet::new();
-        let mut current = self.frame_of.get(id).copied();
+        let mut current = self.containment.parent(id);
         while let Some(frame) = current {
             if !seen.insert(frame) {
                 break;
@@ -151,7 +159,7 @@ impl<'a> Labels<'a> {
             if !project {
                 names.push(self.full_name(frame));
             }
-            current = self.frame_of.get(frame).copied();
+            current = self.containment.parent(frame);
         }
         names
     }
@@ -159,7 +167,7 @@ impl<'a> Labels<'a> {
     /// The kind mark a box carries. A frame carries none: the box around
     /// its children already says what it is.
     fn glyph(&self, id: &ElementId) -> Option<&'static str> {
-        if self.frames.contains(id) {
+        if self.containment.is_frame(id) {
             return None;
         }
         self.view
@@ -169,7 +177,7 @@ impl<'a> Labels<'a> {
 
     fn name(&self, id: &ElementId) -> String {
         let full = self.full_name(id);
-        match self.frame_of.get(id) {
+        match self.containment.parent(id) {
             // The path a box drops is the one the sources spell; a frame's
             // new name is a name nothing below it carries yet.
             Some(frame) => contextual(&full, &self.source_name(frame)).to_owned(),
@@ -322,7 +330,7 @@ pub(crate) fn kind_name(kind: ElementKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementName, Relation};
+    use cutaway_architecture::{Element, ElementName, Relation, RelationKind};
 
     use super::*;
 

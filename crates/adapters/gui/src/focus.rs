@@ -91,9 +91,10 @@ impl Focus<'_> {
     }
 }
 
-/// The focus of one selection over `view`, given the edges the canvas draws.
+/// The focus of one selection over a view, given the edges the canvas draws
+/// and the containment of that view.
 pub(crate) fn focus_of<'a>(
-    view: &'a ArchitectureGraph,
+    containment: &'a Containment,
     edges: impl IntoIterator<Item = &'a Relation>,
     selected: Selected<'a>,
 ) -> Focus<'a> {
@@ -101,7 +102,7 @@ pub(crate) fn focus_of<'a>(
     let mut lit = BTreeMap::new();
     match selected {
         Selected::Node(id) => {
-            let inside = subtree_of(view, id);
+            let inside = containment.subtree(id);
             for edge in edges {
                 // The subtree holds everything below the selection, so an
                 // endpoint the picture hides inside a summary block answers
@@ -125,7 +126,7 @@ pub(crate) fn focus_of<'a>(
             subjects.insert(&relation.to);
         }
     }
-    let context = ancestors_of(view, &subjects);
+    let context = containment.ancestors_of(&subjects);
     Focus {
         subjects,
         context,
@@ -133,22 +134,91 @@ pub(crate) fn focus_of<'a>(
     }
 }
 
-/// A boundary and everything it contains, however deep.
-pub(crate) fn subtree_of<'a>(
-    view: &'a ArchitectureGraph,
-    root: &'a ElementId,
-) -> BTreeSet<&'a ElementId> {
-    let children = children_of(view);
-    let mut inside = BTreeSet::from([root]);
-    let mut queue = vec![root];
-    while let Some(current) = queue.pop() {
-        for child in children.get(current).into_iter().flatten() {
-            if inside.insert(*child) {
-                queue.push(*child);
+/// The containment of one graph, resolved once: what each boundary directly
+/// holds, and what holds it.
+///
+/// Every walk over containment - a subtree, a climb to the frames above, the
+/// name a box reads against - otherwise scans the whole relation list per
+/// question, and a picture asks these questions many times per frame. The
+/// index owns its ids rather than borrowing the graph, so a caller can hold
+/// it beside the graph it describes and answer from it for as long as that
+/// graph stands.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Containment {
+    children: BTreeMap<ElementId, Vec<ElementId>>,
+    parents: BTreeMap<ElementId, ElementId>,
+}
+
+impl Containment {
+    pub(crate) fn of(graph: &ArchitectureGraph) -> Self {
+        let mut containment = Self::default();
+        for relation in graph.relations() {
+            if relation.kind == RelationKind::Contains {
+                containment
+                    .children
+                    .entry(relation.from.clone())
+                    .or_default()
+                    .push(relation.to.clone());
+                containment
+                    .parents
+                    .insert(relation.to.clone(), relation.from.clone());
             }
         }
+        containment
     }
-    inside
+
+    /// The boundaries one boundary directly holds, in the order the graph
+    /// declares them. A boundary that holds nothing is a leaf.
+    pub(crate) fn children(&self, frame: &ElementId) -> &[ElementId] {
+        self.children.get(frame).map_or(&[], Vec::as_slice)
+    }
+
+    /// The boundary that directly holds this one, if any.
+    pub(crate) fn parent(&self, id: &ElementId) -> Option<&ElementId> {
+        self.parents.get(id)
+    }
+
+    /// Whether this boundary holds anything, and therefore paints as a frame
+    /// rather than as a box of its own.
+    pub(crate) fn is_frame(&self, id: &ElementId) -> bool {
+        self.children.contains_key(id)
+    }
+
+    /// A boundary and everything it contains, however deep.
+    pub(crate) fn subtree<'a>(&'a self, root: &'a ElementId) -> BTreeSet<&'a ElementId> {
+        let mut inside = BTreeSet::from([root]);
+        let mut queue = vec![root];
+        while let Some(current) = queue.pop() {
+            for child in self.children(current) {
+                if inside.insert(child) {
+                    queue.push(child);
+                }
+            }
+        }
+        inside
+    }
+
+    /// The containing boundaries above the given elements, excluding the
+    /// elements themselves.
+    fn ancestors_of<'a>(&'a self, of: &BTreeSet<&'a ElementId>) -> BTreeSet<&'a ElementId> {
+        let mut context = BTreeSet::new();
+        for id in of {
+            // Containment of a view is a tree, but a walk that trusts that
+            // and meets a cycle never ends; the seen set bounds every walk.
+            let mut seen = BTreeSet::new();
+            let mut current = self.parent(id);
+            while let Some(parent) = current {
+                if !seen.insert(parent) {
+                    break;
+                }
+                if !of.contains(parent) {
+                    context.insert(parent);
+                }
+                current = self.parent(parent);
+            }
+        }
+        context
+    }
 }
 
 /// The boundaries one boundary directly contains, in id order. A boundary
@@ -168,21 +238,6 @@ pub(crate) fn frame_of<'a>(view: &'a ArchitectureGraph, id: &ElementId) -> Optio
     view.relations()
         .find(|relation| relation.kind == RelationKind::Contains && relation.to == *id)
         .map(|relation| &relation.from)
-}
-
-/// Contained boundary -> the boundary that directly contains it. A walk that
-/// climbs the containment of a whole graph asks this once instead of asking
-/// [`frame_of`] per step.
-pub(crate) type Frames<'a> = BTreeMap<&'a ElementId, &'a ElementId>;
-
-pub(crate) fn frames_of(view: &ArchitectureGraph) -> Frames<'_> {
-    let mut frames = Frames::new();
-    for relation in view.relations() {
-        if relation.kind == RelationKind::Contains {
-            frames.insert(&relation.to, &relation.from);
-        }
-    }
-    frames
 }
 
 /// The boundary a concrete element shows up as in the view. The element
@@ -208,48 +263,6 @@ pub(crate) fn boundary_in_view(
         current = frame_of(graph, id);
     }
     None
-}
-
-/// The containing boundaries above the given elements, excluding the
-/// elements themselves.
-fn ancestors_of<'a>(
-    view: &'a ArchitectureGraph,
-    of: &BTreeSet<&'a ElementId>,
-) -> BTreeSet<&'a ElementId> {
-    let parents = frames_of(view);
-    let mut context = BTreeSet::new();
-    for id in of {
-        // Containment of a view is a tree, but a walk that trusts that and
-        // meets a cycle never ends; the seen set bounds every walk.
-        let mut seen = BTreeSet::new();
-        let mut current = parents.get(*id).copied();
-        while let Some(parent) = current {
-            if !seen.insert(parent) {
-                break;
-            }
-            if !of.contains(parent) {
-                context.insert(parent);
-            }
-            current = parents.get(parent).copied();
-        }
-    }
-    context
-}
-
-/// Boundary -> the boundaries it directly contains. A walk that descends the
-/// containment of a whole graph asks this once instead of asking
-/// [`contents_of`] per step.
-pub(crate) fn children_of(view: &ArchitectureGraph) -> BTreeMap<&ElementId, Vec<&ElementId>> {
-    let mut children: BTreeMap<&ElementId, Vec<&ElementId>> = BTreeMap::new();
-    for relation in view.relations() {
-        if relation.kind == RelationKind::Contains {
-            children
-                .entry(&relation.from)
-                .or_default()
-                .push(&relation.to);
-        }
-    }
-    children
 }
 
 #[cfg(test)]
@@ -318,10 +331,10 @@ mod tests {
 
     #[test]
     fn selecting_a_frame_keeps_its_subtree_and_border_crossing_edges_lit() {
-        let view = view();
+        let containment = Containment::of(&view());
         let edges = edges();
         let selected = id("package:a");
-        let focus = focus_of(&view, &edges, Selected::Node(&selected));
+        let focus = focus_of(&containment, &edges, Selected::Node(&selected));
 
         for member in ["package:a", "a/one", "a/two"] {
             assert_eq!(focus.element(&id(member)), Strength::Focused, "{member}");
@@ -337,10 +350,10 @@ mod tests {
 
     #[test]
     fn ancestors_of_focused_elements_stay_readable() {
-        let view = view();
+        let containment = Containment::of(&view());
         let edges = edges();
         let frame = id("package:a");
-        let focus = focus_of(&view, &edges, Selected::Node(&frame));
+        let focus = focus_of(&containment, &edges, Selected::Node(&frame));
         assert_eq!(
             focus.element(&id("package:b")),
             Strength::Context,
@@ -348,16 +361,16 @@ mod tests {
         );
 
         let leaf = id("a/one");
-        let focus = focus_of(&view, &edges, Selected::Node(&leaf));
+        let focus = focus_of(&containment, &edges, Selected::Node(&leaf));
         assert_eq!(focus.element(&id("package:a")), Strength::Context);
     }
 
     #[test]
     fn edges_fully_outside_a_selected_frame_fade() {
-        let view = view();
+        let containment = Containment::of(&view());
         let edges = edges();
         let selected = id("package:a");
-        let focus = focus_of(&view, &edges, Selected::Node(&selected));
+        let focus = focus_of(&containment, &edges, Selected::Node(&selected));
 
         assert_eq!(
             focus.edge(&depends("package:c", "package:d")),
@@ -369,10 +382,10 @@ mod tests {
 
     #[test]
     fn selecting_a_leaf_lights_only_the_dependencies_that_touch_it() {
-        let view = view();
+        let containment = Containment::of(&view());
         let edges = edges();
         let selected = id("a/one");
-        let focus = focus_of(&view, &edges, Selected::Node(&selected));
+        let focus = focus_of(&containment, &edges, Selected::Node(&selected));
 
         assert_eq!(focus.edge(&depends("a/one", "a/two")), Strength::Focused);
         assert_eq!(focus.element(&id("a/two")), Strength::Focused);
@@ -382,10 +395,10 @@ mod tests {
 
     #[test]
     fn a_selected_boundary_tells_its_dependencies_from_its_dependents() {
-        let view = view();
+        let containment = Containment::of(&view());
         let edges = edges();
         let selected = id("package:a");
-        let focus = focus_of(&view, &edges, Selected::Node(&selected));
+        let focus = focus_of(&containment, &edges, Selected::Node(&selected));
 
         assert_eq!(
             focus.direction(&depends("a/two", "b/one")),
@@ -406,10 +419,10 @@ mod tests {
 
     #[test]
     fn a_connection_reaching_the_selection_runs_inward() {
-        let view = view();
+        let containment = Containment::of(&view());
         let edges = edges();
         let selected = id("package:b");
-        let focus = focus_of(&view, &edges, Selected::Node(&selected));
+        let focus = focus_of(&containment, &edges, Selected::Node(&selected));
 
         assert_eq!(
             focus.direction(&depends("a/two", "b/one")),
@@ -420,10 +433,10 @@ mod tests {
 
     #[test]
     fn a_selected_connection_runs_no_way_about_itself() {
-        let view = view();
+        let containment = Containment::of(&view());
         let edges = edges();
         let selected = depends("a/two", "b/one");
-        let focus = focus_of(&view, &edges, Selected::Edge(&selected));
+        let focus = focus_of(&containment, &edges, Selected::Edge(&selected));
 
         assert_eq!(focus.edge(&selected), Strength::Focused);
         assert_eq!(
@@ -502,10 +515,10 @@ mod tests {
 
     #[test]
     fn selecting_a_connection_lights_its_endpoints_alone() {
-        let view = view();
+        let containment = Containment::of(&view());
         let edges = edges();
         let selected = depends("a/two", "b/one");
-        let focus = focus_of(&view, &edges, Selected::Edge(&selected));
+        let focus = focus_of(&containment, &edges, Selected::Edge(&selected));
 
         assert_eq!(focus.edge(&selected), Strength::Focused);
         assert_eq!(focus.edge(&depends("a/one", "a/two")), Strength::Faded);

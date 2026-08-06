@@ -25,7 +25,7 @@ use cutaway_lenses::Detail;
 use eframe::egui;
 use eframe::egui::text::{CCursor, CCursorRange};
 
-use crate::focus;
+use crate::focus::Containment;
 use crate::glyph;
 use crate::label::kind_symbol;
 
@@ -212,7 +212,7 @@ pub(crate) fn hits(graph: &ArchitectureGraph, query: &str) -> Vec<Hit> {
             .then_with(|| left.name.as_str().len().cmp(&right.name.as_str().len()))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let frames = focus::frames_of(graph);
+    let containment = Containment::of(graph);
     ranked
         .into_iter()
         .take(RESULT_LIMIT)
@@ -220,7 +220,7 @@ pub(crate) fn hits(graph: &ArchitectureGraph, query: &str) -> Vec<Hit> {
             id: element.id.clone(),
             name: element.name.to_string(),
             kind: element.kind,
-            container: container_of(graph, &frames, &element.id),
+            container: container_of(graph, &containment, &element.id),
         })
         .collect()
 }
@@ -228,10 +228,10 @@ pub(crate) fn hits(graph: &ArchitectureGraph, query: &str) -> Vec<Hit> {
 /// The names of the boundaries above an element, outermost first. The
 /// project root names the whole picture, and a line that says it of every
 /// result says nothing, so it stays out.
-fn container_of(graph: &ArchitectureGraph, frames: &focus::Frames<'_>, id: &ElementId) -> String {
+fn container_of(graph: &ArchitectureGraph, containment: &Containment, id: &ElementId) -> String {
     let mut names = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut current = frames.get(id).copied();
+    let mut current = containment.parent(id);
     while let Some(frame) = current {
         if !seen.insert(frame) {
             break;
@@ -241,7 +241,7 @@ fn container_of(graph: &ArchitectureGraph, frames: &focus::Frames<'_>, id: &Elem
         {
             names.push(element.name.to_string());
         }
-        current = frames.get(frame).copied();
+        current = containment.parent(frame);
     }
     names.reverse();
     names.join(glyph::CONTAINER_STEP)
@@ -258,13 +258,13 @@ pub(crate) fn overrides_revealing(
     graph: &ArchitectureGraph,
     target: &ElementId,
 ) -> Vec<(ElementId, Detail)> {
-    let frames = focus::frames_of(graph);
+    let containment = Containment::of(graph);
     let mut planned = Vec::new();
     // Containment is a tree, but a walk that trusts that and meets a cycle
     // never ends; the seen set bounds it.
     let mut seen = BTreeSet::new();
     let mut current = target;
-    while let Some(frame) = frames.get(current).copied() {
+    while let Some(frame) = containment.parent(current) {
         if !seen.insert(frame) {
             break;
         }

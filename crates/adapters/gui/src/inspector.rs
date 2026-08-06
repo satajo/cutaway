@@ -17,6 +17,7 @@ use cutaway_planning::ModificationKind;
 use eframe::egui;
 
 use crate::canvas::{self, EdgeStatus};
+use crate::focus::Containment;
 use crate::glyph;
 use crate::label::{Labels, kind_name, kind_symbol};
 use crate::{Modifying, Scene, Selection, Session, Standing, detail, focus};
@@ -769,7 +770,8 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
 /// the boundary stands selected, so a row and the line it names are read as
 /// one answer.
 fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> Vec<Row> {
-    let crossing = crossings(view, &focus::subtree_of(&view.graph, id));
+    let containment = Containment::of(&view.graph);
+    let crossing = crossings(view, &containment.subtree(id));
     let names = labels.distinct(
         crossing
             .outward

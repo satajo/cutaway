@@ -18,12 +18,12 @@ use eframe::egui::{
 
 use crate::bundle::{self, Bundle};
 use crate::camera::{self, Camera};
-use crate::focus::{Direction, Focus, Selected, Strength, focus_of};
+use crate::focus::{Containment, Direction, Focus, Selected, Strength, focus_of};
 use crate::glyph;
 use crate::label::{Label, Labels, Renames};
 use crate::layout::{HEADER, Layout};
 use crate::minimap::Minimap;
-use crate::routing::{self, Route, Scope};
+use crate::routing::{self, Path, Route, Scope};
 use crate::summary::{Block, Summary, summarize};
 
 /// How one dependency edge is drawn.
@@ -80,8 +80,16 @@ pub enum CanvasAction {
 
 /// One frame's input to the canvas.
 pub struct Content<'a> {
+    /// Which rebuild produced this picture. Everything the canvas keeps
+    /// between frames answers for one generation and is computed again once
+    /// a new one arrives.
+    pub generation: u64,
     pub view: &'a ArchitectureGraph,
     pub layout: &'a Layout,
+    /// The containment of the view, resolved with it.
+    pub containment: &'a Containment,
+    /// The rectangle the whole picture occupies in world coordinates.
+    pub world: Rect,
     pub edges: &'a [EdgeVisual],
     /// The boxes the plan has touched. Everything else stands as it is.
     pub nodes: &'a BTreeMap<ElementId, NodeStatus>,
@@ -184,10 +192,23 @@ const MAP_BOX_FILL: f32 = 0.14;
 const MAP_BOX_BORDER: f32 = 0.45;
 /// Width of the rectangle that marks where the reader stands on the map.
 const HERE_WIDTH: f32 = 1.5;
+/// How far past its own box a mark of the picture may still put ink, in
+/// screen pixels. A border straddles the box edge, an arrowhead spreads
+/// across the line it ends, and the dot of a severed connection sits on the
+/// line: at the closest the camera ever comes, the widest of them reaches a
+/// little over twenty pixels out. Everything that decides whether a mark is
+/// worth building gives it this much room, so nothing is dropped that the
+/// reader would have seen a sliver of.
+const OVERHANG: f32 = 32.0;
 
-pub fn show(ui: &mut Ui, content: &Content<'_>, camera: &mut Camera) -> Option<CanvasAction> {
+pub fn show(
+    ui: &mut Ui,
+    content: &Content<'_>,
+    camera: &mut Camera,
+    strokes: &mut Strokes,
+) -> Option<CanvasAction> {
     let viewport = ui.max_rect();
-    let world = world_bounds(content.layout);
+    let world = content.world;
 
     // The background sits below every node, so nodes win overlapping hits.
     let background = ui.interact(
@@ -215,37 +236,19 @@ pub fn show(ui: &mut Ui, content: &Content<'_>, camera: &mut Camera) -> Option<C
 
     // What the magnification has shrunk past reading decides before anything
     // paints, hit-tests, or routes: the picture that follows is the one that
-    // stands, boxes and edges alike.
-    let summary = summarize(content.view, content.layout, camera.scaling);
-    let touched = interact_nodes(ui, content.layout, &summary, camera, viewport);
+    // stands, boxes and edges alike. Nothing of it follows the pointer, so
+    // it is decided again only where the scene or the magnification moved.
+    strokes.refresh(
+        content,
+        Vantage {
+            scene: content.generation,
+            zoom: camera.scaling,
+        },
+    );
+    strokes.project(camera);
+    let touched = interact_nodes(ui, content.layout, &strokes.summary, camera, viewport);
     let hovered_node = touched.hovered;
 
-    // The edges gather into strokes before anything is routed: the routing
-    // spreads one anchor per edge along a side, so a pile the picture draws
-    // as one line must arrive there as one line.
-    let bundles = bundle::bundles(content.edges, summary.stands_for());
-    let routes = routing::routes(
-        content.view,
-        content.layout,
-        summary.stands_for(),
-        bundles
-            .iter()
-            .map(|stroke| &content.edges[stroke.lead].relation),
-    );
-    let strokes: Vec<DrawnEdge> = bundles
-        .into_iter()
-        .zip(routes)
-        .map(|(bundle, route)| DrawnEdge {
-            curve: route.as_ref().map(|route| {
-                route
-                    .path
-                    .transformed(|point| camera.mul_pos(point))
-                    .points(CURVE_SEGMENTS)
-            }),
-            route,
-            bundle,
-        })
-        .collect();
     // The map is opaque to the picture beneath it: an edge that runs under
     // the map is not the edge the reader points at.
     let pointer = ui
@@ -254,26 +257,37 @@ pub fn show(ui: &mut Ui, content: &Content<'_>, camera: &mut Camera) -> Option<C
         .filter(|position| !map.as_ref().is_some_and(|map| map.rect.contains(*position)));
     let hovered_edge = match &hovered_node {
         Some(_) => None,
-        None => pointer.and_then(|position| nearest_curve(&strokes, position)),
+        None => pointer.and_then(|position| nearest_curve(&strokes.drawn, position, camera)),
     };
-    let drawn = Drawn {
-        strokes,
-        hovered: hovered_edge,
-    };
-    if let Some(index) = drawn.hovered {
+    // One reading of the labels answers the whole frame: the tooltip over a
+    // stroke and every box of the picture name the same boundaries.
+    let labels = Labels::over(content.view, content.containment, content.renames);
+    if let Some(index) = hovered_edge {
         ui.ctx()
             .output_mut(|output| output.cursor_icon = CursorIcon::PointingHand);
-        describe_edge(ui, content, &drawn.strokes[index].bundle);
+        describe_edge(ui, content, &labels, &strokes.drawn[index].bundle);
     }
 
-    paint(
-        ui,
-        content,
+    let visuals = ui.visuals();
+    let surface = Paint {
+        painter: ui.painter().with_clip_rect(viewport),
         camera,
         viewport,
-        &drawn,
-        &summary,
-        hovered_node.as_ref(),
+        background: visuals.panel_fill,
+        base: visuals.text_color(),
+        fill: visuals.extreme_bg_color,
+        washes: washes(visuals),
+        labels,
+        focus: focus(content),
+    };
+    paint(
+        &surface,
+        content,
+        strokes,
+        &Pointed {
+            node: hovered_node.as_ref(),
+            edge: hovered_edge,
+        },
     );
 
     // A double click also reports as a click, and its first click already
@@ -287,10 +301,10 @@ pub fn show(ui: &mut Ui, content: &Content<'_>, camera: &mut Camera) -> Option<C
     if background.clicked() {
         return background
             .interact_pointer_pos()
-            .and_then(|position| nearest_curve(&drawn.strokes, position))
+            .and_then(|position| nearest_curve(&strokes.drawn, position, camera))
             .map(|index| {
                 CanvasAction::Edge(
-                    content.edges[drawn.strokes[index].bundle.lead]
+                    content.edges[strokes.drawn[index].bundle.lead]
                         .relation
                         .clone(),
                 )
@@ -300,18 +314,120 @@ pub fn show(ui: &mut Ui, content: &Content<'_>, camera: &mut Camera) -> Option<C
     None
 }
 
-/// One stroke of one frame: the edges it draws, where it runs, and the
-/// flattened screen curve that both paints and hit-tests it.
+/// What a set of routed strokes answers for: the scene that laid the boxes
+/// out, and the magnification the summary decided against.
+///
+/// Neither the pointer nor the selection appears here, because neither
+/// changes where a stroke runs: they change only how strongly it paints.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Vantage {
+    scene: u64,
+    zoom: f32,
+}
+
+/// The strokes of the picture, kept between frames.
+///
+/// Deciding what the magnification blurs, gathering the edges into strokes
+/// and routing them around the boxes is the most expensive work the canvas
+/// does, and none of it follows the reader's hand. A frame that changed
+/// neither the scene nor the magnification therefore draws the strokes it
+/// drew last time; a frame that only moved the camera flattens nothing anew
+/// and merely places the lines it already holds in front of it.
+#[derive(Default)]
+pub struct Strokes {
+    /// What the held strokes answer for; None until the first frame routes
+    /// them.
+    vantage: Option<Vantage>,
+    summary: Summary,
+    drawn: Vec<DrawnEdge>,
+}
+
+impl Strokes {
+    /// Brings the strokes up to date for one scene at one magnification.
+    ///
+    /// The summary answers to both, so a turn of the wheel decides it anew.
+    /// The strokes answer to the scene and to what the summary blurs alone:
+    /// pulling back a little changes the magnification without changing what
+    /// stands for what, and then nothing is bundled or routed again.
+    fn refresh(&mut self, content: &Content<'_>, vantage: Vantage) {
+        if self.vantage == Some(vantage) {
+            return;
+        }
+        let same_scene = self.vantage.is_some_and(|held| held.scene == vantage.scene);
+        self.vantage = Some(vantage);
+        let summary = summarize(content.containment, content.layout, vantage.zoom);
+        let stands = same_scene && summary.stands_for() == self.summary.stands_for();
+        self.summary = summary;
+        if stands {
+            return;
+        }
+        // The edges gather into strokes before anything is routed: the
+        // routing spreads one anchor per edge along a side, so a pile the
+        // picture draws as one line must arrive there as one line.
+        let bundles = bundle::bundles(content.edges, self.summary.stands_for());
+        let routes = routing::routes(
+            content.view,
+            content.layout,
+            self.summary.stands_for(),
+            bundles
+                .iter()
+                .map(|stroke| &content.edges[stroke.lead].relation),
+        );
+        self.drawn = bundles
+            .into_iter()
+            .zip(routes)
+            .map(|(bundle, route)| DrawnEdge {
+                curve: route.as_ref().map(|route| Curve::of(&route.path)),
+                route,
+                bundle,
+                screen: Vec::new(),
+            })
+            .collect();
+    }
+
+    /// Places the flattened lines in front of the camera, writing into the
+    /// buffers of the last frame. The camera moves every frame and the lines
+    /// themselves do not, so the run is a scale and a shift per point and
+    /// nothing is allocated after the first frame of a set of strokes.
+    fn project(&mut self, camera: TSTransform) {
+        for stroke in &mut self.drawn {
+            stroke.screen.clear();
+            let Some(curve) = &stroke.curve else {
+                continue;
+            };
+            stroke
+                .screen
+                .extend(curve.points.iter().map(|point| camera.mul_pos(*point)));
+        }
+    }
+}
+
+/// One stroke of the picture: the edges it draws, where it runs, the line it
+/// flattens to in world coordinates, and that same line in front of the
+/// camera of the current frame.
 struct DrawnEdge {
     bundle: Bundle,
     route: Option<Route>,
-    curve: Option<Vec<Pos2>>,
+    curve: Option<Curve>,
+    /// The world line placed on the screen. Empty while the stroke has no
+    /// route to draw.
+    screen: Vec<Pos2>,
 }
 
-/// The strokes of one frame and the one the pointer catches.
-struct Drawn {
-    strokes: Vec<DrawnEdge>,
-    hovered: Option<usize>,
+/// One run flattened to a polyline in world coordinates, with the box it
+/// occupies. The box answers the pointer before the points do: a stroke
+/// whose box the pointer misses cannot be the stroke the pointer catches.
+struct Curve {
+    points: Vec<Pos2>,
+    bounds: Rect,
+}
+
+impl Curve {
+    fn of(path: &Path) -> Self {
+        let points = path.points(CURVE_SEGMENTS);
+        let bounds = Rect::from_points(&points);
+        Self { points, bounds }
+    }
 }
 
 /// Names the stroke under the pointer: which boundaries it joins, how many
@@ -320,11 +436,10 @@ struct Drawn {
 /// between and the one connection a click on it selects. The canvas
 /// hit-tests its own edges, so the tooltip follows the pointer instead of a
 /// widget.
-fn describe_edge(ui: &Ui, content: &Content<'_>, bundle: &Bundle) {
+fn describe_edge(ui: &Ui, content: &Content<'_>, labels: &Labels<'_>, bundle: &Bundle) {
     let Some(lead) = content.edges.get(bundle.lead) else {
         return;
     };
-    let labels = Labels::renaming(content.view, content.renames);
     let joins = format!(
         "{} {} {}",
         labels.qualified(&lead.relation.from),
@@ -530,6 +645,9 @@ fn header_of(rect: Rect) -> Rect {
 struct Paint<'a> {
     painter: egui::Painter,
     camera: TSTransform,
+    /// The screen rectangle the picture paints into. A mark that misses it
+    /// costs the same to build as one the reader sees, so it is never built.
+    viewport: Rect,
     /// The surface the whole picture lies on. Every weakened mark blends
     /// against it instead of thinning its own alpha, so no two weakened
     /// marks can stack into a stronger one.
@@ -685,15 +803,20 @@ fn agreed(directions: impl IntoIterator<Item = Option<Direction>>) -> Option<Dir
 /// How each stroke of one frame paints: how strongly, and whether it paints
 /// over the boxes or under them. Both answers come from one walk over the
 /// strokes, and both passes of the painting read them.
-struct Strokes {
+struct Emphasis {
     strengths: Vec<Strength>,
     lifted: Vec<bool>,
 }
 
-impl Strokes {
-    fn of(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) -> Strokes {
-        let strengths: Vec<Strength> = drawn
-            .strokes
+impl Emphasis {
+    fn of(
+        paint: &Paint<'_>,
+        content: &Content<'_>,
+        strokes: &Strokes,
+        hovered: Option<usize>,
+    ) -> Emphasis {
+        let strengths: Vec<Strength> = strokes
+            .drawn
             .iter()
             .map(|stroke| {
                 stroke
@@ -701,8 +824,8 @@ impl Strokes {
                     .strength(|edge| paint.edge(&content.edges[edge].relation))
             })
             .collect();
-        let lifted = lifted(&strengths, drawn.hovered, paint.focus.is_some());
-        Strokes { strengths, lifted }
+        let lifted = lifted(&strengths, hovered, paint.focus.is_some());
+        Emphasis { strengths, lifted }
     }
 }
 
@@ -724,31 +847,20 @@ fn lifted(strengths: &[Strength], hovered: Option<usize>, selected: bool) -> Vec
         .collect()
 }
 
-fn paint(
-    ui: &Ui,
-    content: &Content<'_>,
-    camera: TSTransform,
-    viewport: Rect,
-    drawn: &Drawn,
-    summary: &Summary,
-    hovered_node: Option<&ElementId>,
-) {
-    let visuals = ui.visuals();
-    let paint = Paint {
-        painter: ui.painter().with_clip_rect(viewport),
-        camera,
-        background: visuals.panel_fill,
-        base: visuals.text_color(),
-        fill: visuals.extreme_bg_color,
-        washes: washes(visuals),
-        labels: Labels::renaming(content.view, content.renames),
-        focus: focus(content),
-    };
-    let strokes = Strokes::of(&paint, content, drawn);
-    paint_containers(&paint, content, summary, hovered_node);
-    paint_edges(&paint, content, drawn, &strokes, false);
-    paint_leaves(&paint, content, summary, hovered_node);
-    paint_edges(&paint, content, drawn, &strokes, true);
+/// What the pointer holds this frame: at most one box, or at most one
+/// stroke. A box under the pointer takes it, so the two never answer at
+/// once.
+struct Pointed<'a> {
+    node: Option<&'a ElementId>,
+    edge: Option<usize>,
+}
+
+fn paint(paint: &Paint<'_>, content: &Content<'_>, strokes: &Strokes, pointed: &Pointed<'_>) {
+    let emphasis = Emphasis::of(paint, content, strokes, pointed.edge);
+    paint_containers(paint, content, &strokes.summary, pointed.node);
+    paint_edges(paint, content, strokes, pointed, &emphasis, false);
+    paint_leaves(paint, content, &strokes.summary, pointed.node);
+    paint_edges(paint, content, strokes, pointed, &emphasis, true);
 }
 
 /// The selection's neighborhood. None when nothing is selected: then
@@ -760,10 +872,21 @@ fn focus<'a>(content: &Content<'a>) -> Option<Focus<'a>> {
         (None, None) => return None,
     };
     Some(focus_of(
-        content.view,
+        content.containment,
         content.edges.iter().map(|edge| &edge.relation),
         selected,
     ))
+}
+
+/// Whether a mark that occupies this screen rectangle reaches the canvas at
+/// all. A mark entirely beside the viewport paints nothing a reader can see,
+/// and building its shapes costs exactly as much as building a visible one.
+///
+/// The rectangle is the mark's own box; the border, the arrowhead and the
+/// dots a mark carries reach a little past it, so the test gives every mark
+/// [`OVERHANG`] of slack and never drops one that grazes the edge.
+fn on_screen(mark: Rect, viewport: Rect) -> bool {
+    mark.expand(OVERHANG).intersects(viewport)
 }
 
 fn paint_containers(
@@ -778,6 +901,9 @@ fn paint_containers(
             continue;
         }
         let rect = paint.camera.mul_rect(content.layout.rects[id]);
+        if !on_screen(rect, paint.viewport) {
+            continue;
+        }
         let block = summary.block(id);
         // A block is the only mark its contents have left, so it paints as
         // strongly as the strongest thing it stands for.
@@ -931,17 +1057,22 @@ fn fitted_size(room: Vec2, at_desired: Vec2, desired: f32, floor: f32) -> Option
 fn paint_edges(
     paint: &Paint<'_>,
     content: &Content<'_>,
-    drawn: &Drawn,
     strokes: &Strokes,
+    pointed: &Pointed<'_>,
+    emphasis: &Emphasis,
     over: bool,
 ) {
-    for (index, stroke) in drawn.strokes.iter().enumerate() {
-        if strokes.lifted[index] != over {
+    for (index, stroke) in strokes.drawn.iter().enumerate() {
+        if emphasis.lifted[index] != over {
             continue;
         }
-        let (Some(route), Some(points)) = (&stroke.route, &stroke.curve) else {
+        let (Some(route), Some(curve)) = (&stroke.route, &stroke.curve) else {
             continue;
         };
+        if !on_screen(paint.camera.mul_rect(curve.bounds), paint.viewport) {
+            continue;
+        }
+        let points = &stroke.screen;
         let bundle = &stroke.bundle;
         let visual = |edge: usize| &content.edges[edge];
         // A stroke draws in the manner of the edge it answers for, and a
@@ -958,7 +1089,7 @@ fn paint_edges(
             ),
         );
         let selected = bundle.any(|edge| content.selected_edge == Some(&visual(edge).relation));
-        let hovered = drawn.hovered == Some(index);
+        let hovered = pointed.edge == Some(index);
         // The scope and the crowd dim before the selection does: an internal
         // edge stays behind the crossings, and a stroke among many stays
         // behind a stroke that runs alone, whether anything is selected or
@@ -975,7 +1106,7 @@ fn paint_edges(
             } else {
                 crowd_ink(route.crowd)
             }
-            * share_of(strokes.strengths[index]);
+            * share_of(emphasis.strengths[index]);
         let color = toward(paint.background, ink, share);
         let width = edge_width(bundle.weight, route.scope)
             + if selected {
@@ -1059,6 +1190,9 @@ fn paint_leaves(
             continue;
         }
         let rect = paint.camera.mul_rect(content.layout.rects[id]);
+        if !on_screen(rect, paint.viewport) {
+            continue;
+        }
         let strength = paint.element(id);
         let selected = content.selected_node == Some(id) || content.draw_source == Some(id);
         let hover = hovered == Some(id);
@@ -1149,13 +1283,24 @@ fn arrow_head(painter: &egui::Painter, points: &[Pos2], color: Color32, zoom: f3
     ));
 }
 
-fn nearest_curve(strokes: &[DrawnEdge], pointer: Pos2) -> Option<usize> {
+/// Whether the pointer can be within [`EDGE_REACH`] of a line that stays
+/// inside this screen box. A line never leaves its own box, so a pointer
+/// further than the reach from the box is further than the reach from every
+/// point of the line, and the walk over those points can be skipped.
+fn within_reach(bounds: Rect, pointer: Pos2) -> bool {
+    bounds.expand(EDGE_REACH).contains(pointer)
+}
+
+fn nearest_curve(strokes: &[DrawnEdge], pointer: Pos2, camera: TSTransform) -> Option<usize> {
     let mut best: Option<(f32, usize)> = None;
     for (index, stroke) in strokes.iter().enumerate() {
-        let Some(points) = &stroke.curve else {
+        let Some(curve) = &stroke.curve else {
             continue;
         };
-        for pair in points.windows(2) {
+        if !within_reach(camera.mul_rect(curve.bounds), pointer) {
+            continue;
+        }
+        for pair in stroke.screen.windows(2) {
             let distance = distance_to_segment(pointer, pair[0], pair[1]);
             if distance < EDGE_REACH && best.is_none_or(|(closest, _)| distance < closest) {
                 best = Some((distance, index));
@@ -1245,7 +1390,7 @@ mod tests {
     #[test]
     fn no_interaction_target_hides_under_a_summary_block() {
         let (view, layout) = frame_of_leaves();
-        let summary = summarize(&view, &layout, 0.1);
+        let summary = summarize(&Containment::of(&view), &layout, 0.1);
 
         let targets = targets(&layout, &summary);
         assert_eq!(
@@ -1263,7 +1408,7 @@ mod tests {
     #[test]
     fn a_frame_that_shows_its_parts_answers_on_its_header_alone() {
         let (view, layout) = frame_of_leaves();
-        let summary = summarize(&view, &layout, 1.0);
+        let summary = summarize(&Containment::of(&view), &layout, 1.0);
 
         let targets = targets(&layout, &summary);
         assert_eq!(targets.len(), 3);
@@ -1444,7 +1589,8 @@ mod tests {
     fn direction_of(from: &str, to: &str, selected: &str) -> Option<Direction> {
         let (view, edges) = wired();
         let selection = id(selected);
-        focus_of(&view, &edges, Selected::Node(&selection)).direction(&depends(from, to))
+        focus_of(&Containment::of(&view), &edges, Selected::Node(&selection))
+            .direction(&depends(from, to))
     }
 
     #[test]
@@ -1575,5 +1721,304 @@ mod tests {
     #[test]
     fn a_crowd_past_a_full_side_calms_no_further() {
         assert!((crowd_ink(40) - crowd_ink(16)).abs() < 0.001);
+    }
+
+    /// Everything one frame of the canvas reads about a picture, owned by
+    /// the test so that a [`Content`] can borrow it as the shell's scene
+    /// does.
+    struct Picture {
+        graph: ArchitectureGraph,
+        layout: Layout,
+        containment: Containment,
+        edges: Vec<EdgeVisual>,
+        nodes: BTreeMap<ElementId, NodeStatus>,
+        renames: Renames,
+    }
+
+    impl Picture {
+        /// The picture of [`wired`] with a box for every boundary in it.
+        fn wired() -> Self {
+            Self::drawing(wired().1)
+        }
+
+        fn drawing(edges: Vec<Relation>) -> Self {
+            let (graph, _) = wired();
+            let (_, mut layout) = frame_of_leaves();
+            layout.rects.insert(
+                id("package:b"),
+                Rect::from_min_size(pos2(400.0, 0.0), vec2(120.0, 60.0)),
+            );
+            layout.leaves.push(id("package:b"));
+            Self {
+                containment: Containment::of(&graph),
+                graph,
+                layout,
+                edges: edges
+                    .into_iter()
+                    .map(|relation| EdgeVisual {
+                        relation,
+                        status: EdgeStatus::Existing,
+                        annotated: false,
+                        weight: 1,
+                    })
+                    .collect(),
+                nodes: BTreeMap::new(),
+                renames: Renames::default(),
+            }
+        }
+
+        /// The picture as the shell hands it over after `generation`
+        /// rebuilds, with `selected` standing selected.
+        fn at<'a>(&'a self, generation: u64, selected: Option<&'a ElementId>) -> Content<'a> {
+            Content {
+                generation,
+                view: &self.graph,
+                layout: &self.layout,
+                containment: &self.containment,
+                world: world_bounds(&self.layout),
+                edges: &self.edges,
+                nodes: &self.nodes,
+                renames: &self.renames,
+                selected_edge: None,
+                selected_node: selected,
+                draw_source: None,
+            }
+        }
+    }
+
+    /// A magnification at which every box of the fixture still reads, and
+    /// one at which the frame's children have blurred past reading.
+    const READS: f32 = 1.0;
+    const BLURS: f32 = 0.2;
+
+    fn vantage(scene: u64, zoom: f32) -> Vantage {
+        Vantage { scene, zoom }
+    }
+
+    #[test]
+    fn a_picture_that_did_not_move_draws_the_strokes_it_drew_before() {
+        let picture = Picture::wired();
+        let mut strokes = Strokes::default();
+        strokes.refresh(&picture.at(1, None), vantage(1, READS));
+        let routed = strokes.drawn.as_ptr();
+
+        strokes.refresh(&picture.at(1, None), vantage(1, READS));
+
+        assert!(
+            !strokes.drawn.is_empty(),
+            "the picture draws strokes at all"
+        );
+        assert_eq!(
+            strokes.drawn.as_ptr(),
+            routed,
+            "the same scene at the same magnification is routed once"
+        );
+    }
+
+    #[test]
+    fn a_magnification_that_blurs_nothing_new_reroutes_nothing() {
+        let picture = Picture::wired();
+        let mut strokes = Strokes::default();
+        strokes.refresh(&picture.at(1, None), vantage(1, READS));
+        let routed = strokes.drawn.as_ptr();
+
+        strokes.refresh(&picture.at(1, None), vantage(1, READS * 0.9));
+
+        assert_eq!(
+            strokes.drawn.as_ptr(),
+            routed,
+            "a camera that moved without changing what stands for what leaves \
+             the strokes where they run"
+        );
+    }
+
+    #[test]
+    fn a_magnification_that_blurs_a_frame_lands_its_strokes_on_the_block() {
+        let picture = Picture::wired();
+        let mut strokes = Strokes::default();
+        strokes.refresh(&picture.at(1, None), vantage(1, READS));
+        assert_eq!(strokes.drawn[0].bundle.from, id("a/one"));
+
+        strokes.refresh(&picture.at(1, None), vantage(1, BLURS));
+
+        assert!(strokes.summary.hides(&id("a/one")));
+        assert_eq!(
+            strokes.drawn[0].bundle.from,
+            id("package:a"),
+            "an edge out of something hidden leaves the block that stands for it"
+        );
+    }
+
+    #[test]
+    fn a_selection_leaves_the_strokes_exactly_where_they_run() {
+        let picture = Picture::wired();
+        let mut strokes = Strokes::default();
+        strokes.refresh(&picture.at(1, None), vantage(1, READS));
+        let routed = strokes.drawn.as_ptr();
+
+        strokes.refresh(&picture.at(1, Some(&id("package:a"))), vantage(1, READS));
+
+        assert_eq!(
+            strokes.drawn.as_ptr(),
+            routed,
+            "a selection changes how strongly a stroke paints, never where it runs"
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_scene_routes_its_strokes_anew() {
+        let before = Picture::wired();
+        let after = Picture::drawing(vec![depends("a/one", "package:b")]);
+        let mut strokes = Strokes::default();
+        strokes.refresh(&before.at(1, None), vantage(1, READS));
+        assert_eq!(strokes.drawn.len(), 3);
+
+        strokes.refresh(&after.at(2, None), vantage(2, READS));
+
+        assert_eq!(
+            strokes.drawn.len(),
+            1,
+            "a new scene is a new picture, whatever the magnification"
+        );
+    }
+
+    #[test]
+    fn the_screen_line_of_a_stroke_is_its_world_line_in_front_of_the_camera() {
+        let picture = Picture::wired();
+        let mut strokes = Strokes::default();
+        strokes.refresh(&picture.at(1, None), vantage(1, READS));
+        let camera =
+            TSTransform::from_translation(vec2(30.0, -12.0)) * TSTransform::from_scaling(2.0);
+
+        strokes.project(camera);
+
+        let stroke = &strokes.drawn[0];
+        let curve = stroke.curve.as_ref().expect("the stroke has a route");
+        assert_eq!(stroke.screen.len(), curve.points.len());
+        for (world, screen) in curve.points.iter().zip(&stroke.screen) {
+            assert_eq!(*screen, camera.mul_pos(*world));
+        }
+    }
+
+    #[test]
+    fn placing_the_strokes_anew_writes_into_the_buffers_of_the_last_frame() {
+        let picture = Picture::wired();
+        let mut strokes = Strokes::default();
+        strokes.refresh(&picture.at(1, None), vantage(1, READS));
+        strokes.project(TSTransform::from_scaling(1.0));
+        let buffer = strokes.drawn[0].screen.as_ptr();
+
+        strokes.project(TSTransform::from_scaling(3.0));
+
+        assert_eq!(
+            strokes.drawn[0].screen.as_ptr(),
+            buffer,
+            "a camera that moved allocates nothing: the points are overwritten"
+        );
+    }
+
+    /// One stroke that runs along the given screen points and nothing else.
+    fn stroke_along(points: Vec<Pos2>) -> DrawnEdge {
+        DrawnEdge {
+            bundle: Bundle {
+                from: id("a/one"),
+                to: id("package:b"),
+                members: vec![0],
+                lead: 0,
+                weight: 1,
+            },
+            route: None,
+            curve: Some(Curve {
+                bounds: Rect::from_points(&points),
+                points: points.clone(),
+            }),
+            screen: points,
+        }
+    }
+
+    #[test]
+    fn the_pointer_catches_a_diagonal_stroke_beside_its_middle() {
+        let strokes = vec![stroke_along(vec![
+            pos2(0.0, 0.0),
+            pos2(50.0, 50.0),
+            pos2(100.0, 100.0),
+        ])];
+
+        assert_eq!(
+            nearest_curve(&strokes, pos2(52.0, 50.0), TSTransform::IDENTITY),
+            Some(0),
+            "a run across its own box is caught beside the line, not beside the box"
+        );
+        assert_eq!(
+            nearest_curve(&strokes, pos2(95.0, 5.0), TSTransform::IDENTITY),
+            None,
+            "the far corner of the box is nowhere near the line that crosses it"
+        );
+    }
+
+    #[test]
+    fn no_stroke_within_reach_of_the_pointer_is_ruled_out_by_its_box() {
+        let bounds = Rect::from_min_size(pos2(100.0, 100.0), vec2(200.0, 40.0));
+        for beside in [
+            pos2(100.0 - EDGE_REACH, 120.0),
+            pos2(300.0 + EDGE_REACH, 120.0),
+            pos2(200.0, 100.0 - EDGE_REACH),
+            pos2(200.0, 140.0 + EDGE_REACH),
+            pos2(200.0, 120.0),
+        ] {
+            assert!(
+                within_reach(bounds, beside),
+                "a line touching {bounds:?} may run within reach of {beside:?}"
+            );
+        }
+        assert!(
+            !within_reach(bounds, pos2(100.0 - EDGE_REACH - 1.0, 120.0)),
+            "past the reach no point of the box can be caught"
+        );
+    }
+
+    /// A canvas of the usual size, at the origin.
+    const CANVAS: Rect = Rect {
+        min: Pos2 { x: 0.0, y: 0.0 },
+        max: Pos2 { x: 800.0, y: 600.0 },
+    };
+
+    #[test]
+    fn every_mark_that_meets_the_canvas_is_painted() {
+        for meeting in [
+            Rect::from_min_size(pos2(-40.0, 300.0), vec2(60.0, 20.0)),
+            Rect::from_min_size(pos2(780.0, 590.0), vec2(100.0, 100.0)),
+            Rect::from_min_size(pos2(400.0, -20.0), vec2(40.0, 40.0)),
+            Rect::from_min_size(pos2(-1000.0, -1000.0), vec2(4000.0, 4000.0)),
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(0.0, 0.0)),
+        ] {
+            assert!(
+                on_screen(meeting, CANVAS),
+                "{meeting:?} puts ink on the canvas"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mark_just_off_the_canvas_still_paints_the_ink_it_hangs_over_the_edge() {
+        assert!(
+            on_screen(
+                Rect::from_min_size(pos2(-10.0, 300.0), vec2(5.0, 20.0)),
+                CANVAS
+            ),
+            "a box past the edge still strokes a border the reader sees"
+        );
+    }
+
+    #[test]
+    fn a_mark_far_from_the_canvas_is_never_built() {
+        assert!(!on_screen(
+            Rect::from_min_size(pos2(-500.0, 300.0), vec2(100.0, 20.0)),
+            CANVAS
+        ));
+        assert!(!on_screen(
+            Rect::from_min_size(pos2(200.0, 900.0), vec2(100.0, 20.0)),
+            CANVAS
+        ));
     }
 }

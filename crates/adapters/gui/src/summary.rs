@@ -7,18 +7,19 @@
 //! block instead. The block carries the frame's name and how much it holds,
 //! and nothing inside it paints at all.
 //!
-//! The decision belongs to the camera, so it is made anew every frame. It is
-//! also pure geometry and containment over the laid-out view, so it is
-//! unit-testable without a screen. Everything downstream reads the answer:
-//! the canvas paints and hit-tests a block instead of its contents, and the
-//! routing lands an edge on the block that stands for a hidden endpoint.
+//! The decision belongs to the magnification, so it is made anew whenever
+//! the camera changes it and never in between. It is pure geometry and
+//! containment over the laid-out view, so it is unit-testable without a
+//! screen. Everything downstream reads the answer: the canvas paints and
+//! hit-tests a block instead of its contents, and the routing lands an edge
+//! on the block that stands for a hidden endpoint.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{ArchitectureGraph, ElementId};
+use cutaway_architecture::ElementId;
 
 use crate::canvas::{HAIRLINE, LABEL_SIZE, LEGIBLE_FONT};
-use crate::focus::{Strength, children_of};
+use crate::focus::{Containment, Strength};
 use crate::layout::{Layout, NODE_HEIGHT};
 
 /// The screen height a box needs before its contents are worth painting.
@@ -88,14 +89,17 @@ impl Summary {
 /// what they hold. The walk runs outermost first, so the first frame that
 /// summarizes absorbs everything below it and no frame inside a block is
 /// weighed on its own.
-pub(crate) fn summarize(view: &ArchitectureGraph, layout: &Layout, zoom: f32) -> Summary {
-    let children = children_of(view);
+pub(crate) fn summarize(containment: &Containment, layout: &Layout, zoom: f32) -> Summary {
     let mut summary = Summary::default();
     for frame in &layout.containers {
-        if summary.hides(&frame.id) || !blurs(&frame.id, &children, layout, zoom) {
+        if summary.hides(&frame.id) || !blurs(&frame.id, containment, layout, zoom) {
             continue;
         }
-        let covers = subtree(&frame.id, &children);
+        let covers: BTreeSet<ElementId> = containment
+            .subtree(&frame.id)
+            .into_iter()
+            .cloned()
+            .collect();
         for hidden in &covers {
             if *hidden != frame.id {
                 summary.stands_for.insert(hidden.clone(), frame.id.clone());
@@ -112,44 +116,21 @@ pub(crate) fn summarize(view: &ArchitectureGraph, layout: &Layout, zoom: f32) ->
 /// Whether a frame's children arrive too small to read: the shortest of them
 /// decides, because a frame shows its parts only as well as it shows its
 /// least readable one.
-fn blurs(
-    frame: &ElementId,
-    children: &BTreeMap<&ElementId, Vec<&ElementId>>,
-    layout: &Layout,
-    zoom: f32,
-) -> bool {
-    let shortest = children
-        .get(frame)
-        .into_iter()
-        .flatten()
-        .filter_map(|child| layout.rects.get(*child))
+fn blurs(frame: &ElementId, containment: &Containment, layout: &Layout, zoom: f32) -> bool {
+    let shortest = containment
+        .children(frame)
+        .iter()
+        .filter_map(|child| layout.rects.get(child))
         .map(|rect| rect.height() * zoom)
         .fold(f32::INFINITY, f32::min);
     shortest.is_finite() && shortest < LEGIBLE_BOX
 }
 
-/// A boundary and everything below it. Containment is a tree wherever a view
-/// exists at all, but a walk that trusts that and meets a cycle never ends;
-/// the set of what the walk already holds bounds it.
-fn subtree(
-    root: &ElementId,
-    children: &BTreeMap<&ElementId, Vec<&ElementId>>,
-) -> BTreeSet<ElementId> {
-    let mut inside = BTreeSet::from([root.clone()]);
-    let mut queue = vec![root.clone()];
-    while let Some(current) = queue.pop() {
-        for child in children.get(&current).into_iter().flatten() {
-            if inside.insert((*child).clone()) {
-                queue.push((*child).clone());
-            }
-        }
-    }
-    inside
-}
-
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementKind, ElementName, Relation, RelationKind};
+    use cutaway_architecture::{
+        ArchitectureGraph, Element, ElementKind, ElementName, Relation, RelationKind,
+    };
     use eframe::egui::{Rect, pos2, vec2};
 
     use super::*;
@@ -247,7 +228,7 @@ mod tests {
     #[test]
     fn a_frame_whose_children_would_blur_summarizes() {
         let (view, layout) = frame_of_leaves(NODE_HEIGHT);
-        let summary = summarize(&view, &layout, 0.2);
+        let summary = summarize(&Containment::of(&view), &layout, 0.2);
 
         assert!(summary.block(&id("package:a")).is_some());
         assert!(summary.hides(&id("a/one")));
@@ -267,7 +248,7 @@ mod tests {
     #[test]
     fn a_frame_whose_children_still_read_keeps_showing_them() {
         let (view, layout) = frame_of_leaves(NODE_HEIGHT);
-        let summary = summarize(&view, &layout, 1.0);
+        let summary = summarize(&Containment::of(&view), &layout, 1.0);
 
         assert!(summary.block(&id("package:a")).is_none());
         assert!(!summary.hides(&id("a/one")));
@@ -276,7 +257,7 @@ mod tests {
     #[test]
     fn a_summarized_frame_absorbs_the_frames_inside_it() {
         let (view, layout) = nested();
-        let summary = summarize(&view, &layout, 0.05);
+        let summary = summarize(&Containment::of(&view), &layout, 0.05);
 
         assert!(summary.block(&id("package:a")).is_some());
         assert!(
@@ -295,7 +276,7 @@ mod tests {
     #[test]
     fn only_the_frames_whose_own_detail_stopped_reading_summarize() {
         let (view, layout) = nested();
-        let summary = summarize(&view, &layout, 0.5);
+        let summary = summarize(&Containment::of(&view), &layout, 0.5);
 
         assert!(
             summary.block(&id("package:a")).is_none(),
@@ -308,7 +289,7 @@ mod tests {
     #[test]
     fn a_summarized_frame_carries_the_strength_of_what_it_hides() {
         let (view, layout) = frame_of_leaves(NODE_HEIGHT);
-        let summary = summarize(&view, &layout, 0.2);
+        let summary = summarize(&Containment::of(&view), &layout, 0.2);
         let block = summary.block(&id("package:a")).unwrap();
 
         let focused_leaf = |element: &ElementId| {

@@ -56,14 +56,15 @@ use cutaway_architecture::{
 use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{
-    GroupStanding, Modification, ModificationKind, Note, Plan, ProposedChange, SplitParts, Subject,
-    addition_of_element,
+    GroupStanding, Modification, ModificationKind, Note, Plan, PlanError, ProposedChange,
+    SplitParts, Subject, addition_of_element,
 };
 use eframe::egui::{self, Rect};
 
 use crate::camera::Camera;
 use crate::canvas::{CanvasAction, Content, EdgeStatus, EdgeVisual, NodeStatus};
 use crate::continuity::Piece;
+use crate::focus::Containment;
 use crate::label::{Labels, Renames};
 use crate::layout::Layout;
 use crate::palette::Palette;
@@ -134,12 +135,24 @@ fn following_a_piece(from: &str, to: &str, piece: &Piece) -> String {
     )
 }
 
-/// A boundary view with the arrangement that paints it. The arrangement
-/// follows from the view graph and the concept weights alone, so it is
-/// computed once per rebuild instead of once per frame.
+/// A boundary view with everything that paints it. All of it follows from
+/// the view, the plan and the concept weights alone - never from where the
+/// reader points or what stands selected - so all of it is computed once per
+/// rebuild instead of once per frame.
 struct Scene {
     view: BoundaryView,
     layout: Layout,
+    /// Which rebuild produced this scene. The canvas keeps routed strokes
+    /// between frames and reroutes when the number rises, so the count is
+    /// what tells one scene from the next without comparing whole graphs.
+    generation: u64,
+    /// The containment of the view graph, which every walk over the picture
+    /// reads: the focus of a selection, the summary, and the labels.
+    containment: Containment,
+    edges: Vec<EdgeVisual>,
+    nodes: BTreeMap<ElementId, NodeStatus>,
+    /// The rectangle the whole picture occupies in world coordinates.
+    world: Rect,
 }
 
 struct Session {
@@ -157,6 +170,13 @@ struct Session {
     /// paint read the labels, so the renames resolve once per rebuild.
     renames: Renames,
     scene: Result<Scene, String>,
+    /// How many scenes this session has built. Every rebuild raises it, and
+    /// the number rides along in the scene it produced.
+    generation: u64,
+    /// The strokes the canvas last routed, kept across frames. Nothing about
+    /// them follows the pointer or the selection, so they stand until the
+    /// scene or the magnification asks for new ones.
+    strokes: canvas::Strokes,
     /// Contained-concept counts from the full graph; they size the boxes.
     weights: BTreeMap<ElementId, usize>,
     /// Where the picture stands in front of the reader, and where it is
@@ -234,6 +254,8 @@ impl Session {
             cut: Cut::uniform(Detail::Packages),
             renames: Renames::default(),
             scene: Err("not built yet".to_owned()),
+            generation: 0,
+            strokes: canvas::Strokes::default(),
             weights,
             camera: Camera::default(),
             viewport: Rect::NOTHING,
@@ -275,11 +297,25 @@ impl Session {
         // it room for the longer text: the renames resolve before the
         // layout that measures them.
         self.renames = Renames::of(&self.plan);
+        self.generation += 1;
+        let generation = self.generation;
+        let plan = &self.plan;
+        let viewed = &self.viewed;
+        let weights = &self.weights;
+        let renames = &self.renames;
         self.scene = boundary_view(&self.viewed, &self.cut)
             .map_err(|error| error.to_string())
             .map(|view| {
-                let layout = layout::compute(&view.graph, &self.weights, &self.renames);
-                Scene { view, layout }
+                let layout = layout::compute(&view.graph, weights, renames);
+                Scene {
+                    generation,
+                    containment: Containment::of(&view.graph),
+                    edges: edge_visuals(&view, plan),
+                    nodes: node_statuses(&view.graph, viewed, plan),
+                    world: canvas::world_bounds(&layout),
+                    view,
+                    layout,
+                }
             });
         if let Some(source) = &self.draw_source
             && !self.shows(source)
@@ -415,7 +451,7 @@ impl Session {
         let Some(scope) = &self.cut.scope else {
             return true;
         };
-        focus::subtree_of(&self.viewed, scope).contains(id)
+        Containment::of(&self.viewed).subtree(scope).contains(id)
     }
 
     /// The detail governing what a boundary shows inside it; None while the
@@ -439,13 +475,6 @@ impl Session {
             // A connection reads only where both of its ends do, planned
             // ones included.
             Selection::Edge(relation) => self.shows(&relation.from) && self.shows(&relation.to),
-        }
-    }
-
-    fn edges(&self) -> Vec<EdgeVisual> {
-        match &self.scene {
-            Ok(scene) => edge_visuals(&scene.view, &self.plan),
-            Err(_) => Vec::new(),
         }
     }
 
@@ -528,7 +557,7 @@ impl Session {
             // fit that comes shows everything anyway.
             return;
         };
-        let world = canvas::world_bounds(&scene.layout);
+        let world = scene.world;
         self.camera.fly(camera::fit(world, self.viewport));
     }
 
@@ -571,12 +600,25 @@ impl Session {
         self.reveal(&selection);
     }
 
-    fn save_plan(&mut self) {
-        self.status = self
-            .store
-            .save(&self.plan)
-            .err()
-            .map(|error| error.to_string());
+    /// Closes one edit of the plan: the plan goes to the store, a refusal
+    /// reads on the toolbar, and the picture is painted anew.
+    ///
+    /// Every edit ends here, the refused ones included. What the plan says
+    /// is part of what the picture shows - a severed connection, a box on
+    /// its way out, a note beside a dependency - and the picture reads that
+    /// off the scene it was last given, never off the plan of the moment. An
+    /// edit that got halfway before it was refused has changed the plan too,
+    /// so the rebuild does not wait on success.
+    fn planned(&mut self, result: Result<(), PlanError>) {
+        self.status = match result {
+            Ok(()) => self
+                .store
+                .save(&self.plan)
+                .err()
+                .map(|error| error.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        self.rebuild_view();
     }
 
     /// Writes the note draft onto whatever anchors the selection: an
@@ -647,10 +689,7 @@ impl Session {
                 result
             }
         };
-        match result {
-            Ok(()) => self.save_plan(),
-            Err(error) => self.status = Some(error.to_string()),
-        }
+        self.planned(result);
     }
 
     /// Severs a rendered connection: proposes the removal of every concrete
@@ -672,13 +711,9 @@ impl Session {
                         .retract(&ProposedChange::AddRelation(concrete.clone())),
                 );
             }
-            match result {
-                Ok(()) => self.save_plan(),
-                Err(error) => self.status = Some(error.to_string()),
-            }
             // The additions left the viewed graph, so the picture sheds the
             // connection, and with it the selection.
-            self.rebuild_view();
+            self.planned(result);
             self.select(None);
             return;
         }
@@ -689,10 +724,7 @@ impl Session {
             }
             result = result.and(self.plan.propose(ProposedChange::RemoveRelation(concrete)));
         }
-        match result {
-            Ok(()) => self.save_plan(),
-            Err(error) => self.status = Some(error.to_string()),
-        }
+        self.planned(result);
     }
 
     /// Withdraws every planned removal behind a rendered connection.
@@ -710,23 +742,11 @@ impl Session {
         for concrete in planned {
             result = result.and(self.plan.retract(&ProposedChange::RemoveRelation(concrete)));
         }
-        match result {
-            Ok(()) => self.save_plan(),
-            Err(error) => self.status = Some(error.to_string()),
-        }
+        self.planned(result);
     }
 
     fn standing(&self, id: &ElementId) -> Standing {
         standing_of(&self.plan, &self.viewed, id)
-    }
-
-    /// What the plan does to each box the picture draws. A box the plan
-    /// leaves alone stays out of the answer.
-    fn node_statuses(&self) -> BTreeMap<ElementId, NodeStatus> {
-        match &self.scene {
-            Ok(scene) => node_statuses(&scene.view.graph, &self.viewed, &self.plan),
-            Err(_) => BTreeMap::new(),
-        }
     }
 
     /// Plans the removal of one element: the element itself, and with it
@@ -738,10 +758,7 @@ impl Session {
         for change in self.plan.removal_of_element(id, &self.graph) {
             result = result.and(self.plan.propose(change));
         }
-        match result {
-            Ok(()) => self.save_plan(),
-            Err(error) => self.status = Some(error.to_string()),
-        }
+        self.planned(result);
     }
 
     /// Withdraws the planned removal of one element: the entry on the
@@ -756,10 +773,7 @@ impl Session {
         for change in planned {
             result = result.and(self.plan.retract(&change));
         }
-        match result {
-            Ok(()) => self.save_plan(),
-            Err(error) => self.status = Some(error.to_string()),
-        }
+        self.planned(result);
     }
 
     /// Plans a new element inside a boundary, or - with no boundary - at the
@@ -794,18 +808,15 @@ impl Session {
         for change in changes {
             result = result.and(self.plan.propose(change));
         }
-        match result {
-            Ok(()) => {
-                self.addition.name.clear();
-                self.save_plan();
-                self.rebuild_view();
-                if self.shows(&added) {
-                    let selection = Selection::Node(added);
-                    self.select(Some(selection.clone()));
-                    self.reveal(&selection);
-                }
+        let planned = result.is_ok();
+        self.planned(result);
+        if planned {
+            self.addition.name.clear();
+            if self.shows(&added) {
+                let selection = Selection::Node(added);
+                self.select(Some(selection.clone()));
+                self.reveal(&selection);
             }
-            Err(error) => self.status = Some(error.to_string()),
         }
     }
 
@@ -827,13 +838,9 @@ impl Session {
             }
             result = result.and(self.plan.retract(&change));
         }
-        match result {
-            Ok(()) => self.save_plan(),
-            Err(error) => self.status = Some(error.to_string()),
-        }
         // The elements left the viewed graph, so the picture sheds their
         // boxes, and with them the selection.
-        self.rebuild_view();
+        self.planned(result);
         self.select(None);
     }
 
@@ -858,9 +865,8 @@ impl Session {
         });
         self.modifying = Modifying::Nothing;
         self.modification_draft.clear();
-        self.save_plan();
         // A renamed box carries longer text and needs a wider box.
-        self.rebuild_view();
+        self.planned(Ok(()));
         if let Some(selection) = self.selection.clone() {
             self.select(Some(selection));
         }
@@ -942,8 +948,7 @@ impl Session {
         self.plan.discard_modification(&subject);
         self.modifying = Modifying::Nothing;
         self.modification_draft.clear();
-        self.save_plan();
-        self.rebuild_view();
+        self.planned(Ok(()));
         if let Some(selection) = self.selection.clone() {
             self.select(Some(selection));
         }
@@ -993,15 +998,14 @@ impl Session {
             .propose(ProposedChange::AddRelation(relation.clone()))
         {
             Ok(()) => {
-                self.save_plan();
                 // The addition enters the viewed graph, and the lens rolls
                 // it up like any other dependency; the selection follows the
                 // connection that carries it here.
-                self.rebuild_view();
+                self.planned(Ok(()));
                 let rendered = self.rendered_for(&relation);
                 self.select(rendered.map(Selection::Edge));
             }
-            Err(error) => self.status = Some(error.to_string()),
+            Err(error) => self.planned(Err(error)),
         }
     }
 
@@ -1471,8 +1475,6 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
         }
         Ok(scene) => scene,
     };
-    let edges = session.edges();
-    let nodes = session.node_statuses();
     let (selected_edge, selected_node) = match &session.selection {
         Some(Selection::Edge(relation)) => (Some(relation), None),
         Some(Selection::Node(id)) => (None, Some(id)),
@@ -1481,16 +1483,20 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
     let action = canvas::show(
         ui,
         &Content {
+            generation: scene.generation,
             view: &scene.view.graph,
             layout: &scene.layout,
-            edges: &edges,
-            nodes: &nodes,
+            containment: &scene.containment,
+            world: scene.world,
+            edges: &scene.edges,
+            nodes: &scene.nodes,
             renames: &session.renames,
             selected_edge,
             selected_node,
             draw_source: session.draw_source.as_ref(),
         },
         &mut session.camera,
+        &mut session.strokes,
     );
     if let Some(action) = action {
         session.handle(action);
@@ -1499,6 +1505,7 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
 
 #[cfg(test)]
 mod tests {
+    use cutaway_planning::ports::plan_store::PlanStoreError;
     use eframe::egui::{pos2, vec2};
 
     use super::*;
@@ -1847,6 +1854,88 @@ mod tests {
                  detail, 4 of 11 dependencies.",
                 glyph::OUTWARD
             )
+        );
+    }
+
+    /// A store that keeps nothing: a session must be able to save its plan
+    /// somewhere, and what the picture shows does not depend on where.
+    struct Nowhere;
+
+    impl PlanStore for Nowhere {
+        fn load(&self) -> Result<Option<Plan>, PlanStoreError> {
+            Ok(None)
+        }
+
+        fn save(&self, _plan: &Plan) -> Result<(), PlanStoreError> {
+            Ok(())
+        }
+    }
+
+    /// A session over [`two_packages`] with an empty plan, cut at packages.
+    fn session() -> Session {
+        Session::open(OpenedProject {
+            graph: two_packages(),
+            plan: Plan::new(),
+            store: Box::new(Nowhere),
+        })
+    }
+
+    fn scene(session: &Session) -> &Scene {
+        session.scene.as_ref().expect("the picture stands")
+    }
+
+    #[test]
+    fn severing_a_connection_marks_it_in_the_picture_at_once() {
+        let mut session = session();
+        let rendered = scene(&session).edges[0].relation.clone();
+
+        session.sever(&rendered);
+
+        let marked = &scene(&session).edges[0];
+        assert_eq!(marked.relation, rendered);
+        assert_eq!(
+            marked.status,
+            EdgeStatus::Severed,
+            "the picture shows what the plan says the moment the plan says it"
+        );
+    }
+
+    #[test]
+    fn planning_a_removal_marks_its_boxes_in_the_picture_at_once() {
+        let mut session = session();
+
+        session.plan_removal(&id("package:a"));
+
+        assert_eq!(
+            scene(&session).nodes.get(&id("package:a")),
+            Some(&NodeStatus::Removed)
+        );
+    }
+
+    #[test]
+    fn a_plan_edit_hands_the_canvas_a_scene_of_its_own() {
+        let mut session = session();
+        let before = scene(&session).generation;
+
+        session.plan_removal(&id("package:a"));
+
+        assert!(
+            scene(&session).generation > before,
+            "a scene the canvas already routed must not pass for the new one"
+        );
+    }
+
+    #[test]
+    fn reading_the_picture_hands_the_canvas_the_scene_it_already_holds() {
+        let mut session = session();
+        let generation = scene(&session).generation;
+
+        session.select(Some(Selection::Node(id("package:a"))));
+
+        assert_eq!(
+            scene(&session).generation,
+            generation,
+            "a selection asks a question about the picture; it does not rebuild it"
         );
     }
 }
