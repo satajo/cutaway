@@ -111,10 +111,13 @@ pub const MODIFIED: Color32 = Color32::from_rgb(214, 162, 48);
 /// The two colours a selection speaks in: what the selected boundary depends
 /// on, and what depends on it. A selection asks both questions at once, and
 /// a single ink for both leaves the reader counting arrowheads to tell the
-/// answers apart. Blue and violet are the two hues furthest from the plan's
-/// three, so a lit connection never reads as a planned one.
-pub const DEPENDENCY: Color32 = Color32::from_rgb(85, 150, 230);
-pub const DEPENDENT: Color32 = Color32::from_rgb(160, 110, 225);
+/// answers apart. Cyan and magenta are the two hues the plan's red, green
+/// and amber leave free - orange would sit beside both the amber and the
+/// red - so a lit connection never reads as a planned one. Both run bright:
+/// they carry the answer the reader asked for and paint over the picture to
+/// give it.
+pub const DEPENDENCY: Color32 = Color32::from_rgb(60, 190, 215);
+pub const DEPENDENT: Color32 = Color32::from_rgb(225, 105, 195);
 
 /// The size a label paints at while the camera stands at 1:1.
 pub(crate) const LABEL_SIZE: f32 = 13.0;
@@ -1090,23 +1093,13 @@ fn paint_edges(
         );
         let selected = bundle.any(|edge| content.selected_edge == Some(&visual(edge).relation));
         let hovered = pointed.edge == Some(index);
-        // The scope and the crowd dim before the selection does: an internal
-        // edge stays behind the crossings, and a stroke among many stays
-        // behind a stroke that runs alone, whether anything is selected or
-        // not. The one stroke the reader asks about keeps all of its ink,
-        // however much company it has.
-        let asked_about = selected || hovered;
-        // Three reasons to hold a stroke back, and one step from the
-        // backdrop for all three: stepping once per reason would round three
-        // times, and a stroke that crosses another would still add ink where
-        // they meet.
-        let share = scope_ink(route.scope)
-            * if asked_about {
-                1.0
-            } else {
-                crowd_ink(route.crowd)
-            }
-            * share_of(emphasis.strengths[index]);
+        let share = stroke_share(
+            route.scope,
+            route.crowd,
+            emphasis.strengths[index],
+            selected || hovered,
+            paint.focus.is_some(),
+        );
         let color = toward(paint.background, ink, share);
         let width = edge_width(bundle.weight, route.scope)
             + if selected {
@@ -1158,6 +1151,39 @@ fn edge_width(weight: usize, scope: Scope) -> f32 {
         Scope::Intra => width * INTRA_WIDTH,
         Scope::Cross => width,
     }
+}
+
+/// How much of its ink one stroke keeps: how far it reaches, how much
+/// company it keeps, and what the reader asked about.
+///
+/// A stroke answers the reader when the pointer holds it, when it is the
+/// selected connection, or when a standing selection lights it. An answer
+/// keeps every drop of its ink: it already paints over the boxes, and
+/// holding it back for the room it runs in or the company it keeps buries
+/// the very thing the reader asked to see.
+///
+/// Everything else falls back for its reach and its crowd: an internal edge
+/// stays behind the crossings, and a stroke among many stays behind one
+/// that runs alone. With nothing selected every stroke stands focused, so
+/// the reach and the crowd are the whole of what separates the picture.
+///
+/// The three reasons meet in one share, and the caller steps once from the
+/// backdrop with it: stepping once per reason would round three times, and
+/// a stroke that crosses another would still add ink where they meet.
+fn stroke_share(
+    scope: Scope,
+    crowd: usize,
+    strength: Strength,
+    asked_about: bool,
+    selection_stands: bool,
+) -> f32 {
+    let answering = asked_about || (selection_stands && strength == Strength::Focused);
+    let held_back = if answering {
+        1.0
+    } else {
+        scope_ink(scope) * crowd_ink(crowd)
+    };
+    held_back * share_of(strength)
 }
 
 /// How much of its ink a stroke keeps for the reach it has: an edge that
@@ -1698,6 +1724,47 @@ mod tests {
             lifted(&[Strength::Focused, Strength::Focused], Some(0), false),
             vec![false, false],
             "with no question asked the strokes draw in one pass, under the boxes"
+        );
+    }
+
+    /// A stroke in the busiest room the picture has: inside one top-level
+    /// boundary, on a side it shares with a full crowd. Everything the
+    /// reach and the crowd can hold back is held back from it.
+    fn crowded(strength: Strength, asked_about: bool, selection_stands: bool) -> f32 {
+        stroke_share(Scope::Intra, 16, strength, asked_about, selection_stands)
+    }
+
+    #[test]
+    fn a_lit_stroke_paints_at_full_ink_while_a_selection_stands() {
+        assert!(
+            (crowded(Strength::Focused, false, true) - 1.0).abs() < 0.001,
+            "the answer the reader asked for is not held back by the room \
+             it runs in or the company it keeps"
+        );
+    }
+
+    #[test]
+    fn a_faded_stroke_keeps_its_crowd_under_the_same_selection() {
+        let held_back = crowded(Strength::Faded, false, true);
+        assert!(
+            (held_back - INTRA * CROWD_INK * FADE).abs() < 0.001,
+            "a stroke outside the answer still stands behind the strokes \
+             that run alone: {held_back}"
+        );
+    }
+
+    #[test]
+    fn the_stroke_the_pointer_holds_keeps_all_of_its_ink() {
+        assert!((crowded(Strength::Context, true, true) - CONTEXT).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_reach_and_the_crowd_speak_while_nothing_is_selected() {
+        let alone = crowded(Strength::Focused, false, false);
+        assert!(
+            (alone - INTRA * CROWD_INK).abs() < 0.001,
+            "with no question asked every stroke stands focused, and the \
+             reach and the crowd are all that separates them: {alone}"
         );
     }
 

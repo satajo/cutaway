@@ -38,9 +38,14 @@ pub(crate) fn show(ui: &mut egui::Ui, session: &mut Session) {
 /// One row of a list: what it says, and what clicking it selects.
 #[derive(Debug)]
 struct Row {
-    /// The glyph the row opens with, in an ink of its own. None where the
-    /// row opens with nothing but its text.
-    mark: Option<Mark>,
+    /// The glyph the row opens with. None where the row opens with nothing
+    /// but its text.
+    glyph: Option<&'static str>,
+    /// The ink the whole row speaks in, glyph and text alike, where the row
+    /// answers one of the two questions a selection asks. A row is one
+    /// answer, so it wears one colour and wears it whole; None leaves the
+    /// colour to the theme.
+    ink: Option<egui::Color32>,
     text: String,
     /// None when the row names something this view holds no boundary for.
     /// The row still reads; it just leads nowhere.
@@ -48,21 +53,13 @@ struct Row {
 }
 
 impl Row {
-    /// The whole row as one run of text, mark included.
+    /// The whole row as one run of text, glyph included.
     fn reading(&self) -> String {
-        match self.mark {
-            Some(mark) => format!("{} {}", mark.glyph, self.text),
+        match self.glyph {
+            Some(glyph) => format!("{glyph} {}", self.text),
             None => self.text.clone(),
         }
     }
-}
-
-/// A glyph that opens a row and carries a colour of its own, so the panel
-/// and the canvas say the same thing about the same connection.
-#[derive(Debug, Clone, Copy)]
-struct Mark {
-    glyph: &'static str,
-    color: egui::Color32,
 }
 
 /// How loudly a list speaks.
@@ -122,8 +119,8 @@ fn help(ui: &mut egui::Ui) {
          strength.",
     );
     ui.label(
-        "The connections the selection depends on turn blue, and the ones that depend \
-         on it turn violet; the panel marks them the same way. Both paint over the \
+        "The connections the selection depends on turn cyan, and the ones that depend \
+         on it turn magenta; the panel lists them the same way. Both paint over the \
          picture while the selection stands.",
     );
     ui.label("A box grows with the number of concepts inside it.");
@@ -197,12 +194,26 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
         ui.label("Contains:");
         chosen = list(ui, &panel.contents, Prominence::Primary).or(chosen);
     }
-    ui.separator();
-    ui.label("Connections:");
     if panel.connections.is_empty() {
+        ui.separator();
         ui.label("Nothing crosses this boundary.");
-    } else {
-        chosen = list(ui, &panel.connections, Prominence::Primary).or(chosen);
+    }
+    // The heading wears the ink of the rows under it, so the panel says
+    // what the picture says: one colour per question the selection asks.
+    for (heading, ink, rows) in [
+        (
+            "Depends on:",
+            canvas::DEPENDENCY,
+            &panel.connections.depends_on,
+        ),
+        ("Used by:", canvas::DEPENDENT, &panel.connections.used_by),
+    ] {
+        if rows.is_empty() {
+            continue;
+        }
+        ui.separator();
+        ui.colored_label(ink, heading);
+        chosen = list(ui, rows, Prominence::Primary).or(chosen);
     }
     if let Some(target) = chosen {
         go_to(session, &target);
@@ -639,8 +650,10 @@ fn capped<T>(rows: &[T]) -> (&[T], usize) {
 /// and answers it with the link colour and an underline: the row must sit in
 /// the background and still promise it leads somewhere.
 ///
-/// A row's mark keeps its own ink through all of that: it says which way a
-/// connection runs, and the answer does not change with the pointer.
+/// A row that carries an ink of its own speaks in it whatever the pointer
+/// does. The ink says which way a connection runs, and an answer that
+/// changed colour under the pointer would say the connection had turned
+/// around; the underline carries the promise instead.
 fn link(ui: &mut egui::Ui, row: &Row, prominence: Prominence) -> egui::Response {
     let font = match prominence {
         Prominence::Primary => egui::TextStyle::Body,
@@ -648,8 +661,8 @@ fn link(ui: &mut egui::Ui, row: &Row, prominence: Prominence) -> egui::Response 
     }
     .resolve(ui.style());
     let mut written = egui::text::LayoutJob::default();
-    if let Some(mark) = row.mark {
-        run(&mut written, mark.glyph, &font, mark.color);
+    if let Some(glyph) = row.glyph {
+        run(&mut written, glyph, &font, egui::Color32::PLACEHOLDER);
         run(&mut written, " ", &font, egui::Color32::PLACEHOLDER);
     }
     run(&mut written, &row.text, &font, egui::Color32::PLACEHOLDER);
@@ -660,13 +673,15 @@ fn link(ui: &mut egui::Ui, row: &Row, prominence: Prominence) -> egui::Response 
         .sense(egui::Sense::click())
         .layout_in_ui(ui);
     let linked = ui.visuals().hyperlink_color;
-    let (color, underline) = match prominence {
-        Prominence::Primary => (linked, egui::Stroke::NONE),
-        Prominence::Quiet if response.hovered() => (
-            linked,
-            egui::Stroke::new(ui.style().interact(&response).fg_stroke.width, linked),
-        ),
-        Prominence::Quiet => (ui.visuals().weak_text_color(), egui::Stroke::NONE),
+    let underlined = |color: egui::Color32| {
+        egui::Stroke::new(ui.style().interact(&response).fg_stroke.width, color)
+    };
+    let (color, underline) = match (row.ink, prominence) {
+        (Some(ink), _) if response.hovered() => (ink, underlined(ink)),
+        (Some(ink), _) => (ink, egui::Stroke::NONE),
+        (None, Prominence::Primary) => (linked, egui::Stroke::NONE),
+        (None, Prominence::Quiet) if response.hovered() => (linked, underlined(linked)),
+        (None, Prominence::Quiet) => (ui.visuals().weak_text_color(), egui::Stroke::NONE),
     };
     let elided = galley.elided;
     ui.painter()
@@ -702,7 +717,7 @@ struct NodePanel {
     /// inside it.
     element_kind: ElementKind,
     contents: Vec<Row>,
-    connections: Vec<Row>,
+    connections: Connections,
 }
 
 fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
@@ -755,21 +770,37 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
     focus::contents_of(view, id)
         .into_iter()
         .map(|child| Row {
-            mark: None,
+            glyph: None,
+            ink: None,
             text: labels.label(child).text(),
             target: Some(Selection::Node(child.clone())),
         })
         .collect()
 }
 
+/// What a boundary connects to, one list per question the selection asks.
+/// The reader asks what a boundary leans on and what leans on it as two
+/// questions, and one list of rows makes them read the answers apart by
+/// arrowhead; two lists answer them one each.
+struct Connections {
+    depends_on: Vec<Row>,
+    used_by: Vec<Row>,
+}
+
+impl Connections {
+    fn is_empty(&self) -> bool {
+        self.depends_on.is_empty() && self.used_by.is_empty()
+    }
+}
+
 /// What a boundary connects to: the drawn edges that touch it - the edges
 /// on the frame's own border included - and the edges that cross the border
-/// of anything it holds. Outgoing first, heaviest first.
+/// of anything it holds. Heaviest first within each list.
 ///
-/// Each row opens with the mark the canvas paints that connection in while
-/// the boundary stands selected, so a row and the line it names are read as
-/// one answer.
-fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> Vec<Row> {
+/// Each row wears the ink the canvas paints that connection in while the
+/// boundary stands selected, so a row and the line it names are read as one
+/// answer.
+fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> Connections {
     let containment = Containment::of(&view.graph);
     let crossing = crossings(view, &containment.subtree(id));
     let names = labels.distinct(
@@ -779,30 +810,21 @@ fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> 
             .chain(&crossing.inward)
             .map(|crossing| crossing.partner),
     );
-    let row = |mark: Mark, crossing: &Crossing<'_>| Row {
-        mark: Some(mark),
-        text: format!("{} ({})", names.name(crossing.partner), crossing.concrete),
-        target: Some(Selection::Edge(crossing.edge.clone())),
+    let rows = |crossings: &[Crossing<'_>], glyph, ink| {
+        crossings
+            .iter()
+            .map(|crossing| Row {
+                glyph: Some(glyph),
+                ink: Some(ink),
+                text: format!("{} ({})", names.name(crossing.partner), crossing.concrete),
+                target: Some(Selection::Edge(crossing.edge.clone())),
+            })
+            .collect()
     };
-    let depends_on = Mark {
-        glyph: glyph::OUTWARD,
-        color: canvas::DEPENDENCY,
-    };
-    let depended_on = Mark {
-        glyph: glyph::INWARD,
-        color: canvas::DEPENDENT,
-    };
-    crossing
-        .outward
-        .iter()
-        .map(|crossing| row(depends_on, crossing))
-        .chain(
-            crossing
-                .inward
-                .iter()
-                .map(|crossing| row(depended_on, crossing)),
-        )
-        .collect()
+    Connections {
+        depends_on: rows(&crossing.outward, glyph::OUTWARD, canvas::DEPENDENCY),
+        used_by: rows(&crossing.inward, glyph::INWARD, canvas::DEPENDENT),
+    }
 }
 
 /// The dependencies with an endpoint no boundary holds. They lead nowhere:
@@ -816,7 +838,8 @@ fn unscoped_rows(view: &BoundaryView, concrete: &Labels<'_>) -> Vec<Row> {
     view.unscoped
         .iter()
         .map(|relation| Row {
-            mark: None,
+            glyph: None,
+            ink: None,
             text: format!(
                 "{} {} {}",
                 names.name(&relation.from),
@@ -846,7 +869,8 @@ fn provenance_rows(
     let names = concrete.distinct(behind().flat_map(|edge| [&edge.from, &edge.to]));
     behind()
         .map(|edge| Row {
-            mark: None,
+            glyph: None,
+            ink: None,
             text: format!(
                 "{}{} {} {}",
                 if plan.plans_removal_of(edge) {
@@ -1001,26 +1025,46 @@ mod tests {
         graph
     }
 
-    fn rows_of(view: &BoundaryView, id_text: &str) -> Vec<Row> {
+    fn rows_of(view: &BoundaryView, id_text: &str) -> Connections {
         let labels = Labels::of(&view.graph);
         connection_rows(view, &labels, &id(id_text))
     }
 
-    /// A row as the reader reads it: its mark and its text, in one run.
+    /// A row as the reader reads it: its glyph and its text, in one run.
     fn texts(rows: &[Row]) -> Vec<String> {
         rows.iter().map(Row::reading).collect()
     }
 
     #[test]
-    fn a_boundary_lists_what_it_depends_on_before_what_depends_on_it() {
+    fn a_boundary_lists_what_it_depends_on_apart_from_what_uses_it() {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let connections = rows_of(&view, "package:a");
         assert_eq!(
-            texts(&rows_of(&view, "package:a")),
+            texts(&connections.depends_on),
             [
                 format!("{} b/one (3)", glyph::OUTWARD),
-                format!("{} c/one (1)", glyph::OUTWARD),
-                format!("{} b/one (1)", glyph::INWARD)
-            ]
+                format!("{} c/one (1)", glyph::OUTWARD)
+            ],
+            "one list answers what the boundary leans on"
+        );
+        assert_eq!(
+            texts(&connections.used_by),
+            [format!("{} b/one (1)", glyph::INWARD)],
+            "and the other answers what leans on it"
+        );
+    }
+
+    #[test]
+    fn a_boundary_nothing_crosses_lists_neither_way() {
+        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        assert!(
+            rows_of(&view, "c/one").depends_on.is_empty(),
+            "c/one is reached and reaches nothing"
+        );
+        assert!(!rows_of(&view, "c/one").is_empty());
+        assert!(
+            rows_of(&view, "a/two#type:X").is_empty(),
+            "a boundary outside the picture's cut crosses nothing at all"
         );
     }
 
@@ -1034,14 +1078,13 @@ mod tests {
             RelationKind::DependsOn,
         );
         let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
-        let rows = rows_of(&view, "package:a");
+        let rows = rows_of(&view, "package:a").depends_on;
         assert_eq!(
             texts(&rows),
             [
                 format!("{} b/one (3)", glyph::OUTWARD),
                 format!("{} c/one (1)", glyph::OUTWARD),
-                format!("{} package:c (1)", glyph::OUTWARD),
-                format!("{} b/one (1)", glyph::INWARD)
+                format!("{} package:c (1)", glyph::OUTWARD)
             ],
             "the edge attached to the frame itself is one row among the others"
         );
@@ -1052,30 +1095,43 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_row_is_marked_in_the_color_the_canvas_paints_it_in() {
+    fn a_connection_row_wears_the_ink_the_canvas_paints_it_in() {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
-        let marks: Vec<(&str, egui::Color32)> = rows_of(&view, "package:a")
-            .iter()
-            .map(|row| {
-                let mark = row.mark.expect("a connection row carries a direction");
-                (mark.glyph, mark.color)
-            })
-            .collect();
+        let connections = rows_of(&view, "package:a");
+        let worn = |rows: &[Row]| -> Vec<(Option<&'static str>, Option<egui::Color32>)> {
+            rows.iter().map(|row| (row.glyph, row.ink)).collect()
+        };
         assert_eq!(
-            marks,
+            worn(&connections.depends_on),
             [
-                (glyph::OUTWARD, canvas::DEPENDENCY),
-                (glyph::OUTWARD, canvas::DEPENDENCY),
-                (glyph::INWARD, canvas::DEPENDENT)
+                (Some(glyph::OUTWARD), Some(canvas::DEPENDENCY)),
+                (Some(glyph::OUTWARD), Some(canvas::DEPENDENCY))
             ],
-            "a row says which way its connection runs in the colour and the glyph both"
+            "a row the selection depends on speaks in the dependency ink, whole"
         );
+        assert_eq!(
+            worn(&connections.used_by),
+            [(Some(glyph::INWARD), Some(canvas::DEPENDENT))],
+            "and a row that depends on the selection speaks in the other"
+        );
+    }
+
+    #[test]
+    fn a_row_that_answers_no_question_leaves_its_colour_to_the_theme() {
+        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let labels = Labels::of(&view.graph);
+        for row in contents_rows(&view.graph, &labels, &id("package:a")) {
+            assert_eq!(
+                row.ink, None,
+                "what a boundary holds is not one of the two answers a selection asks for"
+            );
+        }
     }
 
     #[test]
     fn a_connection_row_counts_every_concrete_dependency_behind_it() {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
-        let rows = rows_of(&view, "a/two");
+        let rows = rows_of(&view, "a/two").depends_on;
         assert_eq!(
             texts(&rows),
             [format!("{} b/one (2)", glyph::OUTWARD)],
@@ -1086,7 +1142,7 @@ mod tests {
     #[test]
     fn a_connection_row_selects_the_heaviest_edge_to_its_partner() {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
-        let rows = rows_of(&view, "package:a");
+        let rows = rows_of(&view, "package:a").depends_on;
         assert_eq!(
             rows[0].target,
             Some(Selection::Edge(depends("a/two", "b/one"))),
@@ -1097,17 +1153,20 @@ mod tests {
     #[test]
     fn the_connections_of_a_leaf_are_the_edges_that_touch_it() {
         let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
-        let rows = rows_of(&view, "a/one");
+        let connections = rows_of(&view, "a/one");
         assert_eq!(
-            texts(&rows),
+            texts(&connections.depends_on),
             [
                 format!("{} b/one (1)", glyph::OUTWARD),
-                format!("{} c/one (1)", glyph::OUTWARD),
-                format!("{} b/one (1)", glyph::INWARD)
+                format!("{} c/one (1)", glyph::OUTWARD)
             ]
         );
         assert_eq!(
-            rows[2].target,
+            texts(&connections.used_by),
+            [format!("{} b/one (1)", glyph::INWARD)]
+        );
+        assert_eq!(
+            connections.used_by[0].target,
             Some(Selection::Edge(depends("b/one", "a/one")))
         );
     }
@@ -1127,7 +1186,7 @@ mod tests {
         }
         let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
         assert_eq!(
-            texts(&rows_of(&view, "app/lib.rs")),
+            texts(&rows_of(&view, "app/lib.rs").depends_on),
             [
                 format!(
                     "{} {} (1)",
