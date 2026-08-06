@@ -37,10 +37,31 @@ pub(crate) fn show(ui: &mut egui::Ui, session: &mut Session) {
 /// One row of a list: what it says, and what clicking it selects.
 #[derive(Debug)]
 struct Row {
+    /// The glyph the row opens with, in an ink of its own. None where the
+    /// row opens with nothing but its text.
+    mark: Option<Mark>,
     text: String,
     /// None when the row names something this view holds no boundary for.
     /// The row still reads; it just leads nowhere.
     target: Option<Selection>,
+}
+
+impl Row {
+    /// The whole row as one run of text, mark included.
+    fn reading(&self) -> String {
+        match self.mark {
+            Some(mark) => format!("{} {}", mark.glyph, self.text),
+            None => self.text.clone(),
+        }
+    }
+}
+
+/// A glyph that opens a row and carries a colour of its own, so the panel
+/// and the canvas say the same thing about the same connection.
+#[derive(Debug, Clone, Copy)]
+struct Mark {
+    glyph: &'static str,
+    color: egui::Color32,
 }
 
 /// How loudly a list speaks.
@@ -99,6 +120,11 @@ fn help(ui: &mut egui::Ui) {
          everything inside it, and every dependency that crosses its border, at full \
          strength.",
     );
+    ui.label(
+        "The connections the selection depends on turn blue, and the ones that depend \
+         on it turn violet; the panel marks them the same way. Both paint over the \
+         picture while the selection stands.",
+    );
     ui.label("A box grows with the number of concepts inside it.");
     ui.label(
         "A connection that ends at a boundary's border speaks about the boundary's own \
@@ -133,7 +159,7 @@ fn help(ui: &mut egui::Ui) {
          to plan its removal, or to plan a new one inside it.",
     );
     ui.label(
-        "A boundary that stays and changes turns blue: rename, split, merge or \
+        "A boundary that stays and changes turns amber: rename, split, merge or \
          rework it from its panel. A modification states intent for whoever \
          implements the plan and redraws nothing, so its note carries the rest \
          of the story.",
@@ -583,12 +609,12 @@ fn list(ui: &mut egui::Ui, rows: &[Row], prominence: Prominence) -> Option<Selec
     for row in shown {
         match &row.target {
             Some(target) => {
-                if link(ui, &row.text, prominence).clicked() {
+                if link(ui, row, prominence).clicked() {
                     chosen = Some(target.clone());
                 }
             }
             None => {
-                ui.small(row.text.as_str());
+                ui.small(row.reading());
             }
         }
     }
@@ -611,11 +637,21 @@ fn capped<T>(rows: &[T]) -> (&[T], usize) {
 /// A quiet row reads in the colour of an aside until the pointer reaches it,
 /// and answers it with the link colour and an underline: the row must sit in
 /// the background and still promise it leads somewhere.
-fn link(ui: &mut egui::Ui, text: &str, prominence: Prominence) -> egui::Response {
-    let written = match prominence {
-        Prominence::Primary => egui::RichText::new(text),
-        Prominence::Quiet => egui::RichText::new(text).small(),
-    };
+///
+/// A row's mark keeps its own ink through all of that: it says which way a
+/// connection runs, and the answer does not change with the pointer.
+fn link(ui: &mut egui::Ui, row: &Row, prominence: Prominence) -> egui::Response {
+    let font = match prominence {
+        Prominence::Primary => egui::TextStyle::Body,
+        Prominence::Quiet => egui::TextStyle::Small,
+    }
+    .resolve(ui.style());
+    let mut written = egui::text::LayoutJob::default();
+    if let Some(mark) = row.mark {
+        run(&mut written, mark.glyph, &font, mark.color);
+        run(&mut written, " ", &font, egui::Color32::PLACEHOLDER);
+    }
+    run(&mut written, &row.text, &font, egui::Color32::PLACEHOLDER);
     // The row decides its colour from its own hover, so it is laid out and
     // sensed first and painted after, rather than added as a whole.
     let (position, galley, response) = egui::Label::new(written)
@@ -636,10 +672,25 @@ fn link(ui: &mut egui::Ui, text: &str, prominence: Prominence) -> egui::Response
         .add(egui::epaint::TextShape::new(position, galley, color).with_underline(underline));
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if elided {
-        response.on_hover_text(text)
+        response.on_hover_text(row.reading())
     } else {
         response
     }
+}
+
+/// Adds one run of a row's text. [`egui::Color32::PLACEHOLDER`] leaves the
+/// colour to the paint, which is where a row learns whether the pointer
+/// rests on it.
+fn run(written: &mut egui::text::LayoutJob, text: &str, font: &egui::FontId, color: egui::Color32) {
+    written.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font.clone(),
+            color,
+            ..Default::default()
+        },
+    );
 }
 
 /// What the panel says about a selected boundary.
@@ -703,6 +754,7 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
     focus::contents_of(view, id)
         .into_iter()
         .map(|child| Row {
+            mark: None,
             text: labels.label(child).text(),
             target: Some(Selection::Node(child.clone())),
         })
@@ -712,6 +764,10 @@ fn contents_rows(view: &ArchitectureGraph, labels: &Labels<'_>, id: &ElementId) 
 /// What a boundary connects to: the drawn edges that touch it - the edges
 /// on the frame's own border included - and the edges that cross the border
 /// of anything it holds. Outgoing first, heaviest first.
+///
+/// Each row opens with the mark the canvas paints that connection in while
+/// the boundary stands selected, so a row and the line it names are read as
+/// one answer.
 fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> Vec<Row> {
     let crossing = crossings(view, &focus::subtree_of(&view.graph, id));
     let names = labels.distinct(
@@ -721,23 +777,28 @@ fn connection_rows(view: &BoundaryView, labels: &Labels<'_>, id: &ElementId) -> 
             .chain(&crossing.inward)
             .map(|crossing| crossing.partner),
     );
-    let row = |direction: &str, crossing: &Crossing<'_>| Row {
-        text: format!(
-            "{direction} {} ({})",
-            names.name(crossing.partner),
-            crossing.concrete
-        ),
+    let row = |mark: Mark, crossing: &Crossing<'_>| Row {
+        mark: Some(mark),
+        text: format!("{} ({})", names.name(crossing.partner), crossing.concrete),
         target: Some(Selection::Edge(crossing.edge.clone())),
+    };
+    let depends_on = Mark {
+        glyph: glyph::OUTWARD,
+        color: canvas::DEPENDENCY,
+    };
+    let depended_on = Mark {
+        glyph: glyph::INWARD,
+        color: canvas::DEPENDENT,
     };
     crossing
         .outward
         .iter()
-        .map(|crossing| row(glyph::OUTWARD, crossing))
+        .map(|crossing| row(depends_on, crossing))
         .chain(
             crossing
                 .inward
                 .iter()
-                .map(|crossing| row(glyph::INWARD, crossing)),
+                .map(|crossing| row(depended_on, crossing)),
         )
         .collect()
 }
@@ -753,6 +814,7 @@ fn unscoped_rows(view: &BoundaryView, concrete: &Labels<'_>) -> Vec<Row> {
     view.unscoped
         .iter()
         .map(|relation| Row {
+            mark: None,
             text: format!(
                 "{} {} {}",
                 names.name(&relation.from),
@@ -782,6 +844,7 @@ fn provenance_rows(
     let names = concrete.distinct(behind().flat_map(|edge| [&edge.from, &edge.to]));
     behind()
         .map(|edge| Row {
+            mark: None,
             text: format!(
                 "{}{} {} {}",
                 if plan.plans_removal_of(edge) {
@@ -941,8 +1004,9 @@ mod tests {
         connection_rows(view, &labels, &id(id_text))
     }
 
-    fn texts(rows: &[Row]) -> Vec<&str> {
-        rows.iter().map(|row| row.text.as_str()).collect()
+    /// A row as the reader reads it: its mark and its text, in one run.
+    fn texts(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(Row::reading).collect()
     }
 
     #[test]
@@ -982,6 +1046,27 @@ mod tests {
         assert_eq!(
             rows[2].target,
             Some(Selection::Edge(depends("package:a", "package:c")))
+        );
+    }
+
+    #[test]
+    fn a_connection_row_is_marked_in_the_color_the_canvas_paints_it_in() {
+        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let marks: Vec<(&str, egui::Color32)> = rows_of(&view, "package:a")
+            .iter()
+            .map(|row| {
+                let mark = row.mark.expect("a connection row carries a direction");
+                (mark.glyph, mark.color)
+            })
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                (glyph::OUTWARD, canvas::DEPENDENCY),
+                (glyph::OUTWARD, canvas::DEPENDENCY),
+                (glyph::INWARD, canvas::DEPENDENT)
+            ],
+            "a row says which way its connection runs in the colour and the glyph both"
         );
     }
 

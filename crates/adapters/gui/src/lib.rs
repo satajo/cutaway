@@ -14,7 +14,7 @@
 //! exactly as a real one does. What the plan removes stays in the picture
 //! too, marked red: the reader must see what is going. What the plan
 //! modifies - renamed, split, merged, reworked - stays where it is and turns
-//! blue: a modification states intent for whoever implements the plan and
+//! amber: a modification states intent for whoever implements the plan and
 //! redraws nothing, so only the mark can say it.
 //!
 //! The toolbar's three stops set the detail of the whole picture, and single

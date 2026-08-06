@@ -18,7 +18,7 @@ use eframe::egui::{
 
 use crate::bundle::{self, Bundle};
 use crate::camera::{self, Camera};
-use crate::focus::{Focus, Selected, Strength, focus_of};
+use crate::focus::{Direction, Focus, Selected, Strength, focus_of};
 use crate::glyph;
 use crate::label::{Label, Labels, Renames};
 use crate::layout::{HEADER, Layout};
@@ -63,7 +63,7 @@ pub enum NodeStatus {
     /// connection reads.
     Added,
     /// The element stays where it is and changes: renamed, split, merged
-    /// into another, or reworked. Blue, because neither what is going nor
+    /// into another, or reworked. Amber, because neither what is going nor
     /// what is arriving describes it.
     Modified,
 }
@@ -98,7 +98,15 @@ pub struct Content<'a> {
 /// so no mark shouts over the others and the picture reads as one plan.
 pub const SEVERED: Color32 = Color32::from_rgb(205, 70, 60);
 pub const DRAWN: Color32 = Color32::from_rgb(70, 165, 80);
-pub const MODIFIED: Color32 = Color32::from_rgb(85, 150, 230);
+pub const MODIFIED: Color32 = Color32::from_rgb(214, 162, 48);
+
+/// The two colours a selection speaks in: what the selected boundary depends
+/// on, and what depends on it. A selection asks both questions at once, and
+/// a single ink for both leaves the reader counting arrowheads to tell the
+/// answers apart. Blue and violet are the two hues furthest from the plan's
+/// three, so a lit connection never reads as a planned one.
+pub const DEPENDENCY: Color32 = Color32::from_rgb(85, 150, 230);
+pub const DEPENDENT: Color32 = Color32::from_rgb(160, 110, 225);
 
 /// The size a label paints at while the camera stands at 1:1.
 pub(crate) const LABEL_SIZE: f32 = 13.0;
@@ -557,6 +565,14 @@ impl Paint<'_> {
             .map_or(Strength::Focused, |focus| focus.edge(relation))
     }
 
+    /// Which way this edge runs about the selection. Nothing selected is
+    /// nothing asked, so no edge runs any way at all.
+    fn direction(&self, relation: &Relation) -> Option<Direction> {
+        self.focus
+            .as_ref()
+            .and_then(|focus| focus.direction(relation))
+    }
+
     /// The ink a frame at this nesting depth tints its interior toward.
     fn wash(&self, depth: usize) -> Color32 {
         self.washes[depth % 2]
@@ -624,6 +640,90 @@ fn shade(background: Color32, ink: Color32, strength: Strength) -> Color32 {
     toward(background, ink, share_of(strength))
 }
 
+/// The ink a stroke draws its line, its arrowhead and its annotation mark
+/// in.
+///
+/// The plan speaks first: a connection it removes or adds is going or
+/// arriving whatever the reader asks about. Everything the architecture
+/// carries answers the selection instead, one colour per question - what the
+/// selection depends on, what depends on the selection - so the two answers
+/// never have to be told apart by following an arrow to its head. A
+/// connection with both ends inside the selection answers neither question
+/// and keeps the picture's own ink, as does every connection while nothing
+/// is selected.
+fn edge_ink(base: Color32, status: EdgeStatus, direction: Option<Direction>) -> Color32 {
+    match status {
+        EdgeStatus::Severed => SEVERED,
+        EdgeStatus::Drawn => DRAWN,
+        // A partly severed connection mostly stays, so it reads as the
+        // connection it is; the red mark by its arrowhead carries the plan's
+        // part of the story.
+        EdgeStatus::Existing | EdgeStatus::PartiallySevered { .. } => match direction {
+            Some(Direction::Outgoing) => DEPENDENCY,
+            Some(Direction::Incoming) => DEPENDENT,
+            Some(Direction::Internal) | None => base,
+        },
+    }
+}
+
+/// The one way a stroke runs about the selection, out of the ways the edges
+/// it draws run. A stroke is a single line and carries a single answer, so
+/// edges that disagree - and a stroke the selection says nothing about -
+/// leave it without a direction.
+fn agreed(directions: impl IntoIterator<Item = Option<Direction>>) -> Option<Direction> {
+    let mut agreed: Option<Direction> = None;
+    for direction in directions.into_iter().flatten() {
+        match agreed {
+            None => agreed = Some(direction),
+            Some(first) if first == direction => {}
+            Some(_) => return None,
+        }
+    }
+    agreed
+}
+
+/// How each stroke of one frame paints: how strongly, and whether it paints
+/// over the boxes or under them. Both answers come from one walk over the
+/// strokes, and both passes of the painting read them.
+struct Strokes {
+    strengths: Vec<Strength>,
+    lifted: Vec<bool>,
+}
+
+impl Strokes {
+    fn of(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) -> Strokes {
+        let strengths: Vec<Strength> = drawn
+            .strokes
+            .iter()
+            .map(|stroke| {
+                stroke
+                    .bundle
+                    .strength(|edge| paint.edge(&content.edges[edge].relation))
+            })
+            .collect();
+        let lifted = lifted(&strengths, drawn.hovered, paint.focus.is_some());
+        Strokes { strengths, lifted }
+    }
+}
+
+/// Which strokes paint after the boxes instead of before them.
+///
+/// The strokes a selection lights are the answer the reader asked for, and
+/// an answer painted under the boxes and among the faded strokes is one the
+/// reader has to dig out: a leaf covers it, and any dim stroke drawn later
+/// crosses over it. So the lit strokes - and the one the pointer holds -
+/// paint last, over everything. With nothing selected there is no answer to
+/// lift and every stroke paints in one pass, under the boxes it runs between.
+fn lifted(strengths: &[Strength], hovered: Option<usize>, selected: bool) -> Vec<bool> {
+    strengths
+        .iter()
+        .enumerate()
+        .map(|(index, strength)| {
+            selected && (*strength == Strength::Focused || hovered == Some(index))
+        })
+        .collect()
+}
+
 fn paint(
     ui: &Ui,
     content: &Content<'_>,
@@ -644,9 +744,11 @@ fn paint(
         labels: Labels::renaming(content.view, content.renames),
         focus: focus(content),
     };
+    let strokes = Strokes::of(&paint, content, drawn);
     paint_containers(&paint, content, summary, hovered_node);
-    paint_edges(&paint, content, drawn);
+    paint_edges(&paint, content, drawn, &strokes, false);
     paint_leaves(&paint, content, summary, hovered_node);
+    paint_edges(&paint, content, drawn, &strokes, true);
 }
 
 /// The selection's neighborhood. None when nothing is selected: then
@@ -822,8 +924,21 @@ fn fitted_size(room: Vec2, at_desired: Vec2, desired: f32, floor: f32) -> Option
     (fitted >= floor).then_some(fitted)
 }
 
-fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
+/// Draws one pass of the strokes: the ones that lie under the boxes, or the
+/// lit ones that lie over them. Each stroke carries its arrowhead and its
+/// marks into whichever pass it belongs to, so a lifted connection arrives
+/// whole.
+fn paint_edges(
+    paint: &Paint<'_>,
+    content: &Content<'_>,
+    drawn: &Drawn,
+    strokes: &Strokes,
+    over: bool,
+) {
     for (index, stroke) in drawn.strokes.iter().enumerate() {
+        if strokes.lifted[index] != over {
+            continue;
+        }
         let (Some(route), Some(points)) = (&stroke.route, &stroke.curve) else {
             continue;
         };
@@ -832,14 +947,16 @@ fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
         // A stroke draws in the manner of the edge it answers for, and a
         // merged one gathers edges of the current architecture alone.
         let lead = visual(bundle.lead);
-        // A partly severed connection keeps the stroke of an existing one:
-        // most of what it stands for stays, and the red mark by the
-        // arrowhead carries the plan's part of the story.
-        let ink = match lead.status {
-            EdgeStatus::Existing | EdgeStatus::PartiallySevered { .. } => paint.base,
-            EdgeStatus::Severed => SEVERED,
-            EdgeStatus::Drawn => DRAWN,
-        };
+        let ink = edge_ink(
+            paint.base,
+            lead.status,
+            agreed(
+                bundle
+                    .members
+                    .iter()
+                    .map(|edge| paint.direction(&visual(*edge).relation)),
+            ),
+        );
         let selected = bundle.any(|edge| content.selected_edge == Some(&visual(edge).relation));
         let hovered = drawn.hovered == Some(index);
         // The scope and the crowd dim before the selection does: an internal
@@ -858,7 +975,7 @@ fn paint_edges(paint: &Paint<'_>, content: &Content<'_>, drawn: &Drawn) {
             } else {
                 crowd_ink(route.crowd)
             }
-            * share_of(bundle.strength(|edge| paint.edge(&visual(edge).relation)));
+            * share_of(strokes.strengths[index]);
         let color = toward(paint.background, ink, share);
         let width = edge_width(bundle.weight, route.scope)
             + if selected {
@@ -1211,6 +1328,25 @@ mod tests {
     /// A dark canvas and its text: the pair every mark blends between.
     const BACKDROP: Color32 = Color32::from_rgb(27, 27, 27);
     const INK: Color32 = Color32::from_rgb(140, 140, 140);
+    /// A light canvas and its text. The picture reads on either, so every
+    /// invariant about colour answers for both.
+    const LIGHT_BACKDROP: Color32 = Color32::from_rgb(248, 248, 248);
+    const LIGHT_INK: Color32 = Color32::from_rgb(60, 60, 60);
+    const THEMES: [(Color32, Color32); 2] = [(BACKDROP, INK), (LIGHT_BACKDROP, LIGHT_INK)];
+    /// Every colour the picture speaks in beside the ink of its theme.
+    const ACCENTS: [Color32; 5] = [SEVERED, DRAWN, MODIFIED, DEPENDENCY, DEPENDENT];
+    /// How far apart two marks must lie in some channel to read as two
+    /// marks. A smaller difference is one nobody sees, and two colours
+    /// nobody can tell apart say the same thing.
+    const SEPARATION: i32 = 6;
+
+    fn apart(one: Color32, other: Color32) -> bool {
+        let channels = |color: Color32| [color.r(), color.g(), color.b()].map(i32::from);
+        channels(one)
+            .into_iter()
+            .zip(channels(other))
+            .any(|(one, other)| (one - other).abs() >= SEPARATION)
+    }
 
     #[test]
     fn a_mark_with_no_ink_left_is_the_backdrop_itself() {
@@ -1225,13 +1361,15 @@ mod tests {
 
     #[test]
     fn a_weakened_mark_is_never_translucent() {
-        for share in [0.0, FADE, CONTEXT, 0.99, 1.0] {
-            for ink in [INK, SEVERED, DRAWN, MODIFIED] {
-                assert_eq!(
-                    toward(BACKDROP, ink, share).a(),
-                    255,
-                    "share {share} of {ink:?} must cover what it paints over"
-                );
+        for (backdrop, theme) in THEMES {
+            for share in [0.0, FADE, CONTEXT, 0.99, 1.0] {
+                for ink in ACCENTS.into_iter().chain([theme]) {
+                    assert_eq!(
+                        toward(backdrop, ink, share).a(),
+                        255,
+                        "share {share} of {ink:?} must cover what it paints over"
+                    );
+                }
             }
         }
     }
@@ -1248,19 +1386,173 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_colors_stay_apart_from_the_backdrop_and_from_each_other() {
-        for share in [FADE, CONTEXT] {
-            let plan = [SEVERED, DRAWN, MODIFIED].map(|ink| toward(BACKDROP, ink, share));
-            for color in plan {
-                assert!(
-                    color.intensity() > BACKDROP.intensity() + 0.01,
-                    "at share {share}, {color:?} must lift off the backdrop"
-                );
+    fn every_color_the_picture_speaks_in_stays_apart_from_the_rest() {
+        for (backdrop, theme) in THEMES {
+            for share in [FADE, CONTEXT, 1.0] {
+                let marks: Vec<Color32> = ACCENTS
+                    .into_iter()
+                    .chain([theme])
+                    .map(|ink| toward(backdrop, ink, share))
+                    .collect();
+                for (index, mark) in marks.iter().enumerate() {
+                    assert!(
+                        apart(*mark, backdrop),
+                        "at share {share}, {mark:?} must lift off {backdrop:?}"
+                    );
+                    for other in &marks[index + 1..] {
+                        assert!(
+                            apart(*mark, *other),
+                            "at share {share} on {backdrop:?}, {mark:?} and {other:?} \
+                             read as one colour"
+                        );
+                    }
+                }
             }
-            assert_ne!(plan[0], plan[1]);
-            assert_ne!(plan[1], plan[2]);
-            assert_ne!(plan[0], plan[2]);
         }
+    }
+
+    fn depends(from: &str, to: &str) -> Relation {
+        Relation {
+            from: id(from),
+            to: id(to),
+            kind: RelationKind::DependsOn,
+        }
+    }
+
+    /// package:a ⊃ {a/one, a/two} beside the leaf package:b. a/one reaches
+    /// package:b, package:b reaches a/two, and a/one reaches a/two within
+    /// the frame.
+    fn wired() -> (ArchitectureGraph, Vec<Relation>) {
+        let (mut graph, _) = frame_of_leaves();
+        graph
+            .add_element(Element {
+                id: id("package:b"),
+                name: ElementName::new("package:b").unwrap(),
+                kind: ElementKind::Package,
+            })
+            .unwrap();
+        let edges = vec![
+            depends("a/one", "package:b"),
+            depends("package:b", "a/two"),
+            depends("a/one", "a/two"),
+        ];
+        (graph, edges)
+    }
+
+    /// Which way one edge of that picture runs while `selected` stands
+    /// selected.
+    fn direction_of(from: &str, to: &str, selected: &str) -> Option<Direction> {
+        let (view, edges) = wired();
+        let selection = id(selected);
+        focus_of(&view, &edges, Selected::Node(&selection)).direction(&depends(from, to))
+    }
+
+    #[test]
+    fn a_connection_leaving_the_selection_wears_the_dependency_color() {
+        assert_eq!(
+            edge_ink(
+                INK,
+                EdgeStatus::Existing,
+                direction_of("a/one", "package:b", "package:a")
+            ),
+            DEPENDENCY,
+            "the selection depends on what its connection reaches"
+        );
+    }
+
+    #[test]
+    fn a_connection_arriving_at_the_selection_wears_the_dependent_color() {
+        assert_eq!(
+            edge_ink(
+                INK,
+                EdgeStatus::Existing,
+                direction_of("package:b", "a/two", "package:a")
+            ),
+            DEPENDENT
+        );
+    }
+
+    #[test]
+    fn a_connection_inside_the_selection_keeps_the_pictures_own_ink() {
+        assert_eq!(
+            edge_ink(
+                INK,
+                EdgeStatus::Existing,
+                direction_of("a/one", "a/two", "package:a")
+            ),
+            INK,
+            "internal wiring answers neither question the selection asks"
+        );
+    }
+
+    #[test]
+    fn nothing_takes_a_direction_while_nothing_is_selected() {
+        assert_eq!(edge_ink(INK, EdgeStatus::Existing, None), INK);
+    }
+
+    #[test]
+    fn a_planned_connection_keeps_its_plan_color_under_a_selection() {
+        let leaving = direction_of("a/one", "package:b", "package:a");
+        assert_eq!(leaving, Some(Direction::Outgoing));
+        assert_eq!(edge_ink(INK, EdgeStatus::Severed, leaving), SEVERED);
+        assert_eq!(edge_ink(INK, EdgeStatus::Drawn, leaving), DRAWN);
+        assert_eq!(
+            edge_ink(
+                INK,
+                EdgeStatus::PartiallySevered {
+                    severed: 1,
+                    total: 3
+                },
+                leaving
+            ),
+            DEPENDENCY,
+            "a connection that mostly stays reads as the dependency it is, \
+             and its red mark carries the rest"
+        );
+    }
+
+    #[test]
+    fn a_stroke_whose_connections_disagree_runs_no_way_at_all() {
+        assert_eq!(
+            agreed([Some(Direction::Outgoing), None]),
+            Some(Direction::Outgoing),
+            "a connection the selection ignores leaves the answer to the rest"
+        );
+        assert_eq!(
+            agreed([Some(Direction::Outgoing), Some(Direction::Incoming)]),
+            None
+        );
+        assert_eq!(agreed([None, None]), None);
+    }
+
+    #[test]
+    fn the_lit_strokes_paint_after_the_boxes_while_a_selection_stands() {
+        assert_eq!(
+            lifted(
+                &[Strength::Faded, Strength::Focused, Strength::Context],
+                None,
+                true
+            ),
+            vec![false, true, false],
+            "the answer paints over the picture, and the rest stays under it"
+        );
+    }
+
+    #[test]
+    fn the_stroke_under_the_pointer_lifts_beside_the_lit_ones() {
+        assert_eq!(
+            lifted(&[Strength::Faded, Strength::Faded], Some(1), true),
+            vec![false, true]
+        );
+    }
+
+    #[test]
+    fn nothing_lifts_while_nothing_is_selected() {
+        assert_eq!(
+            lifted(&[Strength::Focused, Strength::Focused], Some(0), false),
+            vec![false, false],
+            "with no question asked the strokes draw in one pass, under the boxes"
+        );
     }
 
     #[test]

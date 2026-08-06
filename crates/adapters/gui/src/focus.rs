@@ -33,6 +33,20 @@ pub(crate) enum Strength {
     Focused,
 }
 
+/// Which way one lit edge runs about the selected boundary. A selection asks
+/// two questions at once - what does this need, and who needs this - and the
+/// answer is only readable while the two stay apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    /// Leaves the selection: something the selection depends on.
+    Outgoing,
+    /// Arrives at the selection: something that depends on the selection.
+    Incoming,
+    /// Both ends lie inside the selection: its own internal wiring, which
+    /// answers neither question.
+    Internal,
+}
+
 /// What the user selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Selected<'a> {
@@ -40,11 +54,14 @@ pub(crate) enum Selected<'a> {
     Edge(&'a Relation),
 }
 
-/// The strengths one selection produces.
+/// The strengths one selection produces, and the way its lit edges run.
 pub(crate) struct Focus<'a> {
     subjects: BTreeSet<&'a ElementId>,
     context: BTreeSet<&'a ElementId>,
-    lit: BTreeSet<&'a Relation>,
+    /// Every lit edge. A selected boundary also says which way each of them
+    /// runs about it; a selected connection is a single edge and stands for
+    /// no boundary, so it says nothing.
+    lit: BTreeMap<&'a Relation, Option<Direction>>,
 }
 
 impl Focus<'_> {
@@ -59,11 +76,18 @@ impl Focus<'_> {
     }
 
     pub(crate) fn edge(&self, relation: &Relation) -> Strength {
-        if self.lit.contains(relation) {
+        if self.lit.contains_key(relation) {
             Strength::Focused
         } else {
             Strength::Faded
         }
+    }
+
+    /// Which way this edge runs about the selection, and None wherever the
+    /// selection says nothing about it: an edge it does not light, or any
+    /// edge at all while a connection rather than a boundary is selected.
+    pub(crate) fn direction(&self, relation: &Relation) -> Option<Direction> {
+        self.lit.get(relation).copied().flatten()
     }
 }
 
@@ -74,22 +98,29 @@ pub(crate) fn focus_of<'a>(
     selected: Selected<'a>,
 ) -> Focus<'a> {
     let mut subjects = BTreeSet::new();
-    let mut lit = BTreeSet::new();
+    let mut lit = BTreeMap::new();
     match selected {
         Selected::Node(id) => {
             let inside = subtree_of(view, id);
             for edge in edges {
-                if !inside.contains(&edge.from) && !inside.contains(&edge.to) {
-                    continue;
-                }
-                lit.insert(edge);
+                // The subtree holds everything below the selection, so an
+                // endpoint the picture hides inside a summary block answers
+                // the same as the block that stands for it: both lie inside
+                // the selection or both lie outside it.
+                let direction = match (inside.contains(&edge.from), inside.contains(&edge.to)) {
+                    (true, true) => Direction::Internal,
+                    (true, false) => Direction::Outgoing,
+                    (false, true) => Direction::Incoming,
+                    (false, false) => continue,
+                };
+                lit.insert(edge, Some(direction));
                 subjects.insert(&edge.from);
                 subjects.insert(&edge.to);
             }
             subjects.extend(inside);
         }
         Selected::Edge(relation) => {
-            lit.insert(relation);
+            lit.insert(relation, None);
             subjects.insert(&relation.from);
             subjects.insert(&relation.to);
         }
@@ -347,6 +378,59 @@ mod tests {
         assert_eq!(focus.element(&id("a/two")), Strength::Focused);
         assert_eq!(focus.edge(&depends("a/two", "b/one")), Strength::Faded);
         assert_eq!(focus.element(&id("b/one")), Strength::Faded);
+    }
+
+    #[test]
+    fn a_selected_boundary_tells_its_dependencies_from_its_dependents() {
+        let view = view();
+        let edges = edges();
+        let selected = id("package:a");
+        let focus = focus_of(&view, &edges, Selected::Node(&selected));
+
+        assert_eq!(
+            focus.direction(&depends("a/two", "b/one")),
+            Some(Direction::Outgoing),
+            "what the selection reaches is what it depends on"
+        );
+        assert_eq!(
+            focus.direction(&depends("a/one", "a/two")),
+            Some(Direction::Internal),
+            "an edge with both ends inside answers neither question"
+        );
+        assert_eq!(
+            focus.direction(&depends("package:c", "package:d")),
+            None,
+            "an edge the selection does not light runs no way about it"
+        );
+    }
+
+    #[test]
+    fn a_connection_reaching_the_selection_runs_inward() {
+        let view = view();
+        let edges = edges();
+        let selected = id("package:b");
+        let focus = focus_of(&view, &edges, Selected::Node(&selected));
+
+        assert_eq!(
+            focus.direction(&depends("a/two", "b/one")),
+            Some(Direction::Incoming),
+            "the partner reaches into the selection through the part it holds"
+        );
+    }
+
+    #[test]
+    fn a_selected_connection_runs_no_way_about_itself() {
+        let view = view();
+        let edges = edges();
+        let selected = depends("a/two", "b/one");
+        let focus = focus_of(&view, &edges, Selected::Edge(&selected));
+
+        assert_eq!(focus.edge(&selected), Strength::Focused);
+        assert_eq!(
+            focus.direction(&selected),
+            None,
+            "a connection stands for no boundary, so nothing leaves or arrives"
+        );
     }
 
     /// The view above, plus the type declared inside a/one. The full graph
