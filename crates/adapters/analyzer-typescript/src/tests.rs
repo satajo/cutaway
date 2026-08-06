@@ -106,6 +106,186 @@ fn source_files_are_modules_within_their_package_named_without_their_extension()
 }
 
 #[test]
+fn a_directory_holding_two_files_is_a_module_within_its_package() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        ("packages/app/src/a.ts", "export const a = () => 1;\n"),
+        ("packages/app/src/b.ts", "export const b = () => 1;\n"),
+    ]);
+    let directory = structure
+        .elements
+        .iter()
+        .find(|e| e.element.id.as_str() == "packages/app/src")
+        .expect("the directory is an element");
+    assert_eq!(directory.element.kind, ElementKind::Module);
+    assert_eq!(directory.element.name.as_str(), "src");
+    assert_eq!(
+        parent_of(&structure, "packages/app/src"),
+        Some("package:app".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/a.ts"),
+        Some("packages/app/src".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/b.ts"),
+        Some("packages/app/src".to_owned())
+    );
+}
+
+#[test]
+fn a_chain_of_directories_holding_one_child_each_dissolves_into_the_group_at_its_end() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        ("packages/app/src/a/b/c/one.ts", "export const one = 1;\n"),
+        ("packages/app/src/a/b/c/two.ts", "export const two = 2;\n"),
+    ]);
+    for dissolved in [
+        "packages/app/src",
+        "packages/app/src/a",
+        "packages/app/src/a/b",
+    ] {
+        assert!(
+            !has_element(&structure, dissolved),
+            "{dissolved} groups one thing and is no element"
+        );
+    }
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/a/b/c"),
+        Some("package:app".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/a/b/c/one.ts"),
+        Some("packages/app/src/a/b/c".to_owned())
+    );
+}
+
+#[test]
+fn a_directory_groups_what_its_dissolved_subdirectories_hand_up() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/plugins/index.ts",
+            "export const plugins = [];\n",
+        ),
+        (
+            "packages/app/src/plugins/cleanup/cleanup.ts",
+            "export const cleanup = () => 1;\n",
+        ),
+    ]);
+    assert!(
+        !has_element(&structure, "packages/app/src/plugins/cleanup"),
+        "a directory of one file dissolves"
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/plugins"),
+        Some("package:app".to_owned()),
+        "the dissolved subdirectory leaves its file standing in the directory above"
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/plugins/index.ts"),
+        Some("packages/app/src/plugins".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/plugins/cleanup/cleanup.ts"),
+        Some("packages/app/src/plugins".to_owned())
+    );
+}
+
+#[test]
+fn a_directory_counts_a_surviving_subdirectory_among_its_children() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        ("packages/app/src/util.ts", "export const now = () => 1;\n"),
+        (
+            "packages/app/src/widgets/panel.ts",
+            "export class Panel {}\n",
+        ),
+        (
+            "packages/app/src/widgets/button.ts",
+            "export class Button {}\n",
+        ),
+    ]);
+    assert_eq!(
+        parent_of(&structure, "packages/app/src"),
+        Some("package:app".to_owned()),
+        "one file and one surviving subdirectory are two children"
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/widgets"),
+        Some("packages/app/src".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/util.ts"),
+        Some("packages/app/src".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/widgets/panel.ts"),
+        Some("packages/app/src/widgets".to_owned())
+    );
+}
+
+#[test]
+fn a_module_parents_onto_the_nearest_surviving_directory_above_it() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        ("packages/app/src/a.ts", "export const a = 1;\n"),
+        ("packages/app/src/b.ts", "export const b = 2;\n"),
+        (
+            "packages/app/src/lonely/deep.ts",
+            "export const deep = 3;\n",
+        ),
+    ]);
+    assert!(!has_element(&structure, "packages/app/src/lonely"));
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/lonely/deep.ts"),
+        Some("packages/app/src".to_owned())
+    );
+}
+
+#[test]
+fn the_entry_file_counts_for_no_directory() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        ("packages/app/src/index.ts", "export class Session {}\n"),
+        ("packages/app/src/a.ts", "export const a = 1;\n"),
+    ]);
+    assert!(
+        !has_element(&structure, "packages/app/src"),
+        "the dissolved entry leaves one child, which groups nothing"
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/a.ts"),
+        Some("package:app".to_owned())
+    );
+}
+
+#[test]
+fn items_and_imports_keep_naming_their_file_when_directories_are_modules() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/widgets/a.ts",
+            "import { Widget } from \"./b\";\nexport function use() {}\n",
+        ),
+        ("packages/app/src/widgets/b.ts", "export class Widget {}\n"),
+    ]);
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/widgets/a.ts"),
+        Some("packages/app/src/widgets".to_owned())
+    );
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/widgets/a.ts#function:use"),
+        Some("packages/app/src/widgets/a.ts".to_owned())
+    );
+    assert!(depends(
+        &structure,
+        "packages/app/src/widgets/a.ts",
+        "packages/app/src/widgets/b.ts#type:Widget"
+    ));
+}
+
+#[test]
 fn the_entry_file_dissolves_into_its_package() {
     let structure = analyze(&[
         MANIFEST_CORE,
@@ -705,6 +885,19 @@ fn files_outside_every_package_are_modules_under_the_project_root() {
     assert_eq!(
         parent_of(&structure, "tools/build.ts#function:run"),
         Some("tools/build.ts".to_owned())
+    );
+}
+
+#[test]
+fn a_directory_outside_every_package_groups_under_the_project_root() {
+    let structure = analyze(&[
+        ("tools/build.ts", "export const run = () => 1;\n"),
+        ("tools/check.ts", "export const check = () => 2;\n"),
+    ]);
+    assert_eq!(parent_of(&structure, "tools"), None);
+    assert_eq!(
+        parent_of(&structure, "tools/build.ts"),
+        Some("tools".to_owned())
     );
 }
 

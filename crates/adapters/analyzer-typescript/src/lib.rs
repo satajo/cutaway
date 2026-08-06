@@ -13,12 +13,13 @@
 //! declares but nothing names produces no relation: the sources are the one
 //! truth about coupling.
 //!
-//! Files are modules, and they hang directly from their package. The language
-//! gives a file no place in a hierarchy - any file may import any other - so
-//! reading nesting out of the directory layout would show a containment that
-//! does not exist. The entry file of a package is the exception: to every
-//! consumer, importing the package by name and the surface of its entry file
-//! are one boundary, so that file dissolves into the package - it is no
+//! Files are modules, and so are the directories that group at least two of
+//! them: a specifier names a file, so the file is the unit of dependency,
+//! while a directory only groups. A directory grouping fewer than two things
+//! groups nothing and dissolves, handing its contents to the nearest
+//! directory above it that survived, else to the package. The entry file of a
+//! package dissolves the same way: to every consumer, importing the package by
+//! name and the surface of its entry file are one boundary, so that file is no
 //! element, its declarations are the package's items, and a specifier that
 //! resolves to it lands on the package.
 //!
@@ -79,6 +80,13 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
             elements.push(AnalyzedElement {
                 element: package_element(package),
                 parent: enclosing_package(&packages, index).map(|p| package_id(&packages[p])),
+            });
+        }
+
+        for directory in catalog.directories() {
+            elements.push(AnalyzedElement {
+                element: directory.element(),
+                parent: directory.parent(&packages),
             });
         }
 
