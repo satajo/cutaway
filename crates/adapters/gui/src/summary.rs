@@ -3,9 +3,12 @@
 //! Pulled far back over a large project, a deep frame arrives on screen as a
 //! sliver: its children cover a pixel or two each, their names vanished long
 //! before that, and none of it says anything - yet every box of it still
-//! paints and still answers the pointer. Such a frame renders as one solid
-//! block instead. The block carries the frame's name and how much it holds,
-//! and nothing inside it paints at all.
+//! paints and still answers the pointer. A frame none of whose children can
+//! say anything renders as one solid block instead. The block carries the
+//! frame's name and how much it holds, and nothing inside it paints at all.
+//! A frame with even one readable part stays open, and the parts that
+//! cannot read yet blur block by block on their own, so detail arrives
+//! outermost first as the camera closes in.
 //!
 //! The decision belongs to the magnification, so it is made anew whenever
 //! the camera changes it and never in between. It is pure geometry and
@@ -113,17 +116,20 @@ pub(crate) fn summarize(containment: &Containment, layout: &Layout, zoom: f32) -
     summary
 }
 
-/// Whether a frame's children arrive too small to read: the shortest of them
-/// decides, because a frame shows its parts only as well as it shows its
-/// least readable one.
+/// Whether every child of a frame arrives too small to read: the tallest of
+/// them decides, because a frame reveals its parts as soon as any of them
+/// can say something. A frame of one huge sub-frame and a few small leaves
+/// opens early to show that structure - the small leaves paint tiny beside
+/// it, and any child frame whose own contents stay illegible blurs into a
+/// block of its own.
 fn blurs(frame: &ElementId, containment: &Containment, layout: &Layout, zoom: f32) -> bool {
-    let shortest = containment
+    let tallest = containment
         .children(frame)
         .iter()
         .filter_map(|child| layout.rects.get(child))
         .map(|rect| rect.height() * zoom)
-        .fold(f32::INFINITY, f32::min);
-    shortest.is_finite() && shortest < LEGIBLE_BOX
+        .fold(f32::NEG_INFINITY, f32::max);
+    tallest.is_finite() && tallest < LEGIBLE_BOX
 }
 
 #[cfg(test)]
@@ -252,6 +258,58 @@ mod tests {
 
         assert!(summary.block(&id("package:a")).is_none());
         assert!(!summary.hides(&id("a/one")));
+    }
+
+    /// A frame shaped like a real package: one huge sub-frame beside a few
+    /// small leaves. The sub-frame's height dwarfs the leaves'.
+    fn lopsided() -> (ArchitectureGraph, Layout) {
+        let mut graph = ArchitectureGraph::new();
+        for element in ["package:a", "a/src", "a/src/one", "a/src/two", "a/config"] {
+            add(&mut graph, element);
+        }
+        contain(&mut graph, "package:a", "a/src");
+        contain(&mut graph, "package:a", "a/config");
+        contain(&mut graph, "a/src", "a/src/one");
+        contain(&mut graph, "a/src", "a/src/two");
+        let layout = Layout {
+            rects: placed(&[
+                ("package:a", 9000.0),
+                ("a/src", 8000.0),
+                ("a/src/one", NODE_HEIGHT),
+                ("a/src/two", NODE_HEIGHT),
+                ("a/config", NODE_HEIGHT),
+            ]),
+            containers: vec![
+                Frame {
+                    id: id("package:a"),
+                    depth: 0,
+                },
+                Frame {
+                    id: id("a/src"),
+                    depth: 1,
+                },
+            ],
+            leaves: vec![id("a/src/one"), id("a/src/two"), id("a/config")],
+        };
+        (graph, layout)
+    }
+
+    #[test]
+    fn a_small_leaf_does_not_keep_a_frames_readable_structure_hidden() {
+        let (view, layout) = lopsided();
+        // At this magnification the config leaf is far from legible, but the
+        // src frame covers most of the screen: showing it says something.
+        let summary = summarize(&Containment::of(&view), &layout, 0.05);
+
+        assert!(
+            summary.block(&id("package:a")).is_none(),
+            "a frame with a readable part shows its parts"
+        );
+        assert!(
+            summary.block(&id("a/src")).is_some(),
+            "the sub-frame's own children are all illegible, so it blurs"
+        );
+        assert!(!summary.hides(&id("a/config")));
     }
 
     #[test]
