@@ -1,5 +1,13 @@
 //! GUI adapter: the eframe/egui desktop shell of Cutaway.
 //!
+//! The window works in two modes, and the rail on the left says which.
+//! Explore is everything below: the architecture as the sources have it,
+//! read through a lens and marked up with a plan. Compare puts two versions
+//! of the project against each other and paints what happened between them
+//! in the same visual language - green for what arrives, red for what goes,
+//! amber for a boundary that stands and changes inside. The plan stays out
+//! of Compare: a comparison states what happened, not what should.
+//!
 //! The GUI drives the application core and knows nothing about where
 //! architectures or plans come from: the composition root hands it a
 //! [`ProjectOpener`] and every opened project carries its own
@@ -34,6 +42,7 @@
 mod bundle;
 mod camera;
 mod canvas;
+mod compare;
 mod continuity;
 mod focus;
 mod glyph;
@@ -53,6 +62,7 @@ use std::sync::mpsc;
 use cutaway_architecture::{
     ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
 };
+use cutaway_inspection::ports::project_history::{Version, VersionId};
 use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{
@@ -75,11 +85,20 @@ pub struct OpenedProject {
     pub graph: ArchitectureGraph,
     pub plan: Plan,
     pub store: Box<dyn PlanStore>,
+    /// The project's recent versions, newest first. The comparison picks its
+    /// pair from these.
+    pub versions: Vec<Version>,
+    pub inspect_version: VersionInspector,
 }
 
 /// Opens the project at a path. Failures arrive as human-readable text: the
 /// GUI displays them, it never reacts to individual causes.
 pub type ProjectOpener = Box<dyn Fn(&Path) -> Result<OpenedProject, String>>;
+
+/// Reads the architecture of one version of the opened project. What a
+/// version is stays with the adapter that listed it; the GUI only ever
+/// hands back an id it was given.
+pub type VersionInspector = Box<dyn Fn(&VersionId) -> Result<ArchitectureGraph, String>>;
 
 pub fn run(opener: ProjectOpener) -> Result<(), StartupError> {
     eframe::run_native(
@@ -241,17 +260,17 @@ enum Modifying {
 }
 
 impl Session {
-    fn open(project: OpenedProject) -> Self {
-        let weights = layout::concept_weights(&project.graph);
+    fn open(graph: ArchitectureGraph, plan: &Plan, store: Box<dyn PlanStore>) -> Self {
+        let weights = layout::concept_weights(&graph);
         // A stored plan may predate the concrete-relation contract:
         // normalization re-anchors it to this graph before anything reads
         // or extends it, so every markup matches by provenance from here on.
-        let plan = project.plan.normalized(&project.graph);
+        let plan = plan.normalized(&graph);
         let mut session = Self {
-            viewed: project.graph.clone(),
-            graph: project.graph,
+            viewed: graph.clone(),
+            graph,
             plan,
-            store: project.store,
+            store,
             cut: Cut::whole(),
             renames: Renames::default(),
             scene: Err("not built yet".to_owned()),
@@ -1220,13 +1239,51 @@ fn edge_exists(scene: &Result<Scene, String>, relation: &Relation) -> bool {
         .is_ok_and(|scene| scene.view.graph.relations().any(|r| r == relation))
 }
 
+/// Which story the window tells: the architecture as it stands, or what
+/// changed between two versions of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Mode {
+    #[default]
+    Explore,
+    Compare,
+}
+
+/// The modes, in the order the rail lists them, with the key each answers
+/// to and what it says of itself.
+const MODES: [(Mode, &str, &str, egui::Key); 2] = [
+    (
+        Mode::Explore,
+        "Explore",
+        "Explore and annotate the architecture. F1.",
+        egui::Key::F1,
+    ),
+    (
+        Mode::Compare,
+        "Compare",
+        "See what changes between two versions. F2.",
+        egui::Key::F2,
+    ),
+];
+
+/// How wide the mode rail stands: room for the longer of two words and
+/// nothing more, because the rail is a signpost rather than a panel.
+const RAIL_WIDTH: f32 = 96.0;
+
 struct CutawayApp {
     opener: ProjectOpener,
     repository: Option<PathBuf>,
     /// Delivers the folder chosen in the system picker; Some while a picker
     /// dialog is open.
     picker: Option<mpsc::Receiver<Option<PathBuf>>>,
+    mode: Mode,
     session: Option<Result<Session, String>>,
+    /// The versions of the open project and the way to read one. It answers
+    /// for the whole project, so it stands beside the comparison rather than
+    /// inside it and outlives every pair the reader puts against each other.
+    history: Option<compare::History>,
+    /// The comparison in front of the reader, built on the frame that first
+    /// shows it and thrown away when another project opens.
+    compare: Option<Result<compare::CompareSession, String>>,
 }
 
 impl CutawayApp {
@@ -1235,7 +1292,10 @@ impl CutawayApp {
             opener,
             repository: None,
             picker: None,
+            mode: Mode::default(),
             session: None,
+            history: None,
+            compare: None,
         }
     }
 
@@ -1262,18 +1322,44 @@ impl CutawayApp {
         };
         match receiver.try_recv() {
             Ok(Some(path)) => {
-                self.session = Some((self.opener)(&path).map(Session::open));
+                let opened = (self.opener)(&path);
+                // A new project is a new history and a new comparison: the
+                // ones standing spoke about another repository.
+                self.history = None;
+                self.compare = None;
+                self.session = Some(match opened {
+                    Ok(project) => {
+                        self.history = Some(compare::History::new(
+                            project.versions,
+                            project.inspect_version,
+                        ));
+                        Ok(Session::open(project.graph, &project.plan, project.store))
+                    }
+                    Err(reason) => Err(reason),
+                });
                 self.repository = Some(path);
             }
             Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {}
             Err(mpsc::TryRecvError::Empty) => self.picker = Some(receiver),
         }
     }
-}
 
-impl eframe::App for CutawayApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.receive_picked_repository();
+    /// Whether a search palette stands open over the picture. An open
+    /// palette owns every key of the frame, so the shell's own keys wait.
+    fn searching(&self) -> bool {
+        match self.mode {
+            Mode::Explore => {
+                matches!(&self.session, Some(Ok(session)) if session.palette.is_open())
+            }
+            Mode::Compare => {
+                matches!(&self.compare, Some(Ok(comparison)) if comparison.searching())
+            }
+        }
+    }
+
+    /// What the toolbar offers: the repository, and whatever the mode of
+    /// the moment reads it through.
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let picking = self.picker.is_some();
@@ -1289,84 +1375,213 @@ impl eframe::App for CutawayApp {
                 if let Some(repository) = &self.repository {
                     ui.label(repository.display().to_string());
                 }
-                if let Some(Ok(session)) = &mut self.session {
-                    project_tools(ui, session);
+                match self.mode {
+                    Mode::Explore => {
+                        if let Some(Ok(session)) = &mut self.session {
+                            project_tools(ui, session);
+                        }
+                    }
+                    Mode::Compare => {
+                        if let Some((history, Ok(comparison))) =
+                            comparing(self.history.as_ref(), &mut self.compare)
+                        {
+                            compare::tools(ui, history, comparison);
+                        }
+                    }
                 }
             });
         });
+    }
 
-        // Nothing opened yet leaves the inspector nothing to inspect, and an
-        // empty panel beside an empty canvas reads as a broken window: the
-        // invitation in the middle carries the whole of it instead.
-        if let Some(session) = &mut self.session {
-            egui::Panel::right("inspector")
-                .default_size(280.0)
-                .show(ui, |ui| match session {
-                    Err(reason) => {
+    /// The panel beside the picture. Nothing opened yet leaves it nothing
+    /// to show, and an empty panel beside an empty canvas reads as a broken
+    /// window: the invitation in the middle carries the whole of it instead.
+    fn details(&mut self, ui: &mut egui::Ui) {
+        let stands = match self.mode {
+            Mode::Explore => self.session.is_some(),
+            Mode::Compare => self.history.is_some(),
+        };
+        if !stands {
+            return;
+        }
+        egui::Panel::right("inspector")
+            .default_size(280.0)
+            .show(ui, |ui| match self.mode {
+                Mode::Explore => match &mut self.session {
+                    Some(Err(reason)) => {
                         ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
                     }
-                    Ok(session) => inspector::show(ui, session),
-                });
-        }
+                    Some(Ok(session)) => inspector::show(ui, session),
+                    None => {}
+                },
+                Mode::Compare => match comparing(self.history.as_ref(), &mut self.compare) {
+                    Some((_, Ok(comparison))) => compare::panel(ui, comparison),
+                    Some((_, Err(reason))) => {
+                        ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
+                    }
+                    None => {}
+                },
+            });
+    }
 
+    /// The picture itself, and the invitation that stands where there is
+    /// none.
+    fn canvas(&mut self, ui: &mut egui::Ui) {
+        let picking = self.picker.is_some();
         let mut asked_to_open = false;
-        egui::CentralPanel::default().show(ui, |ui| match &mut self.session {
-            Some(Ok(session)) => picture(ui, session),
-            // A repository that failed to open leaves the invitation
-            // standing: the reader reads the reason beside it and picks
-            // another one from here.
-            None | Some(Err(_)) => asked_to_open = invitation(ui, self.picker.is_some()),
+        egui::CentralPanel::default().show(ui, |ui| match self.mode {
+            Mode::Explore => match &mut self.session {
+                Some(Ok(session)) => picture(ui, session),
+                // A repository that failed to open leaves the invitation
+                // standing: the reader reads the reason beside it and picks
+                // another one from here.
+                None | Some(Err(_)) => asked_to_open = invitation(ui, picking),
+            },
+            Mode::Compare => match comparing(self.history.as_ref(), &mut self.compare) {
+                Some((_, Ok(comparison))) => compare::picture(ui, comparison),
+                Some((_, Err(reason))) => {
+                    ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
+                }
+                // Compare with no project open asks the same question
+                // Explore does, so it asks it the same way.
+                None => asked_to_open = invitation(ui, picking),
+            },
         });
         if asked_to_open {
             self.pick_repository(ui.ctx().clone());
         }
+    }
 
-        // The palette floats over everything and takes its keys before any
-        // widget of the next frame reads them, so it paints after the panels
-        // and beside the picture rather than inside it.
-        if let Some(Ok(session)) = &mut self.session {
-            let found = palette::show(
-                ui.ctx(),
-                &mut session.palette,
-                &session.graph,
-                session.viewport,
-            );
-            if let Some(target) = found {
-                session.locate(&target);
+    /// The palette and the keys that stand over the picture. They come
+    /// after the panels, so an open palette takes this frame's keys before
+    /// any widget of the next one reads them.
+    fn overlays(&mut self, ui: &mut egui::Ui) {
+        match self.mode {
+            Mode::Explore => {
+                if let Some(Ok(session)) = &mut self.session {
+                    explore_overlay(ui.ctx(), session);
+                }
             }
-            // The keys reach the picture only after the palette had every
-            // one of this frame: an open palette answers to keys of its own,
-            // and a digit typed into its field is part of a name.
-            if !session.palette.is_open() {
-                if let Some(request) = vocabulary::requested(ui.ctx()) {
-                    obey(session, request);
-                }
-                if camera::refit_requested(ui.ctx()) {
-                    session.refit();
-                }
-                if focus_requested(ui.ctx())
-                    && let Some(Selection::Node(id)) = session.selection.clone()
+            Mode::Compare => {
+                if let Some((_, Ok(comparison))) =
+                    comparing(self.history.as_ref(), &mut self.compare)
                 {
-                    session.focus(&id);
-                }
-                // A mode that waits for a click on the picture must be
-                // leavable without one, and Escape is the key that leaves.
-                // With no mode waiting, Escape leaves the scope instead: it
-                // is the one key that steps back out of wherever the reader
-                // went, and only one thing is ever there to step out of.
-                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-                    let waiting = session.drawing
-                        || session.draw_source.is_some()
-                        || session.merging.is_some();
-                    session.drawing = false;
-                    session.draw_source = None;
-                    session.merging = None;
-                    if !waiting {
-                        session.unfocus();
-                    }
+                    compare::overlay(ui.ctx(), comparison);
                 }
             }
         }
+        // The palette owns every key while it stands open, so the modes
+        // answer only once it is closed, exactly as the picture's own keys
+        // do.
+        if !self.searching()
+            && let Some(mode) = mode_requested(ui.ctx())
+        {
+            self.mode = mode;
+        }
+    }
+}
+
+/// The comparison of the open project, together with the history it reads.
+/// The first frame that asks for one builds it, which inspects two versions
+/// of the sources and blocks the UI thread while it does - exactly as
+/// opening the project already does. None while no project is open.
+fn comparing<'a>(
+    history: Option<&'a compare::History>,
+    compare: &'a mut Option<Result<compare::CompareSession, String>>,
+) -> Option<(
+    &'a compare::History,
+    &'a mut Result<compare::CompareSession, String>,
+)> {
+    let history = history?;
+    let built = compare.get_or_insert_with(|| compare::CompareSession::build(history));
+    Some((history, built))
+}
+
+/// The rail that names the two modes. It stands whether or not a project is
+/// open: it is the map of what the window does, and a reader meets it
+/// before anything else.
+fn mode_rail(ui: &mut egui::Ui, mode: &mut Mode) {
+    egui::Panel::left("modes")
+        .resizable(false)
+        .default_size(RAIL_WIDTH)
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                for (candidate, label, hint, _) in MODES {
+                    if ui
+                        .selectable_label(*mode == candidate, label)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        *mode = candidate;
+                    }
+                }
+            });
+        });
+}
+
+/// Which mode this frame's keys ask for, and None while they ask for
+/// neither.
+fn mode_requested(ctx: &egui::Context) -> Option<Mode> {
+    ctx.input_mut(|input| {
+        MODES
+            .into_iter()
+            .find(|(_, _, _, key)| input.consume_key(egui::Modifiers::NONE, *key))
+            .map(|(mode, _, _, _)| mode)
+    })
+}
+
+/// The search and the keys that stand over the explored picture.
+fn explore_overlay(ctx: &egui::Context, session: &mut Session) {
+    let found = palette::show(ctx, &mut session.palette, &session.graph, session.viewport);
+    if let Some(target) = found {
+        session.locate(&target);
+    }
+    // The keys reach the picture only after the palette had every one of
+    // this frame: an open palette answers to keys of its own, and a digit
+    // typed into its field is part of a name.
+    if session.palette.is_open() {
+        return;
+    }
+    if let Some(request) = vocabulary::requested(ctx) {
+        obey(session, request);
+    }
+    if camera::refit_requested(ctx) {
+        session.refit();
+    }
+    if focus_requested(ctx)
+        && let Some(Selection::Node(id)) = session.selection.clone()
+    {
+        session.focus(&id);
+    }
+    // A mode that waits for a click on the picture must be leavable without
+    // one, and Escape is the key that leaves. With no mode waiting, Escape
+    // leaves the scope instead: it is the one key that steps back out of
+    // wherever the reader went, and only one thing is ever there to step
+    // out of.
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        let waiting = session.drawing || session.draw_source.is_some() || session.merging.is_some();
+        session.drawing = false;
+        session.draw_source = None;
+        session.merging = None;
+        if !waiting {
+            session.unfocus();
+        }
+    }
+}
+
+impl eframe::App for CutawayApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.receive_picked_repository();
+        // The rail comes first, so the reader meets the choice of mode
+        // before the tools of whichever mode stands.
+        mode_rail(ui, &mut self.mode);
+        self.toolbar(ui);
+        self.details(ui);
+        self.canvas(ui);
+        // The palette floats over everything and takes its keys before any
+        // widget of the next frame reads them, so it comes after the panels
+        // and beside the picture rather than inside it.
+        self.overlays(ui);
     }
 }
 
@@ -1919,11 +2134,7 @@ mod tests {
 
     /// A session over [`two_packages`] with an empty plan, cut at packages.
     fn session() -> Session {
-        Session::open(OpenedProject {
-            graph: two_packages(),
-            plan: Plan::new(),
-            store: Box::new(Nowhere),
-        })
+        Session::open(two_packages(), &Plan::new(), Box::new(Nowhere))
     }
 
     fn scene(session: &Session) -> &Scene {

@@ -1149,6 +1149,8 @@ name = "cutaway-gui"
 version = "0.1.0"
 dependencies = [
  "cutaway-architecture",
+ "cutaway-comparison",
+ "cutaway-inspection",
  "cutaway-lenses",
  "cutaway-planning",
  "eframe",

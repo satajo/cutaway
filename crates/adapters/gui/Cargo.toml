@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 cutaway-architecture.workspace = true
+cutaway-comparison.workspace = true
+cutaway-inspection.workspace = true
 cutaway-lenses.workspace = true
 cutaway-planning.workspace = true
 eframe.workspace = true
