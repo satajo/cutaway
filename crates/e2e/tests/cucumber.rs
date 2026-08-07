@@ -10,40 +10,98 @@ struct CutawayWorld {
     driver: InProcessDriver,
 }
 
-#[given(expr = "a package {string} at {string}")]
-fn a_package(world: &mut CutawayWorld, name: String, dir: String) {
-    world.driver.add_source_file(
-        &format!("{dir}/Cargo.toml"),
-        &format!("[package]\nname = \"{name}\"\n"),
-    );
+/// The manifest that declares one package.
+fn manifest(name: &str) -> String {
+    format!("[package]\nname = \"{name}\"\n")
 }
 
-// Only a dependency the code exercises appears in the picture, so the step
-// writes both the manifest declaration and a root source file that uses the
-// dependency. A scenario that states its own root file replaces the latter.
+/// The manifest of a package that declares a dependency.
+fn manifest_depending_on(name: &str, dependency: &str) -> String {
+    format!(
+        "{}\n[dependencies]\n{dependency} = {{ path = \"x\" }}\n",
+        manifest(name)
+    )
+}
+
+/// The root source file that exercises a declared dependency. Only a
+/// dependency the code exercises appears in the picture.
+fn root_using(dependency: &str) -> String {
+    format!("use {};\n", dependency.replace('-', "_"))
+}
+
+/// The body a docstring step carries.
+fn docstring(step: &Step) -> &str {
+    step.docstring
+        .as_ref()
+        .expect("the step carries a docstring")
+        .trim_start_matches('\n')
+}
+
+#[given(expr = "a package {string} at {string}")]
+fn a_package(world: &mut CutawayWorld, name: String, dir: String) {
+    world
+        .driver
+        .add_source_file(&format!("{dir}/Cargo.toml"), &manifest(&name));
+}
+
+// The step writes both the manifest declaration and a root source file that
+// uses the dependency. A scenario that states its own root file replaces the
+// latter.
 #[given(expr = "a package {string} at {string} depending on {string}")]
 fn a_package_depending_on(world: &mut CutawayWorld, name: String, dir: String, dependency: String) {
     world.driver.add_source_file(
         &format!("{dir}/Cargo.toml"),
-        &format!(
-            "[package]\nname = \"{name}\"\n\n[dependencies]\n{dependency} = {{ path = \"x\" }}\n"
-        ),
+        &manifest_depending_on(&name, &dependency),
     );
-    world.driver.add_source_file(
-        &format!("{dir}/src/lib.rs"),
-        &format!("use {};\n", dependency.replace('-', "_")),
-    );
+    world
+        .driver
+        .add_source_file(&format!("{dir}/src/lib.rs"), &root_using(&dependency));
 }
 
 #[given(expr = "a source file {string} containing:")]
 fn a_source_file_containing(world: &mut CutawayWorld, path: String, step: &Step) {
-    let contents = step
-        .docstring
-        .as_ref()
-        .expect("the step carries a docstring");
+    world.driver.add_source_file(&path, docstring(step));
+}
+
+#[given(expr = "in version {string} a package {string} at {string}")]
+fn a_package_in_version(world: &mut CutawayWorld, version: String, name: String, dir: String) {
+    world.driver.add_source_file_in_version(
+        &version,
+        &format!("{dir}/Cargo.toml"),
+        &manifest(&name),
+    );
+}
+
+#[given(expr = "in version {string} a package {string} at {string} depending on {string}")]
+fn a_package_depending_on_in_version(
+    world: &mut CutawayWorld,
+    version: String,
+    name: String,
+    dir: String,
+    dependency: String,
+) {
+    world.driver.add_source_file_in_version(
+        &version,
+        &format!("{dir}/Cargo.toml"),
+        &manifest_depending_on(&name, &dependency),
+    );
+    world.driver.add_source_file_in_version(
+        &version,
+        &format!("{dir}/src/lib.rs"),
+        &root_using(&dependency),
+    );
+}
+
+#[given(expr = "in version {string} a source file {string} containing:")]
+fn a_source_file_in_version_containing(
+    world: &mut CutawayWorld,
+    version: String,
+    path: String,
+    step: &Step,
+) {
     world
         .driver
-        .add_source_file(&path, contents.trim_start_matches('\n'));
+        .add_source_file_in_version(&version, &path, docstring(step));
 }
 
 #[when("the project is inspected")]
@@ -57,6 +115,32 @@ fn the_boundaries_are_viewed(world: &mut CutawayWorld) {
         .driver
         .view_boundaries()
         .expect("the boundary view builds");
+}
+
+#[when(expr = "the change from version {string} to version {string} is viewed")]
+fn the_change_between_versions_is_viewed(world: &mut CutawayWorld, before: String, after: String) {
+    world
+        .driver
+        .compare_versions(&before, &after)
+        .expect("the comparison builds");
+}
+
+#[then(expr = "the boundary {string} reads as {string}")]
+fn the_boundary_reads_as(world: &mut CutawayWorld, name: String, reading: String) {
+    assert_eq!(world.driver.change_reading_of(&name), Some(reading));
+}
+
+#[then(expr = "the boundary {string} reads as unchanged")]
+fn the_boundary_reads_as_unchanged(world: &mut CutawayWorld, name: String) {
+    assert_eq!(world.driver.change_reading_of(&name), None);
+}
+
+#[then(expr = "the connection from {string} to {string} reads as {string}")]
+fn the_connection_reads_as(world: &mut CutawayWorld, from: String, to: String, reading: String) {
+    assert_eq!(
+        world.driver.connection_reading_of(&from, &to),
+        Some(reading)
+    );
 }
 
 #[when("every boundary is opened")]

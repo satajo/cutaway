@@ -1,12 +1,13 @@
 //! The port through which scenarios drive the application.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_analyzer_rust::RustSourceAnalyzer;
 use cutaway_analyzer_typescript::TypeScriptSourceAnalyzer;
 use cutaway_architecture::{
     ArchitectureGraph, ElementId, ElementKind, ElementName, Relation, RelationKind,
 };
+use cutaway_comparison::{Comparison, ElementChange, Presence};
 use cutaway_inspection::inspect;
 use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
@@ -22,10 +23,27 @@ use crate::fakes::{InMemoryPlanStore, InMemorySourceTree};
 /// sees them. Implementations decide which surface receives the actions.
 pub trait ApplicationDriver {
     fn add_source_file(&mut self, path: &str, contents: &str);
+    /// Lays a file down in one named version of the project's sources. The
+    /// versions of a scenario are independent source trees; a version never
+    /// named holds nothing.
+    fn add_source_file_in_version(&mut self, version: &str, path: &str, contents: &str);
     fn inspect_project(&mut self) -> Result<(), String>;
     /// Reads the architecture anew: every boundary closed, every kind
     /// spoken.
     fn view_boundaries(&mut self) -> Result<(), String>;
+    /// Inspects both named versions and views their comparison: the union
+    /// architecture through a fresh cut, every boundary closed, every kind
+    /// spoken.
+    fn compare_versions(&mut self, before: &str, after: &str) -> Result<(), String>;
+    /// How one rendered boundary reads in the comparison picture: "added",
+    /// "removed", or "modified". None while the comparison leaves it alone.
+    fn change_reading_of(&self, name: &str) -> Option<String>;
+    /// How the rendered connection between two boundaries reads: "added" when
+    /// every dependency behind it arrives, "removed" when every one goes,
+    /// "changed" when the mix shifts while the connection stays, and
+    /// "unchanged" while the comparison leaves it alone. None while the
+    /// picture draws no such connection.
+    fn connection_reading_of(&self, from: &str, to: &str) -> Option<String>;
     /// Opens every boundary at once, so the whole tree stands in the
     /// picture.
     fn open_all_boundaries(&mut self) -> Result<(), String>;
@@ -123,6 +141,14 @@ fn rendered_kind(kind: &str) -> Result<ElementKind, String> {
 #[derive(Debug, Default)]
 pub struct InProcessDriver {
     sources: InMemorySourceTree,
+    /// The sources of each named version, one independent tree per version.
+    /// A comparison inspects two of them; the unversioned `sources` stay out
+    /// of it, so a scenario may explore one project and compare another.
+    versioned_sources: BTreeMap<String, InMemorySourceTree>,
+    /// The comparison the picture reads, while the picture reads one. It
+    /// holds the union architecture the boundaries are cut from, and it
+    /// answers how every boundary and every connection changed.
+    comparing: Option<Comparison>,
     graph: Option<ArchitectureGraph>,
     /// The architecture the picture shows: the inspected graph with the
     /// plan's own additions drawn in. The lens reads this, and so does every
@@ -143,14 +169,46 @@ impl InProcessDriver {
         self.viewed.as_ref().expect("a project is inspected")
     }
 
+    /// The architecture one named version holds, read with the analyzers the
+    /// application wires in. A version no step ever named holds no files, and
+    /// an empty tree inspects to an empty project rather than to a failure.
+    fn architecture_of_version(&self, version: &str) -> Result<ArchitectureGraph, String> {
+        let nothing = InMemorySourceTree::default();
+        let sources = self.versioned_sources.get(version).unwrap_or(&nothing);
+        inspect(sources, &[&RustSourceAnalyzer, &TypeScriptSourceAnalyzer])
+            .map_err(|error| error.to_string())
+    }
+
+    /// The boundaries the picture draws, by id. A comparison reads a change
+    /// at these and nowhere else: what changed out of sight speaks from the
+    /// nearest one of them.
+    fn rendered(&self) -> BTreeSet<ElementId> {
+        self.view()
+            .graph
+            .elements()
+            .map(|element| element.id.clone())
+            .collect()
+    }
+
     /// Paints the current cut anew, exactly as the GUI does after the reader
     /// opens or closes a boundary: the lens views the architecture with the
     /// plan's own additions drawn in, so a planned element and a drawn
     /// connection roll up at every cut the way the concrete ones do.
+    ///
+    /// A comparison is the exception: it reads what history did, while the
+    /// plan speaks about what is to come, so the plan stays out of the
+    /// comparison picture entirely.
     fn rebuild_view(&mut self) -> Result<(), String> {
-        let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
         let cut = self.cut.as_ref().ok_or("no boundary view yet")?;
-        let viewed = self.plan.viewed_architecture(graph);
+        // The comparison carries its own architecture - the union of the two
+        // versions - so the inspected project stands untouched behind it, and
+        // viewing the boundaries again returns to it unchanged.
+        let viewed = if let Some(comparison) = &self.comparing {
+            comparison.union().clone()
+        } else {
+            let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
+            self.plan.viewed_architecture(graph)
+        };
         let view = boundary_view(&viewed, cut).map_err(|error| error.to_string())?;
         self.viewed = Some(viewed);
         self.view = Some(view);
@@ -258,18 +316,86 @@ impl ApplicationDriver for InProcessDriver {
         self.sources.add_file(path, contents);
     }
 
+    fn add_source_file_in_version(&mut self, version: &str, path: &str, contents: &str) {
+        let path = cutaway_inspection::ports::source_tree::SourcePath::new(path)
+            .expect("scenarios use valid source paths");
+        self.versioned_sources
+            .entry(version.to_owned())
+            .or_default()
+            .add_file(path, contents);
+    }
+
     fn inspect_project(&mut self) -> Result<(), String> {
         let graph = inspect(
             &self.sources,
             &[&RustSourceAnalyzer, &TypeScriptSourceAnalyzer],
         )
         .map_err(|error| error.to_string())?;
+        // Inspecting a project is reading its present, so whatever comparison
+        // stood before it ends here.
+        self.comparing = None;
         self.viewed = Some(self.plan.viewed_architecture(&graph));
         self.graph = Some(graph);
         Ok(())
     }
 
+    fn compare_versions(&mut self, before: &str, after: &str) -> Result<(), String> {
+        let comparison = Comparison::between(
+            &self.architecture_of_version(before)?,
+            &self.architecture_of_version(after)?,
+        );
+        self.comparing = Some(comparison);
+        // A comparison starts from a whole picture of its own: the scope of
+        // whatever stood before it named a boundary of another architecture.
+        self.cut = Some(Cut::whole());
+        self.rebuild_view()
+    }
+
+    fn change_reading_of(&self, name: &str) -> Option<String> {
+        let comparison = self.comparing.as_ref()?;
+        let id = self.boundary_id(name).ok()?;
+        let reading = *comparison.readings_at(&self.rendered()).get(&id)?;
+        Some(
+            match reading {
+                ElementChange::Added => "added",
+                ElementChange::Removed => "removed",
+                ElementChange::Modified => "modified",
+            }
+            .to_owned(),
+        )
+    }
+
+    fn connection_reading_of(&self, from: &str, to: &str) -> Option<String> {
+        let comparison = self.comparing.as_ref()?;
+        // The rendered connection stands for every dependency behind it, so
+        // it reads as one only while all of them read alike.
+        let behind = self.concrete_behind(from, to).ok()?;
+        let presences: Vec<Presence> = behind
+            .iter()
+            .map(|relation| comparison.presence_of_relation(relation))
+            .collect::<Option<Vec<Presence>>>()?;
+        if presences.is_empty() {
+            return None;
+        }
+        let all = |presence: Presence| presences.iter().all(|held| *held == presence);
+        Some(
+            if all(Presence::OnlyAfter) {
+                "added"
+            } else if all(Presence::OnlyBefore) {
+                "removed"
+            } else if all(Presence::InBoth) {
+                "unchanged"
+            } else {
+                "changed"
+            }
+            .to_owned(),
+        )
+    }
+
     fn view_boundaries(&mut self) -> Result<(), String> {
+        // Viewing the boundaries is reading one architecture, so the picture
+        // leaves any comparison behind and shows the inspected project again.
+        self.comparing = None;
         let mut cut = Cut::whole();
         // A fresh viewing drops the boundaries opened or closed before it:
         // those decisions answered the picture they were made in. The scope

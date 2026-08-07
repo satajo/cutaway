@@ -1137,6 +1137,7 @@ dependencies = [
  "cutaway-analyzer-rust",
  "cutaway-analyzer-typescript",
  "cutaway-architecture",
+ "cutaway-comparison",
  "cutaway-inspection",
  "cutaway-lenses",
  "cutaway-planning",
