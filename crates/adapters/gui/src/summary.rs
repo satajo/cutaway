@@ -116,20 +116,22 @@ pub(crate) fn summarize(containment: &Containment, layout: &Layout, zoom: f32) -
     summary
 }
 
-/// Whether every child of a frame arrives too small to read: the tallest of
-/// them decides, because a frame reveals its parts as soon as any of them
-/// can say something. A frame of one huge sub-frame and a few small leaves
-/// opens early to show that structure - the small leaves paint tiny beside
-/// it, and any child frame whose own contents stay illegible blurs into a
-/// block of its own.
+/// Whether every child of a frame arrives too small to read: the clearest
+/// of them decides, because a frame reveals its parts as soon as any of
+/// them can say something. A child measures by its smaller side - a label
+/// is a line of text, so a box squeezed flat and a box squeezed narrow
+/// read equally little, however far the other side stretches. A frame of
+/// one huge sub-frame and a few small leaves opens early to show that
+/// structure - the small leaves paint tiny beside it, and any child frame
+/// whose own contents stay illegible blurs into a block of its own.
 fn blurs(frame: &ElementId, containment: &Containment, layout: &Layout, zoom: f32) -> bool {
-    let tallest = containment
+    let clearest = containment
         .children(frame)
         .iter()
         .filter_map(|child| layout.rects.get(child))
-        .map(|rect| rect.height() * zoom)
+        .map(|rect| rect.height().min(rect.width()) * zoom)
         .fold(f32::NEG_INFINITY, f32::max);
-    tallest.is_finite() && tallest < LEGIBLE_BOX
+    clearest.is_finite() && clearest < LEGIBLE_BOX
 }
 
 #[cfg(test)]
@@ -137,7 +139,7 @@ mod tests {
     use cutaway_architecture::{
         ArchitectureGraph, Element, ElementKind, ElementName, Relation, RelationKind,
     };
-    use eframe::egui::{Rect, pos2, vec2};
+    use eframe::egui::{Rect, Vec2, pos2, vec2};
 
     use super::*;
     use crate::layout::Frame;
@@ -166,16 +168,13 @@ mod tests {
             .unwrap();
     }
 
-    fn placed(rects: &[(&str, f32)]) -> BTreeMap<ElementId, Rect> {
+    fn placed(rects: &[(&str, Vec2)]) -> BTreeMap<ElementId, Rect> {
         rects
             .iter()
             .enumerate()
-            .map(|(index, (name, height))| {
-                let top = 1000.0 * f32::from(u16::try_from(index).unwrap());
-                (
-                    id(name),
-                    Rect::from_min_size(pos2(0.0, top), vec2(100.0, *height)),
-                )
+            .map(|(index, (name, size))| {
+                let top = 10000.0 * f32::from(u16::try_from(index).unwrap());
+                (id(name), Rect::from_min_size(pos2(0.0, top), *size))
             })
             .collect()
     }
@@ -189,7 +188,11 @@ mod tests {
         contain(&mut graph, "package:a", "a/one");
         contain(&mut graph, "package:a", "a/two");
         let layout = Layout {
-            rects: placed(&[("package:a", 300.0), ("a/one", child), ("a/two", child)]),
+            rects: placed(&[
+                ("package:a", vec2(100.0, 300.0)),
+                ("a/one", vec2(100.0, child)),
+                ("a/two", vec2(100.0, child)),
+            ]),
             containers: vec![Frame {
                 id: id("package:a"),
                 depth: 0,
@@ -211,10 +214,10 @@ mod tests {
         contain(&mut graph, "a/inner", "a/inner/two");
         let layout = Layout {
             rects: placed(&[
-                ("package:a", 200.0),
-                ("a/inner", 100.0),
-                ("a/inner/one", 10.0),
-                ("a/inner/two", 10.0),
+                ("package:a", vec2(200.0, 200.0)),
+                ("a/inner", vec2(100.0, 100.0)),
+                ("a/inner/one", vec2(100.0, 10.0)),
+                ("a/inner/two", vec2(100.0, 10.0)),
             ]),
             containers: vec![
                 Frame {
@@ -260,6 +263,34 @@ mod tests {
         assert!(!summary.hides(&id("a/one")));
     }
 
+    #[test]
+    fn a_sliver_too_narrow_to_name_blurs_however_tall_it_stands() {
+        let mut graph = ArchitectureGraph::new();
+        for element in ["package:a", "a/one", "a/two"] {
+            add(&mut graph, element);
+        }
+        contain(&mut graph, "package:a", "a/one");
+        contain(&mut graph, "package:a", "a/two");
+        let layout = Layout {
+            rects: placed(&[
+                ("package:a", vec2(30.0, 700.0)),
+                ("a/one", vec2(8.0, 300.0)),
+                ("a/two", vec2(8.0, 300.0)),
+            ]),
+            containers: vec![Frame {
+                id: id("package:a"),
+                depth: 0,
+            }],
+            leaves: vec![id("a/one"), id("a/two")],
+        };
+        let summary = summarize(&Containment::of(&graph), &layout, 1.0);
+
+        assert!(
+            summary.block(&id("package:a")).is_some(),
+            "a name is a line of text, so a box squeezed narrow says nothing"
+        );
+    }
+
     /// A frame shaped like a real package: one huge sub-frame beside a few
     /// small leaves. The sub-frame's height dwarfs the leaves'.
     fn lopsided() -> (ArchitectureGraph, Layout) {
@@ -273,11 +304,11 @@ mod tests {
         contain(&mut graph, "a/src", "a/src/two");
         let layout = Layout {
             rects: placed(&[
-                ("package:a", 9000.0),
-                ("a/src", 8000.0),
-                ("a/src/one", NODE_HEIGHT),
-                ("a/src/two", NODE_HEIGHT),
-                ("a/config", NODE_HEIGHT),
+                ("package:a", vec2(9000.0, 9000.0)),
+                ("a/src", vec2(8000.0, 8000.0)),
+                ("a/src/one", vec2(100.0, NODE_HEIGHT)),
+                ("a/src/two", vec2(100.0, NODE_HEIGHT)),
+                ("a/config", vec2(100.0, NODE_HEIGHT)),
             ]),
             containers: vec![
                 Frame {

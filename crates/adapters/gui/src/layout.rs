@@ -1,13 +1,18 @@
 //! Spatial arrangement of a boundary view.
 //!
-//! Dependencies read left to right at every nesting level. Top-level
-//! boundaries form columns: a boundary sits one column right of the
-//! boundaries that depend on it. Inside a container the children form
-//! bands the same way: every dependency, however deep its endpoints nest,
-//! lifts to the enclosing siblings, and a child's dependency sits in a
-//! band to its right. A band with more members than the wrap height splits
-//! into adjacent columns filled top to bottom, so a wide layer stays a
-//! readable block instead of a tower. Within a column, and within every
+//! Dependencies read along a flow that turns with each nesting level: the
+//! canvas reads left to right, the contents of a top-level boundary top to
+//! bottom, the contents of a frame inside one left to right again. One
+//! direction alone would grow the picture into a long horizontal sprawl
+//! whose edges all travel the same way and overlap; turning the flow lets
+//! the picture grow in both directions. Top-level boundaries form columns:
+//! a boundary sits one column past the boundaries that depend on it.
+//! Inside a container the children form bands the same way along the
+//! frame's own flow: every dependency, however deep its endpoints nest,
+//! lifts to the enclosing siblings, and a child's dependency sits in the
+//! band past it. A band with more members than the wrap limit splits into
+//! adjacent runs laid across the flow, so a wide layer stays a readable
+//! block instead of one long line. Within a column, and within every
 //! band, boundaries order by the average position of their dependency
 //! partners, which keeps edges short and crossings few. A leaf's box grows
 //! with the number of concepts the full graph places inside it, so a busy
@@ -32,14 +37,75 @@ const ROW_GAP: f32 = 40.0;
 /// The gap between dependency bands inside a frame: tighter than the root
 /// [`COLUMN_GAP`], but wide enough for the arrows crossing it to read.
 const BAND_GAP: f32 = 48.0;
+/// The gap between band members standing shoulder to shoulder when the
+/// flow runs downward. Boxes are wider than tall, so across a downward
+/// flow they read apart with less air than stacked rows need, while their
+/// top and bottom edges still carry the arrows undisturbed.
+const SIDE_GAP: f32 = 24.0;
 /// Box growth in points per square root of the contained concept count:
 /// the box area, not its edge length, tracks the content.
 const WEIGHT_GROWTH: f32 = 7.0;
 /// Barycenter passes over the columns; a handful settles the order.
 const ORDERING_SWEEPS: usize = 4;
-/// The fewest members a column inside a frame stacks before its band may
+/// The fewest members a run inside a frame holds before its band may
 /// wrap: a short list reads as a list, and wrapping it gains nothing.
 const STACK_LIMIT: usize = 3;
+
+/// The direction dependencies read along at one nesting level. The flow
+/// turns as frames nest, so a deep picture spreads over both screen
+/// directions instead of sprawling along one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Rightward,
+    Downward,
+}
+
+impl Flow {
+    /// The flow inside a frame this deep. The canvas reads rightward, so
+    /// the contents of a top-level frame read downward, and every further
+    /// level turns again.
+    fn at(depth: usize) -> Self {
+        if depth.is_multiple_of(2) {
+            Self::Downward
+        } else {
+            Self::Rightward
+        }
+    }
+
+    /// The extent of a box along the flow.
+    fn along(self, size: Vec2) -> f32 {
+        match self {
+            Self::Rightward => size.x,
+            Self::Downward => size.y,
+        }
+    }
+
+    /// The extent of a box across the flow.
+    fn across(self, size: Vec2) -> f32 {
+        match self {
+            Self::Rightward => size.y,
+            Self::Downward => size.x,
+        }
+    }
+
+    /// A vector from its along-flow and across-flow parts.
+    fn compose(self, along: f32, across: f32) -> Vec2 {
+        match self {
+            Self::Rightward => vec2(along, across),
+            Self::Downward => vec2(across, along),
+        }
+    }
+
+    /// The gap between the members of one run. A rightward flow stacks its
+    /// runs downward and rows of boxes need [`ROW_GAP`] of air; a downward
+    /// flow lays boxes on their wide side, where [`SIDE_GAP`] reads apart.
+    fn shoulder_gap(self) -> f32 {
+        match self {
+            Self::Rightward => ROW_GAP,
+            Self::Downward => SIDE_GAP,
+        }
+    }
+}
 
 pub struct Layout {
     pub rects: BTreeMap<ElementId, Rect>,
@@ -169,10 +235,25 @@ pub fn compute(
     let labels = Labels::renaming(view, renames);
     let label_of = |id: &ElementId| -> String { labels.label(id).text() };
 
+    // Refinement must read each frame the way its own flow does, and the
+    // flow follows from how deep the frame nests.
+    let flows: BTreeMap<ElementId, Flow> = children
+        .keys()
+        .map(|parent| {
+            let mut depth = 0;
+            let mut current = parent;
+            while let Some(above) = parents.get(current) {
+                depth += 1;
+                current = above;
+            }
+            (parent.clone(), Flow::at(depth))
+        })
+        .collect();
+
     // Arrange twice: the first pass reveals where everything lands, the
     // second reorders siblings toward their dependency partners.
     let first = arrange(&columns, &orders, weights, &label_of);
-    refine_sibling_orders(&mut orders, &depends, &first);
+    refine_sibling_orders(&mut orders, &depends, &flows, &first);
     arrange(&columns, &orders, weights, &label_of)
 }
 
@@ -184,7 +265,7 @@ fn arrange(
 ) -> Layout {
     let mut measures = Measures::default();
     for root in columns.iter().flatten() {
-        measure(root, orders, weights, label_of, &mut measures);
+        measure(root, 0, orders, weights, label_of, &mut measures);
     }
 
     let mut layout = Layout {
@@ -218,6 +299,7 @@ struct Measures {
 
 fn measure(
     id: &ElementId,
+    depth: usize,
     orders: &BTreeMap<ElementId, Vec<Vec<ElementId>>>,
     weights: &BTreeMap<ElementId, usize>,
     label_of: &impl Fn(&ElementId) -> String,
@@ -234,11 +316,11 @@ fn measure(
                 .iter()
                 .map(|band| {
                     band.iter()
-                        .map(|child| measure(child, orders, weights, label_of, measures))
+                        .map(|child| measure(child, depth + 1, orders, weights, label_of, measures))
                         .collect()
                 })
                 .collect();
-            let bands = Bands::new(&sized);
+            let bands = Bands::new(&sized, Flow::at(depth));
             let size = framed(bands.extent, label);
             measures.bands.insert(id.clone(), bands);
             size
@@ -277,10 +359,10 @@ fn place(
 }
 
 /// A container's children arranged into dependency bands: one band per
-/// layer, bands run left to right, and a band with more members than the
-/// wrap height splits into adjacent physical columns filled top to bottom.
-/// Columns centre on the content's vertical middle, so edges cross the
-/// band gaps squarely.
+/// layer, bands advance along the frame's flow, and a band with more
+/// members than the wrap limit splits into adjacent runs laid across the
+/// flow. Runs centre on the content's middle, so edges cross the band
+/// gaps squarely.
 struct Bands {
     /// Where each child sits relative to the content's top left, indexed
     /// in flattened band order.
@@ -289,13 +371,13 @@ struct Bands {
 }
 
 impl Bands {
-    fn new(bands: &[Vec<Vec2>]) -> Self {
+    fn new(bands: &[Vec<Vec2>], flow: Flow) -> Self {
         let total: usize = bands.iter().map(Vec::len).sum();
-        let limit = wrap_height(total);
-        // A physical column is a run of at most `limit` members of one
-        // band; the column remembers its band, so the gap to the previous
-        // column tells wrapping apart from layering.
-        let mut columns: Vec<(usize, Vec<(usize, Vec2)>)> = Vec::new();
+        let limit = wrap_limit(total, flow);
+        // A run is a stretch of at most `limit` members of one band; the
+        // run remembers its band, so the gap to the previous run tells
+        // wrapping apart from layering.
+        let mut runs: Vec<(usize, Vec<(usize, Vec2)>)> = Vec::new();
         let mut flat = 0;
         for (band, members) in bands.iter().enumerate() {
             for chunk in members.chunks(limit) {
@@ -304,56 +386,59 @@ impl Bands {
                     entries.push((flat, *size));
                     flat += 1;
                 }
-                columns.push((band, entries));
+                runs.push((band, entries));
             }
         }
 
-        let height_of = |entries: &[(usize, Vec2)]| -> f32 {
+        let breadth_of = |entries: &[(usize, Vec2)]| -> f32 {
             entries
                 .iter()
-                .map(|(_, size)| size.y + ROW_GAP)
+                .map(|(_, size)| flow.across(*size) + flow.shoulder_gap())
                 .sum::<f32>()
-                - ROW_GAP
+                - flow.shoulder_gap()
         };
-        let height = columns
+        let breadth = runs
             .iter()
-            .map(|(_, entries)| height_of(entries))
+            .map(|(_, entries)| breadth_of(entries))
             .fold(0.0_f32, f32::max);
 
         let mut offsets = vec![Vec2::ZERO; total];
-        let mut x = 0.0_f32;
+        let mut along = 0.0_f32;
         let mut previous_band = None;
-        for (band, entries) in &columns {
+        for (band, entries) in &runs {
             if let Some(previous) = previous_band {
-                x += if previous == *band { GAP } else { BAND_GAP };
+                along += if previous == *band { GAP } else { BAND_GAP };
             }
             previous_band = Some(*band);
-            let mut y = (height - height_of(entries)) / 2.0;
+            let mut across = (breadth - breadth_of(entries)) / 2.0;
             for (index, size) in entries {
-                offsets[*index] = vec2(x, y);
-                y += size.y + ROW_GAP;
+                offsets[*index] = flow.compose(along, across);
+                across += flow.across(*size) + flow.shoulder_gap();
             }
-            x += entries
+            along += entries
                 .iter()
-                .map(|(_, size)| size.x)
+                .map(|(_, size)| flow.along(*size))
                 .fold(0.0_f32, f32::max);
         }
         Self {
             offsets,
-            extent: vec2(x, height),
+            extent: flow.compose(along, breadth),
         }
     }
 }
 
-/// The tallest a physical column inside a frame stacks before its band
-/// wraps into an adjacent column: near the square root of the sibling
-/// count, so a frame without dependencies still packs into a block, but
-/// never below [`STACK_LIMIT`], so a short list stays one column.
-fn wrap_height(count: usize) -> usize {
-    (1..=count)
-        .find(|root| root * root >= count)
-        .unwrap_or(1)
-        .max(STACK_LIMIT)
+/// The most members a run inside a frame holds before its band wraps into
+/// an adjacent run: enough that a frame without dependencies still packs
+/// into a block, but never below [`STACK_LIMIT`], so a short list stays
+/// one run. A leaf box is about four times as wide as tall, so a downward
+/// flow, whose runs lay boxes on their wide side, balances at half the
+/// members a rightward one stacks.
+fn wrap_limit(count: usize, flow: Flow) -> usize {
+    let balanced = match flow {
+        Flow::Rightward => (1..=count).find(|root| root * root >= count),
+        Flow::Downward => (1..=count).find(|root| root * root * 4 >= count),
+    };
+    balanced.unwrap_or(1).max(STACK_LIMIT)
 }
 
 /// The container box around banded content: room for the header, the
@@ -417,6 +502,7 @@ fn reduce_crossings(columns: &mut [Vec<ElementId>], edges: &[(ElementId, Element
 fn refine_sibling_orders(
     orders: &mut BTreeMap<ElementId, Vec<Vec<ElementId>>>,
     depends: &[(ElementId, ElementId)],
+    flows: &BTreeMap<ElementId, Flow>,
     previous: &Layout,
 ) {
     let mut partners: BTreeMap<&ElementId, Vec<&ElementId>> = BTreeMap::new();
@@ -446,23 +532,27 @@ fn refine_sibling_orders(
     }
     // The sort is stable, so children whose partners pull them to the same
     // place keep the crossing-reduced order they arrived in.
-    for bands in orders.values_mut() {
+    for (parent, bands) in orders.iter_mut() {
         for band in bands.iter_mut() {
-            band.sort_by(|a, b| in_reading_order(keys[a], keys[b]));
+            band.sort_by(|a, b| in_reading_order(flows[parent], keys[a], keys[b]));
         }
     }
 }
 
-/// Which of two points comes first when the canvas is read like text: the
-/// higher one, and among points of one height the one further left.
-/// Positions count in whole steps of [`GAP`], the closest two boxes ever
-/// come, so a centroid that misses a line by rounding still ranks with it.
-fn in_reading_order(a: Pos2, b: Pos2) -> Ordering {
+/// Which of two points comes first when a frame flowing this way is read:
+/// band members stand across the flow, so the one earlier across it, and
+/// among points of one rank the one earlier along it. Positions count in
+/// whole steps of [`GAP`], the closest two boxes ever come on either
+/// axis, so a centroid that misses a line by rounding still ranks with
+/// it.
+fn in_reading_order(flow: Flow, a: Pos2, b: Pos2) -> Ordering {
     let step = |value: f32| (value / GAP).round();
-    step(a.y)
-        .partial_cmp(&step(b.y))
+    let across = |point: Pos2| step(flow.across(point.to_vec2()));
+    let along = |point: Pos2| step(flow.along(point.to_vec2()));
+    across(a)
+        .partial_cmp(&across(b))
         .unwrap_or(Ordering::Equal)
-        .then_with(|| step(a.x).partial_cmp(&step(b.x)).unwrap_or(Ordering::Equal))
+        .then_with(|| along(a).partial_cmp(&along(b)).unwrap_or(Ordering::Equal))
 }
 
 fn subtree(
@@ -706,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn a_crowded_container_grows_wide_instead_of_tall() {
+    fn a_crowded_container_packs_into_a_readable_block() {
         let mut graph = ArchitectureGraph::new();
         let package = add_package(&mut graph, "crowded");
         for index in 0..16 {
@@ -761,17 +851,17 @@ mod tests {
     }
 
     #[test]
-    fn a_siblings_dependency_sits_in_a_band_to_its_right() {
+    fn a_siblings_dependency_sits_in_a_band_beneath_it() {
         let mut graph = ArchitectureGraph::new();
         let package = add_package(&mut graph, "pkg");
         // The dependent sorts after its dependency by id, so only the
-        // layering can put it on the left.
+        // layering can put it first along the flow.
         let dependent = add_module(&mut graph, &package, "pkg/z-app.rs");
         let dependency = add_module(&mut graph, &package, "pkg/a-domain.rs");
         depend(&mut graph, &dependent, &dependency);
 
         let layout = compute(&graph, &no_weights(), &Renames::default());
-        assert!(layout.rects[&dependent].max.x < layout.rects[&dependency].min.x);
+        assert!(layout.rects[&dependent].max.y < layout.rects[&dependency].min.y);
     }
 
     #[test]
@@ -787,11 +877,47 @@ mod tests {
         depend(&mut graph, &dependent, &dependency);
 
         let layout = compute(&graph, &no_weights(), &Renames::default());
-        assert!(layout.rects[&dependent_frame].max.x < layout.rects[&dependency_frame].min.x);
+        assert!(layout.rects[&dependent_frame].max.y < layout.rects[&dependency_frame].min.y);
     }
 
     #[test]
-    fn a_wide_layer_wraps_into_adjacent_columns_instead_of_one_tall_stack() {
+    fn the_flow_turns_at_each_nesting_level() {
+        let mut graph = ArchitectureGraph::new();
+        let package = add_package(&mut graph, "pkg");
+        // Every dependent sorts after its dependency by id, so only the
+        // layering can put it first along each level's flow.
+        let outer_dependent = add_module(&mut graph, &package, "pkg/z-user");
+        let outer_dependency = add_module(&mut graph, &package, "pkg/a-used");
+        let inner_dependent = add_module(&mut graph, &outer_dependent, "pkg/z-user/z-caller");
+        let inner_dependency = add_module(&mut graph, &outer_dependent, "pkg/z-user/a-callee");
+        let deep_dependent =
+            add_module(&mut graph, &inner_dependent, "pkg/z-user/z-caller/z-top.rs");
+        let deep_dependency = add_module(
+            &mut graph,
+            &inner_dependent,
+            "pkg/z-user/z-caller/a-bottom.rs",
+        );
+        depend(&mut graph, &outer_dependent, &outer_dependency);
+        depend(&mut graph, &inner_dependent, &inner_dependency);
+        depend(&mut graph, &deep_dependent, &deep_dependency);
+
+        let layout = compute(&graph, &no_weights(), &Renames::default());
+        assert!(
+            layout.rects[&outer_dependent].max.y < layout.rects[&outer_dependency].min.y,
+            "a top-level frame's contents flow downward"
+        );
+        assert!(
+            layout.rects[&inner_dependent].max.x < layout.rects[&inner_dependency].min.x,
+            "one level deeper the flow turns rightward"
+        );
+        assert!(
+            layout.rects[&deep_dependent].max.y < layout.rects[&deep_dependency].min.y,
+            "another level deeper it turns downward again"
+        );
+    }
+
+    #[test]
+    fn a_wide_layer_wraps_into_adjacent_runs_instead_of_one_long_line() {
         let mut graph = ArchitectureGraph::new();
         let package = add_package(&mut graph, "hub");
         let sink = add_module(&mut graph, &package, "hub/sink.rs");
@@ -803,25 +929,25 @@ mod tests {
         }
 
         let layout = compute(&graph, &no_weights(), &Renames::default());
-        let mut columns: BTreeMap<u32, usize> = BTreeMap::new();
+        let mut runs: BTreeMap<u32, usize> = BTreeMap::new();
         for caller in &callers {
             assert!(
-                layout.rects[caller].max.x < layout.rects[&sink].min.x,
+                layout.rects[caller].max.y < layout.rects[&sink].min.y,
                 "{caller} does not read before its dependency"
             );
-            *columns
-                .entry(layout.rects[caller].min.x.to_bits())
+            *runs
+                .entry(layout.rects[caller].min.y.to_bits())
                 .or_default() += 1;
         }
-        assert!(columns.len() > 1, "ten callers stack into one column");
+        assert!(runs.len() > 1, "ten callers line up into one run");
         assert!(
-            columns.values().all(|members| *members <= 4),
-            "a wrapped column outgrows the wrap height"
+            runs.values().all(|members| *members <= 3),
+            "a wrapped run outgrows the wrap limit"
         );
     }
 
     #[test]
-    fn independent_children_spread_into_several_columns() {
+    fn independent_children_spread_into_several_runs() {
         let mut graph = ArchitectureGraph::new();
         let package = add_package(&mut graph, "flat");
         let children: Vec<ElementId> = (0..12)
@@ -829,13 +955,13 @@ mod tests {
             .collect();
 
         let layout = compute(&graph, &no_weights(), &Renames::default());
-        let columns: BTreeSet<u32> = children
+        let runs: BTreeSet<u32> = children
             .iter()
-            .map(|child| layout.rects[child].min.x.to_bits())
+            .map(|child| layout.rects[child].min.y.to_bits())
             .collect();
         assert!(
-            columns.len() > 1,
-            "twelve independent children form one tall stack"
+            runs.len() > 1,
+            "twelve independent children form one long line"
         );
         let box_of = layout.rects[&package];
         let aspect = box_of.width() / box_of.height();
@@ -846,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn three_or_fewer_children_stack_in_one_column() {
+    fn three_or_fewer_children_line_up_in_one_run() {
         let mut graph = ArchitectureGraph::new();
         let package = add_package(&mut graph, "small");
         let children: Vec<ElementId> = (0..3)
@@ -854,11 +980,11 @@ mod tests {
             .collect();
 
         let layout = compute(&graph, &no_weights(), &Renames::default());
-        let columns: BTreeSet<u32> = children
+        let runs: BTreeSet<u32> = children
             .iter()
-            .map(|child| layout.rects[child].min.x.to_bits())
+            .map(|child| layout.rects[child].min.y.to_bits())
             .collect();
-        assert_eq!(columns.len(), 1, "three children split into columns");
+        assert_eq!(runs.len(), 1, "three children wrap into several runs");
     }
 
     #[test]
