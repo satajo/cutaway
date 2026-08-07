@@ -1320,3 +1320,58 @@ fn a_private_members_writing_stays_the_classs_own() {
         "packages/app/src/api.ts#function:fetchBooks"
     ));
 }
+
+#[test]
+fn every_cataloged_source_and_naming_manifest_is_claimed() {
+    let structure = analyze(&[
+        ("package.json", r#"{"workspaces":["packages/*"]}"#),
+        MANIFEST_APP,
+        ("packages/app/src/index.ts", "export const go = () => 1;\n"),
+        ("packages/app/src/util.ts", "export const u = 1;\n"),
+        (
+            "packages/app/node_modules/dep/index.js",
+            "module.exports = 1;\n",
+        ),
+        ("packages/app/README.md", "docs"),
+    ]);
+    let claimed = |path: &str| structure.claimed.contains(&SourcePath::new(path).unwrap());
+    assert!(claimed("packages/app/package.json"));
+    assert!(
+        claimed("packages/app/src/index.ts"),
+        "a dissolved entry file is still read"
+    );
+    assert!(claimed("packages/app/src/util.ts"));
+    assert!(
+        !claimed("package.json"),
+        "a nameless workspace manifest names no package"
+    );
+    assert!(
+        !claimed("packages/app/node_modules/dep/index.js"),
+        "vendored code is never even read"
+    );
+    assert!(
+        !claimed("packages/app/README.md"),
+        "no meaning was read from it"
+    );
+}
+
+#[test]
+fn the_territory_of_a_package_is_its_manifest_directory() {
+    use cutaway_architecture::ElementId;
+    use cutaway_inspection::ports::source_tree::DirectoryPath;
+
+    let structure = analyze(&[MANIFEST_APP, MANIFEST_CORE]);
+    assert_eq!(
+        structure.territories,
+        std::collections::BTreeMap::from([
+            (
+                DirectoryPath::new("packages/app").unwrap(),
+                ElementId::new("package:app").unwrap()
+            ),
+            (
+                DirectoryPath::new("packages/core").unwrap(),
+                ElementId::new("package:core").unwrap()
+            ),
+        ])
+    );
+}

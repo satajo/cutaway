@@ -47,7 +47,7 @@ use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, Relatio
 use cutaway_inspection::ports::source_analyzer::{
     AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
-use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
+use cutaway_inspection::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
 use crate::declarations::{Attributions, Declaration, DeclarationIndex, NestedDeclaration};
 use crate::imports::{Import, Reference};
@@ -163,8 +163,43 @@ impl SourceAnalyzer for RustSourceAnalyzer {
         Ok(SourceStructure {
             elements,
             relations: relations.into_iter().collect(),
+            claimed: claimed(&packages, &catalog, files),
+            territories: territories(&packages),
         })
     }
+}
+
+/// The files this analyzer read meaning from: every `.rs` file the catalog
+/// placed - it became a module element or dissolved into its package - and
+/// every manifest that named a package. A workspace-only manifest named
+/// nothing, so it stays unclaimed and keeps a place of its own in the
+/// picture.
+fn claimed(
+    packages: &[DiscoveredPackage],
+    catalog: &ModuleCatalog,
+    files: &[SourceFile],
+) -> BTreeSet<SourcePath> {
+    files
+        .iter()
+        .map(|file| file.path.clone())
+        .filter(|path| catalog.module_of(path).is_some())
+        .chain(packages.iter().map(DiscoveredPackage::manifest))
+        .collect()
+}
+
+/// The directory each package occupies: what the language leaves unclaimed
+/// inside it still belongs inside the package's boundary.
+fn territories(packages: &[DiscoveredPackage]) -> BTreeMap<DirectoryPath, ElementId> {
+    packages
+        .iter()
+        .map(|package| {
+            (
+                DirectoryPath::new(&package.dir)
+                    .expect("a manifest directory carries no trailing slash"),
+                package_id(package),
+            )
+        })
+        .collect()
 }
 
 /// Turns one file's imports and references into dependency relations. A

@@ -56,7 +56,7 @@ use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, Relatio
 use cutaway_inspection::ports::source_analyzer::{
     AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
-use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
+use cutaway_inspection::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
 use crate::declarations::{Attributions, Declaration, DeclarationIndex, NestedDeclaration};
 use crate::imports::{Binding, Import, PackageNames, Reference};
@@ -166,8 +166,44 @@ impl SourceAnalyzer for GoSourceAnalyzer {
         Ok(SourceStructure {
             elements,
             relations: relations.into_iter().collect(),
+            claimed: claimed(&modules, &catalog, files),
+            territories: territories(&modules),
         })
     }
+}
+
+/// The files this analyzer read meaning from: every `.go` file the catalog
+/// placed - it became a module element or dissolved into its directory - and
+/// every manifest, each of which names a module. A file the go tool leaves
+/// out of the build (vendored code, `testdata`, names starting with `.` or
+/// `_`) made no element, so it stays unclaimed and keeps a place of its own
+/// in the picture.
+fn claimed(
+    modules: &[DiscoveredModule],
+    catalog: &DirectoryCatalog,
+    files: &[SourceFile],
+) -> BTreeSet<SourcePath> {
+    files
+        .iter()
+        .map(|file| file.path.clone())
+        .filter(|path| catalog.file(path).is_some())
+        .chain(modules.iter().map(DiscoveredModule::manifest))
+        .collect()
+}
+
+/// The directory each module occupies: what the language leaves unclaimed
+/// inside it still belongs inside the module's boundary.
+fn territories(modules: &[DiscoveredModule]) -> BTreeMap<DirectoryPath, ElementId> {
+    modules
+        .iter()
+        .map(|module| {
+            (
+                DirectoryPath::new(&module.dir)
+                    .expect("a manifest directory carries no trailing slash"),
+                module_id(module),
+            )
+        })
+        .collect()
 }
 
 /// Turns one file's imports and references into dependency relations. An

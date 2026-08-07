@@ -5,7 +5,7 @@
 //! depends on.
 
 use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
-use cutaway_inspection::ports::source_tree::SourceFile;
+use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 use serde_json::Value;
 
 use crate::modules::{is_vendored, join};
@@ -21,6 +21,14 @@ pub struct DiscoveredPackage {
     /// authoritative first. Only the source tree tells which of them exists,
     /// so the module catalog picks the winner.
     pub entry_candidates: Vec<String>,
+}
+
+impl DiscoveredPackage {
+    /// The manifest that declared this package.
+    #[must_use]
+    pub fn manifest(&self) -> SourcePath {
+        SourcePath::new(join(&self.dir, "package.json")).expect("a manifest path is never empty")
+    }
 }
 
 /// Finds every `package.json` that names a package. A manifest without a

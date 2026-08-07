@@ -48,8 +48,8 @@ pub trait ApplicationDriver {
     /// picture.
     fn open_all_boundaries(&mut self) -> Result<(), String>;
     /// Drops one kind from the picture's vocabulary. `kind` is the plural
-    /// word a picture speaks: `packages`, `directories`, `modules`, `types`,
-    /// or `functions`.
+    /// word a picture speaks: `packages`, `directories`, `modules`, `files`,
+    /// `types`, or `functions`.
     fn hide_kind(&mut self, kind: &str) -> Result<(), String>;
     /// Puts one kind back in the picture's vocabulary, named as
     /// [`ApplicationDriver::hide_kind`] names it.
@@ -116,6 +116,7 @@ fn element_kind(kind: &str) -> Result<ElementKind, String> {
         "package" => Ok(ElementKind::Package),
         "directory" => Ok(ElementKind::Directory),
         "module" => Ok(ElementKind::Module),
+        "file" => Ok(ElementKind::File),
         "type" => Ok(ElementKind::Type),
         "function" => Ok(ElementKind::Function),
         other => Err(format!("unknown element kind {other}")),
@@ -128,6 +129,7 @@ fn rendered_kind(kind: &str) -> Result<ElementKind, String> {
         "packages" => Ok(ElementKind::Package),
         "directories" => Ok(ElementKind::Directory),
         "modules" => Ok(ElementKind::Module),
+        "files" => Ok(ElementKind::File),
         "types" => Ok(ElementKind::Type),
         "functions" => Ok(ElementKind::Function),
         other => Err(format!("unknown kind {other}")),

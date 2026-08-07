@@ -1,6 +1,8 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use cutaway_architecture::{Element, ElementId, Relation};
 
-use crate::ports::source_tree::{SourceFile, SourcePath};
+use crate::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
 /// Driven port: extracts architecture facts from one version of a project's
 /// sources.
@@ -24,6 +26,10 @@ use crate::ports::source_tree::{SourceFile, SourcePath};
 ///   [`SourceStructure`].
 /// - Two analyzers must not declare the same element; inspection fails if
 ///   they do.
+/// - The analyzer claims every file it read meaning from and states the
+///   territory of every package it discovered, so the inspector can show
+///   what no language spoke for. See [`SourceStructure::claimed`] and
+///   [`SourceStructure::territories`].
 pub trait SourceAnalyzer {
     fn analyze(&self, files: &[SourceFile]) -> Result<SourceStructure, SourceAnalysisError>;
 }
@@ -33,6 +39,26 @@ pub trait SourceAnalyzer {
 pub struct SourceStructure {
     pub elements: Vec<AnalyzedElement>,
     pub relations: Vec<Relation>,
+    /// The files this analyzer read meaning from.
+    ///
+    /// The invariant: claim exactly the files the structure's elements and
+    /// dissolutions represent - every source that became an element or
+    /// dissolved into one, and every manifest that named a package. The
+    /// inspector shows every unclaimed file as a plain file element, so the
+    /// failure modes are asymmetric: under-claiming a file whose element
+    /// carries its path as id fails inspection loudly on the collision,
+    /// while over-claiming a file nothing represents makes it disappear
+    /// from the picture silently - inspection cannot detect that, so only
+    /// this contract prevents the regression. A manifest read but made
+    /// nothing of (a workspace-only manifest naming no package) is not
+    /// claimed: nothing represents it, so it keeps a place of its own in
+    /// the picture.
+    pub claimed: BTreeSet<SourcePath>,
+    /// The directory each discovered package occupies, mapped to the
+    /// package element's id. The territory of a package is the directory
+    /// subtree it occupies: what the languages leave unclaimed inside a
+    /// territory still belongs inside that package's boundary.
+    pub territories: BTreeMap<DirectoryPath, ElementId>,
 }
 
 /// One element an analyzer found, plus where it sits in the containment tree.

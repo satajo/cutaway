@@ -1045,3 +1045,43 @@ fn an_unexported_methods_writing_stays_the_types_own() {
         "alpha/store/store.go#function:Open"
     ));
 }
+
+#[test]
+fn every_buildable_source_and_every_manifest_is_claimed() {
+    let structure = analyze(&[
+        ALPHA,
+        ("alpha/main.go", "package main\n"),
+        ("alpha/util/util.go", "package util\n"),
+        ("alpha/vendor/dep/dep.go", "package dep\n"),
+        ("alpha/notes.txt", "loose"),
+    ]);
+    let claimed = |path: &str| structure.claimed.contains(&SourcePath::new(path).unwrap());
+    assert!(claimed("alpha/go.mod"));
+    assert!(claimed("alpha/main.go"));
+    assert!(claimed("alpha/util/util.go"));
+    assert!(
+        !claimed("alpha/vendor/dep/dep.go"),
+        "the go tool leaves vendored code out of the build, so no meaning was read from it"
+    );
+    assert!(!claimed("alpha/notes.txt"), "no meaning was read from it");
+}
+
+#[test]
+fn the_territory_of_a_module_is_its_manifest_directory() {
+    use cutaway_inspection::ports::source_tree::DirectoryPath;
+
+    let structure = analyze(&[ALPHA, BETA]);
+    assert_eq!(
+        structure.territories,
+        std::collections::BTreeMap::from([
+            (
+                DirectoryPath::new("alpha").unwrap(),
+                ElementId::new("package:example.com/alpha").unwrap()
+            ),
+            (
+                DirectoryPath::new("beta").unwrap(),
+                ElementId::new("package:example.com/beta").unwrap()
+            ),
+        ])
+    );
+}

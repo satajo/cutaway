@@ -108,6 +108,62 @@ pub enum InvalidSourcePath {
     Backslash { path: String },
 }
 
+/// A directory inside a source tree: relative, slash-separated, without a
+/// trailing slash. The empty path names the tree's root - a directory no
+/// [`SourcePath`] can name, because a source path always names a file.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DirectoryPath(String);
+
+impl DirectoryPath {
+    /// The root of the source tree.
+    #[must_use]
+    pub fn root() -> Self {
+        Self(String::new())
+    }
+
+    pub fn new(path: impl Into<String>) -> Result<Self, InvalidDirectoryPath> {
+        let path = path.into();
+        if path.starts_with('/') {
+            return Err(InvalidDirectoryPath::Absolute { path });
+        }
+        if path.contains('\\') {
+            return Err(InvalidDirectoryPath::Backslash { path });
+        }
+        if path.ends_with('/') {
+            return Err(InvalidDirectoryPath::TrailingSlash { path });
+        }
+        Ok(Self(path))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether the file at `path` lies within this directory's subtree. The
+    /// root contains every file.
+    #[must_use]
+    pub fn contains(&self, path: &SourcePath) -> bool {
+        self.0.is_empty() || path.as_str().starts_with(&format!("{}/", self.0))
+    }
+}
+
+impl fmt::Display for DirectoryPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidDirectoryPath {
+    #[error("a directory path must be relative: {path}")]
+    Absolute { path: String },
+    #[error("a directory path must use forward slashes: {path}")]
+    Backslash { path: String },
+    #[error("a directory path carries no trailing slash: {path}")]
+    TrailingSlash { path: String },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SourceTreeError {
     #[error("cannot read the source tree: {reason}")]
@@ -137,6 +193,29 @@ mod tests {
             SourcePath::new("src\\lib.rs"),
             Err(InvalidSourcePath::Backslash { .. })
         ));
+    }
+
+    #[test]
+    fn a_directory_path_admits_the_root_and_refuses_a_trailing_slash() {
+        assert_eq!(DirectoryPath::new(""), Ok(DirectoryPath::root()));
+        assert!(matches!(
+            DirectoryPath::new("crates/app/"),
+            Err(InvalidDirectoryPath::TrailingSlash { .. })
+        ));
+    }
+
+    #[test]
+    fn a_directory_contains_the_files_beneath_it_and_no_namesake_beside_it() {
+        let dir = DirectoryPath::new("crates/app").unwrap();
+        assert!(dir.contains(&SourcePath::new("crates/app/notes.txt").unwrap()));
+        assert!(dir.contains(&SourcePath::new("crates/app/deep/notes.txt").unwrap()));
+        assert!(!dir.contains(&SourcePath::new("crates/app-extras/notes.txt").unwrap()));
+        assert!(!dir.contains(&SourcePath::new("crates/app").unwrap()));
+    }
+
+    #[test]
+    fn the_root_directory_contains_every_file() {
+        assert!(DirectoryPath::root().contains(&SourcePath::new("anywhere/notes.txt").unwrap()));
     }
 
     #[test]

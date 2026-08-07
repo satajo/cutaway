@@ -815,3 +815,68 @@ fn a_method_naming_its_own_type_says_nothing() {
         "the edge onto the holding type restates containment"
     );
 }
+
+#[test]
+fn every_mapped_source_and_naming_manifest_is_claimed() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        ("crates/a/src/lib.rs", "mod foo;\n"),
+        ("crates/a/src/foo.rs", ""),
+        ("crates/a/tests/behaviour.rs", ""),
+        ("crates/a/notes.txt", "loose"),
+    ]);
+    let claimed = |path: &str| structure.claimed.contains(&SourcePath::new(path).unwrap());
+    assert!(claimed("crates/a/Cargo.toml"));
+    assert!(
+        claimed("crates/a/src/lib.rs"),
+        "a dissolved crate root is still read"
+    );
+    assert!(claimed("crates/a/src/foo.rs"));
+    assert!(
+        claimed("crates/a/tests/behaviour.rs"),
+        "a standalone root is read too"
+    );
+    assert!(
+        !claimed("crates/a/notes.txt"),
+        "no meaning was read from it"
+    );
+}
+
+#[test]
+fn a_workspace_manifest_that_names_no_package_stays_unclaimed() {
+    let structure = analyze(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n"),
+        MANIFEST_A,
+    ]);
+    assert!(
+        !structure
+            .claimed
+            .contains(&SourcePath::new("Cargo.toml").unwrap())
+    );
+    assert!(
+        structure
+            .claimed
+            .contains(&SourcePath::new("crates/a/Cargo.toml").unwrap())
+    );
+}
+
+#[test]
+fn the_territory_of_a_package_is_its_manifest_directory() {
+    use cutaway_architecture::ElementId;
+    use cutaway_inspection::ports::source_tree::DirectoryPath;
+
+    let structure = analyze(&[MANIFEST_A, MANIFEST_B]);
+    assert_eq!(
+        structure.territories,
+        std::collections::BTreeMap::from([
+            (
+                DirectoryPath::new("crates/a").unwrap(),
+                ElementId::new("package:a").unwrap()
+            ),
+            (
+                DirectoryPath::new("crates/b").unwrap(),
+                ElementId::new("package:b-lib").unwrap()
+            ),
+        ])
+    );
+}

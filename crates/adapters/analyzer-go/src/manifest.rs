@@ -3,7 +3,7 @@
 //! on.
 
 use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
-use cutaway_inspection::ports::source_tree::SourceFile;
+use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
 /// One module a go.mod declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +14,19 @@ pub struct DiscoveredModule {
     /// Directory of the manifest, `""` for the repository root, no trailing
     /// slash otherwise.
     pub dir: String,
+}
+
+impl DiscoveredModule {
+    /// The manifest that declared this module.
+    #[must_use]
+    pub fn manifest(&self) -> SourcePath {
+        let path = if self.dir.is_empty() {
+            "go.mod".to_owned()
+        } else {
+            format!("{}/go.mod", self.dir)
+        };
+        SourcePath::new(path).expect("a manifest path is never empty")
+    }
 }
 
 /// Finds every `go.mod` and reads its `module` directive. A go.mod without

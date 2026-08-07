@@ -9,5 +9,6 @@
 
 mod inspector;
 pub mod ports;
+mod unclaimed;
 
 pub use inspector::{InspectionError, inspect};
