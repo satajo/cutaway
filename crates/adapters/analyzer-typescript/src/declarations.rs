@@ -357,6 +357,7 @@ fn declaration_id(path: &SourcePath, kind: ElementKind, name: &str) -> ElementId
     let tag = match kind {
         ElementKind::Project => "project",
         ElementKind::Package => "package",
+        ElementKind::Directory => "directory",
         ElementKind::Module => "module",
         ElementKind::Function => "function",
         ElementKind::Type => "type",

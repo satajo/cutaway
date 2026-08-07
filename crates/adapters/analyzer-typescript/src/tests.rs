@@ -32,6 +32,18 @@ fn parent_of(structure: &SourceStructure, id: &str) -> Option<String> {
         .map(|p| p.as_str().to_owned())
 }
 
+fn name_of(structure: &SourceStructure, id: &str) -> String {
+    structure
+        .elements
+        .iter()
+        .find(|e| e.element.id.as_str() == id)
+        .expect("the element exists")
+        .element
+        .name
+        .as_str()
+        .to_owned()
+}
+
 fn has_element(structure: &SourceStructure, id: &str) -> bool {
     structure
         .elements
@@ -106,7 +118,7 @@ fn source_files_are_modules_within_their_package_named_without_their_extension()
 }
 
 #[test]
-fn a_directory_holding_two_files_is_a_module_within_its_package() {
+fn a_directory_holding_two_files_is_a_boundary_within_its_package() {
     let structure = analyze(&[
         MANIFEST_APP,
         ("packages/app/src/a.ts", "export const a = () => 1;\n"),
@@ -117,7 +129,12 @@ fn a_directory_holding_two_files_is_a_module_within_its_package() {
         .iter()
         .find(|e| e.element.id.as_str() == "packages/app/src")
         .expect("the directory is an element");
-    assert_eq!(directory.element.kind, ElementKind::Module);
+    assert_eq!(
+        directory.element.kind,
+        ElementKind::Directory,
+        "a TypeScript directory is organization the author chose, and the \
+         language reads nothing into it"
+    );
     assert_eq!(directory.element.name.as_str(), "src");
     assert_eq!(
         parent_of(&structure, "packages/app/src"),
@@ -240,6 +257,56 @@ fn a_module_parents_onto_the_nearest_surviving_directory_above_it() {
     assert_eq!(
         parent_of(&structure, "packages/app/src/lonely/deep.ts"),
         Some("packages/app/src".to_owned())
+    );
+}
+
+#[test]
+fn a_name_says_only_what_the_element_above_it_does_not_already_spell() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        ("packages/app/src/util.ts", "export const now = () => 1;\n"),
+        (
+            "packages/app/src/widgets/panel.ts",
+            "export class Panel {}\n",
+        ),
+        (
+            "packages/app/src/widgets/button.ts",
+            "export class Button {}\n",
+        ),
+    ]);
+    assert_eq!(name_of(&structure, "packages/app/src"), "src");
+    assert_eq!(name_of(&structure, "packages/app/src/widgets"), "widgets");
+    assert_eq!(name_of(&structure, "packages/app/src/util.ts"), "util");
+    assert_eq!(
+        name_of(&structure, "packages/app/src/widgets/panel.ts"),
+        "panel"
+    );
+    assert_eq!(
+        structure
+            .elements
+            .iter()
+            .find(|e| e.element.id.as_str() == "packages/app/src/widgets")
+            .map(|e| e.element.id.as_str().to_owned()),
+        Some("packages/app/src/widgets".to_owned()),
+        "the id keeps the whole path, because it identifies rather than reads"
+    );
+}
+
+#[test]
+fn a_name_keeps_the_segments_the_directories_that_dissolved_gave_up() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        ("packages/app/src/a.ts", "export const a = 1;\n"),
+        ("packages/app/src/b.ts", "export const b = 2;\n"),
+        (
+            "packages/app/src/lonely/deep.ts",
+            "export const deep = 3;\n",
+        ),
+    ]);
+    assert_eq!(
+        name_of(&structure, "packages/app/src/lonely/deep.ts"),
+        "lonely/deep",
+        "no box spells `lonely`, so the module has to"
     );
 }
 

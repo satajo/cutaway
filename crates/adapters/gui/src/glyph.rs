@@ -24,8 +24,12 @@ glyphs! {
     PROJECT = "◎";
     /// One package of a repository.
     PACKAGE = "▣";
-    /// One module of a package. Denser than the package around it, so the
-    /// two read apart at the size a box gives them.
+    /// One source directory inside a package, grouping and nothing more.
+    /// Shaded rather than solid, so it sits between the package and the
+    /// module the way the hierarchy does.
+    DIRECTORY = "▓";
+    /// One module of a package. Denser than the package and the directory
+    /// around it, so the three read apart at the size a box gives them.
     MODULE = "■";
     /// One function.
     FUNCTION = "ƒ";

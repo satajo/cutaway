@@ -32,7 +32,10 @@ concept it serves (screaming architecture):
 ```
 crates/
   architecture/        Domain: the architecture model (elements, relations, graph).
-                       Containment hierarchy: project ⊃ package ⊃ module ⊃ item.
+                       Containment hierarchy: project ⊃ package ⊃ directory* ⊃
+                       module ⊃ item. Directories nest; they are organization
+                       alone, so only a language whose directories carry no
+                       semantics of their own (TypeScript) produces them.
   inspection/          Application core: builds the model from sources.
     src/ports/         SourceTree, SourceAnalyzer. One file per port.
   lenses/              Domain: boundary views - rollups of the graph along a

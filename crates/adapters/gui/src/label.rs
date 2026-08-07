@@ -310,6 +310,7 @@ pub(crate) fn kind_symbol(kind: ElementKind) -> &'static str {
     match kind {
         ElementKind::Project => glyph::PROJECT,
         ElementKind::Package => glyph::PACKAGE,
+        ElementKind::Directory => glyph::DIRECTORY,
         ElementKind::Module => glyph::MODULE,
         ElementKind::Function => glyph::FUNCTION,
         ElementKind::Type => glyph::TYPE,
@@ -322,6 +323,7 @@ pub(crate) fn kind_name(kind: ElementKind) -> &'static str {
     match kind {
         ElementKind::Project => "Project",
         ElementKind::Package => "Package",
+        ElementKind::Directory => "Directory",
         ElementKind::Module => "Module",
         ElementKind::Function => "Function",
         ElementKind::Type => "Type",

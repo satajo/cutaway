@@ -4,10 +4,10 @@ Feature: The boundary lens
   in two independent ways. Every boundary starts as a closed box, and
   opening one reveals exactly one layer: its contents arrive closed, and
   opening each of them is a step of its own. Beside that stands the
-  vocabulary of kinds the picture speaks - packages, modules, types,
-  functions. A hidden kind draws nothing and hands its contents to the box
-  above it, so hiding modules pools their declarations in the package
-  itself.
+  vocabulary of kinds the picture speaks - packages, directories, modules,
+  types, functions. A hidden kind draws nothing and hands its contents to
+  the box above it, so hiding modules pools their declarations in the
+  package itself.
 
   Connections attach to the nearest visible boundary, single boxes
   and boundaries with visible children alike. A connection that ends at a
@@ -328,3 +328,26 @@ Feature: The boundary lens
     When "modules" are hidden from the picture
     Then the boundaries do not include "physics"
     And the boundary "engine" contains "Body"
+
+  Scenario: Hidden directories pool their modules in the package
+    Given a source file "app/package.json" containing:
+      """
+      {"name":"app"}
+      """
+    And a source file "app/src/widgets/panel.ts" containing:
+      """
+      export class Panel {}
+      """
+    And a source file "app/src/widgets/button.ts" containing:
+      """
+      export class Button {}
+      """
+    When the project is inspected
+    And the boundaries are viewed
+    And every boundary is opened
+    Then the boundary "src/widgets" contains "panel"
+    And the boundary "src/widgets" contains "button"
+    When "directories" are hidden from the picture
+    Then the boundaries do not include "src/widgets"
+    And the boundary "app" contains "panel"
+    And the boundary "app" contains "button"

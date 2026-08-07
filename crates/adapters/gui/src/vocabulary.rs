@@ -13,11 +13,12 @@ use eframe::egui;
 
 /// The kinds the picture can speak about, with the label and the digit each
 /// answers to. Coarsest first, so the digits read down the hierarchy.
-const KINDS: [(ElementKind, &str, egui::Key); 4] = [
+const KINDS: [(ElementKind, &str, egui::Key); 5] = [
     (ElementKind::Package, "Packages", egui::Key::Num1),
-    (ElementKind::Module, "Modules", egui::Key::Num2),
-    (ElementKind::Type, "Types", egui::Key::Num3),
-    (ElementKind::Function, "Functions", egui::Key::Num4),
+    (ElementKind::Directory, "Directories", egui::Key::Num2),
+    (ElementKind::Module, "Modules", egui::Key::Num3),
+    (ElementKind::Type, "Types", egui::Key::Num4),
+    (ElementKind::Function, "Functions", egui::Key::Num5),
 ];
 
 /// What a key or a toolbar button asks of the picture.
@@ -37,7 +38,7 @@ pub(crate) fn chips(ui: &mut egui::Ui, kinds: &BTreeSet<ElementKind>) -> Option<
     let mut toggled = None;
     ui.scope(|ui| {
         // The chips sit against each other, so the row reads as one control
-        // rather than as four buttons.
+        // rather than as a handful of buttons.
         ui.spacing_mut().item_spacing.x = 1.0;
         for (position, (kind, label, _)) in KINDS.into_iter().enumerate() {
             let clicked = ui

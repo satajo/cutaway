@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use cutaway_analyzer_rust::RustSourceAnalyzer;
+use cutaway_analyzer_typescript::TypeScriptSourceAnalyzer;
 use cutaway_architecture::{
     ArchitectureGraph, ElementId, ElementKind, ElementName, Relation, RelationKind,
 };
@@ -29,8 +30,8 @@ pub trait ApplicationDriver {
     /// picture.
     fn open_all_boundaries(&mut self) -> Result<(), String>;
     /// Drops one kind from the picture's vocabulary. `kind` is the plural
-    /// word a picture speaks: `packages`, `modules`, `types`, or
-    /// `functions`.
+    /// word a picture speaks: `packages`, `directories`, `modules`, `types`,
+    /// or `functions`.
     fn hide_kind(&mut self, kind: &str) -> Result<(), String>;
     /// Puts one kind back in the picture's vocabulary, named as
     /// [`ApplicationDriver::hide_kind`] names it.
@@ -95,6 +96,7 @@ pub trait ApplicationDriver {
 fn element_kind(kind: &str) -> Result<ElementKind, String> {
     match kind {
         "package" => Ok(ElementKind::Package),
+        "directory" => Ok(ElementKind::Directory),
         "module" => Ok(ElementKind::Module),
         "type" => Ok(ElementKind::Type),
         "function" => Ok(ElementKind::Function),
@@ -106,6 +108,7 @@ fn element_kind(kind: &str) -> Result<ElementKind, String> {
 fn rendered_kind(kind: &str) -> Result<ElementKind, String> {
     match kind {
         "packages" => Ok(ElementKind::Package),
+        "directories" => Ok(ElementKind::Directory),
         "modules" => Ok(ElementKind::Module),
         "types" => Ok(ElementKind::Type),
         "functions" => Ok(ElementKind::Function),
@@ -113,8 +116,10 @@ fn rendered_kind(kind: &str) -> Result<ElementKind, String> {
     }
 }
 
-/// Drives the application cores in-process, with the same analyzer the
-/// composition root wires into the real application.
+/// Drives the application cores in-process, with the same analyzers the
+/// composition root wires into the real application. Scenarios reach for
+/// the ecosystem whose structure they speak about: Cargo manifests where a
+/// package is the point, npm packages where a source directory is.
 #[derive(Debug, Default)]
 pub struct InProcessDriver {
     sources: InMemorySourceTree,
@@ -254,8 +259,11 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn inspect_project(&mut self) -> Result<(), String> {
-        let graph =
-            inspect(&self.sources, &[&RustSourceAnalyzer]).map_err(|error| error.to_string())?;
+        let graph = inspect(
+            &self.sources,
+            &[&RustSourceAnalyzer, &TypeScriptSourceAnalyzer],
+        )
+        .map_err(|error| error.to_string())?;
         self.viewed = Some(self.plan.viewed_architecture(&graph));
         self.graph = Some(graph);
         Ok(())

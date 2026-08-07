@@ -59,6 +59,11 @@ impl Directory {
     /// The module element this directory contributes, and None for a module
     /// root: that directory dissolves into its package, which is an element
     /// already.
+    ///
+    /// The element is a module rather than a directory: a Go directory is the
+    /// compilation and import unit, so it is the language's own module and
+    /// carries meaning the author cannot move a file out of. Only a directory
+    /// that is organization alone earns [`ElementKind::Directory`].
     pub fn element(&self) -> Option<Element> {
         if self.name.is_empty() {
             return None;

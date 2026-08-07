@@ -54,6 +54,7 @@ struct StoredElement {
 enum StoredKind {
     Project,
     Package,
+    Directory,
     Module,
     Function,
     Type,
@@ -274,6 +275,7 @@ impl StoredKind {
         match kind {
             ElementKind::Project => Self::Project,
             ElementKind::Package => Self::Package,
+            ElementKind::Directory => Self::Directory,
             ElementKind::Module => Self::Module,
             ElementKind::Function => Self::Function,
             ElementKind::Type => Self::Type,
@@ -284,6 +286,7 @@ impl StoredKind {
         match self {
             Self::Project => ElementKind::Project,
             Self::Package => ElementKind::Package,
+            Self::Directory => ElementKind::Directory,
             Self::Module => ElementKind::Module,
             Self::Function => ElementKind::Function,
             Self::Type => ElementKind::Type,

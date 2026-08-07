@@ -117,6 +117,7 @@ impl Cut {
             open: BTreeSet::new(),
             kinds: BTreeSet::from([
                 ElementKind::Package,
+                ElementKind::Directory,
                 ElementKind::Module,
                 ElementKind::Function,
                 ElementKind::Type,
@@ -1228,6 +1229,65 @@ mod tests {
             view.graph.relations().any(|r| *r == edge),
             "what passed between sibling modules now passes between their types"
         );
+    }
+
+    /// The fixture with a directory inside package:a grouping two modules:
+    /// package:a ⊃ a/dir ⊃ {a/dir/one, a/dir/two}.
+    fn fixture_with_a_directory() -> ArchitectureGraph {
+        let mut graph = fixture();
+        graph
+            .add_element(element("a/dir", ElementKind::Directory))
+            .unwrap();
+        for module in ["a/dir/one", "a/dir/two"] {
+            graph
+                .add_element(element(module, ElementKind::Module))
+                .unwrap();
+        }
+        for (from, to) in [
+            ("package:a", "a/dir"),
+            ("a/dir", "a/dir/one"),
+            ("a/dir", "a/dir/two"),
+        ] {
+            graph
+                .add_relation(relation(from, to, RelationKind::Contains))
+                .unwrap();
+        }
+        graph
+    }
+
+    #[test]
+    fn hiding_directories_pools_their_modules_in_the_package() {
+        let graph = fixture_with_a_directory();
+        let mut cut = opened(["package:a"]);
+        cut.kinds.remove(&ElementKind::Directory);
+        let view = boundary_view(&graph, &cut).unwrap();
+
+        assert!(view.graph.element(&id("a/dir")).is_none());
+        for module in ["a/dir/one", "a/dir/two"] {
+            let hoisted = relation("package:a", module, RelationKind::Contains);
+            assert!(
+                view.graph.relations().any(|r| *r == hoisted),
+                "{module} hoists past its transparent directory into the package"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_opens_one_layer_like_any_other_boundary() {
+        let graph = fixture_with_a_directory();
+        let mut cut = opened(["package:a"]);
+        let view = boundary_view(&graph, &cut).unwrap();
+
+        assert!(view.graph.element(&id("a/dir")).is_some());
+        assert!(
+            view.graph.element(&id("a/dir/one")).is_none(),
+            "a directory arrives closed, as every boundary does"
+        );
+
+        assert!(cut.expand(&view, &id("a/dir")));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(view.graph.element(&id("a/dir/one")).is_some());
+        assert!(view.graph.element(&id("a/dir/two")).is_some());
     }
 
     #[test]

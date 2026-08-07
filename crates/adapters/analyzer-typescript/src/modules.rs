@@ -5,15 +5,22 @@
 //! file, so every import lands on one. Nothing about where a file sits
 //! restricts what may reach it - any file may import any other.
 //!
-//! A directory is therefore pure grouping, and it is a module only when it
-//! groups at least two things: the files directly in it, and the directories
-//! directly beneath it that earned a module of their own. A group of fewer
-//! than two things groups nothing, so such a directory dissolves the way the
-//! entry file dissolves into its package - it is no element, and what it held
-//! belongs to the nearest directory above it that survived, else to the
-//! package. A chain of directories holding one child each compresses away
-//! completely, leaving only the group at its end. The package's own directory
-//! is never an element: it is the package.
+//! A directory is therefore pure grouping - the author's organization, with
+//! nothing the language reads into it - and it is a boundary of its own only
+//! when it groups at least two things: the files directly in it, and the
+//! directories directly beneath it that earned a boundary of their own. A
+//! group of fewer than two things groups nothing, so such a directory
+//! dissolves the way the entry file dissolves into its package - it is no
+//! element, and what it held belongs to the nearest directory above it that
+//! survived, else to the package. A chain of directories holding one child
+//! each compresses away completely, leaving only the group at its end. The
+//! package's own directory is never an element: it is the package.
+//!
+//! A name reads against the element that holds it: a directory beneath a
+//! surviving directory carries the segment below it, and a module whose own
+//! directories dissolved carries every segment they gave up. The whole path
+//! stays in the id, where it identifies; the name only has to tell the
+//! boundary apart from its siblings.
 //!
 //! The entry module is the package's own code, not a module of its own: to
 //! every consumer, importing the package by name and the surface of its entry
@@ -54,10 +61,11 @@ pub struct Module {
     /// Index into the discovered packages; None for files outside every
     /// package.
     package: Option<usize>,
-    /// Human-facing name: the path relative to the package's directory
-    /// without its extension.
+    /// Human-facing name: the path relative to the element that holds this
+    /// one, without its extension. A label reads inside the frame that draws
+    /// it, so the segments the frame already spells say nothing twice.
     name: String,
-    /// The nearest directory above the file that survived as a module; None
+    /// The nearest directory above the file that survived as a boundary; None
     /// when the package (or the project root) holds the file directly.
     enclosing: Option<ElementId>,
     entry: bool,
@@ -96,7 +104,8 @@ pub struct Directory {
     /// The directory path verbatim, so a file's id begins with its
     /// directory's id.
     id: ElementId,
-    /// Human-facing name: the path relative to the package's directory.
+    /// Human-facing name: the path relative to the element that holds this
+    /// one, as a module's name is.
     name: String,
     package: Option<usize>,
     /// The nearest surviving directory above this one.
@@ -116,7 +125,7 @@ impl Directory {
         Element {
             id: self.id.clone(),
             name: ElementName::new(&self.name).expect("a directory name is never empty"),
-            kind: ElementKind::Module,
+            kind: ElementKind::Directory,
         }
     }
 }
@@ -195,14 +204,15 @@ impl ModuleCatalog {
                 continue;
             }
             let package = owning_package(packages, path);
-            let dir = package.map_or("", |index| packages[index].dir.as_str());
             let index = catalog.modules.len();
             catalog.by_path.insert(file.path.clone(), index);
             catalog.modules.push(Module {
                 path: file.path.clone(),
                 id: ElementId::new(path).expect("a source path is never empty"),
                 package,
-                name: without_extension(strip_dir(path, dir)).to_owned(),
+                // The name settles below, together with the directory it
+                // reads against.
+                name: String::new(),
                 enclosing: None,
                 entry: false,
             });
@@ -226,19 +236,28 @@ impl ModuleCatalog {
         }
 
         // The directories settle only once the entries are known: a file that
-        // dissolved into its package groups nothing.
+        // dissolved into its package groups nothing. The names settle with
+        // them: a name reads against the element that holds it, and which
+        // element that is depends on which directories survived.
         let surviving = surviving_directories(&catalog.modules, packages);
         for module in &mut catalog.modules {
-            let base = package_dir(packages, module.package);
-            module.enclosing = enclosing(module.path.as_str(), base, &surviving);
+            let package_base = package_dir(packages, module.package);
+            module.enclosing = enclosing(module.path.as_str(), package_base, &surviving);
+            let base = read_against(module.enclosing.as_ref(), package_base);
+            module.name = without_extension(strip_dir(module.path.as_str(), base)).to_owned();
         }
         catalog.directories = surviving
             .iter()
-            .map(|(path, package)| Directory {
-                id: directory_id(path),
-                name: strip_dir(path, package_dir(packages, *package)).to_owned(),
-                package: *package,
-                enclosing: enclosing(path, package_dir(packages, *package), &surviving),
+            .map(|(path, package)| {
+                let package_base = package_dir(packages, *package);
+                let enclosing = enclosing(path, package_base, &surviving);
+                Directory {
+                    id: directory_id(path),
+                    name: strip_dir(path, read_against(enclosing.as_ref(), package_base))
+                        .to_owned(),
+                    package: *package,
+                    enclosing,
+                }
             })
             .collect();
         catalog
@@ -558,6 +577,13 @@ fn enclosing(
         current = parent_dir(&current).to_owned();
     }
     None
+}
+
+/// The directory a name reads against: the surviving directory that holds
+/// the element, and the package's own directory when no directory does. What
+/// the holder already spells stays out of the name it draws inside.
+fn read_against<'a>(enclosing: Option<&'a ElementId>, package_base: &'a str) -> &'a str {
+    enclosing.map_or(package_base, ElementId::as_str)
 }
 
 /// A directory speaks as its own path, the same string every file under it

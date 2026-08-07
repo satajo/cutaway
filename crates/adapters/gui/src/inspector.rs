@@ -135,9 +135,9 @@ fn help(ui: &mut egui::Ui) {
          expand or collapse it from here.",
     );
     ui.label(
-        "Keys 1-4 toggle packages, modules, types and functions in and out of the \
-         picture; + and - open and close a whole layer of boundaries. Whatever you \
-         selected carries over to the new picture.",
+        "Keys 1-5 toggle packages, directories, modules, types and functions in and \
+         out of the picture; + and - open and close a whole layer of boundaries. \
+         Whatever you selected carries over to the new picture.",
     );
     ui.label(
         "Press F to focus the picture on the selected boundary; Escape shows \
@@ -455,13 +455,15 @@ fn modification_field(
 }
 
 /// The kinds of boundary a reader may plan inside one of this kind: the
-/// project takes packages, a package takes modules, a module takes further
-/// modules and the items declared in it. An item holds nothing the picture
-/// draws, so nothing is planned inside one.
+/// project takes packages, a package and a directory take directories and
+/// modules, a module takes further modules and the items declared in it. An
+/// item holds nothing the picture draws, so nothing is planned inside one.
 fn addable_kinds(parent: Option<ElementKind>) -> &'static [ElementKind] {
     match parent {
         None | Some(ElementKind::Project) => &[ElementKind::Package],
-        Some(ElementKind::Package) => &[ElementKind::Module],
+        Some(ElementKind::Package | ElementKind::Directory) => {
+            &[ElementKind::Directory, ElementKind::Module]
+        }
         Some(ElementKind::Module) => &[
             ElementKind::Module,
             ElementKind::Type,

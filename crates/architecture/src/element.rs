@@ -71,9 +71,14 @@ pub enum InvalidElementName {
 /// to distinguish more of the architecture.
 ///
 /// The kinds form the levels of the containment hierarchy every producer
-/// follows: project ⊃ package ⊃ module ⊃ item. Each level is a boundary in
-/// the sense of the boundary lens: relations crossing it mean more than
-/// relations inside it.
+/// follows: project ⊃ package ⊃ directory* ⊃ module ⊃ item. Each level is a
+/// boundary in the sense of the boundary lens: relations crossing it mean
+/// more than relations inside it. Directories are the one level that repeats:
+/// they nest inside each other, and a package that needs none holds its
+/// modules directly.
+///
+/// The declaration order is the order of the hierarchy, so every ordering of
+/// kinds reads from the coarsest level down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ElementKind {
     /// One inspected source tree: a repository, a monorepo root.
@@ -81,6 +86,13 @@ pub enum ElementKind {
     /// A unit of distribution and dependency declaration: a Rust crate, a Go
     /// module, a Java artifact, an npm package.
     Package,
+    /// A source directory that is organization and nothing else: the author
+    /// grouped files, and the language attaches no meaning to the grouping.
+    /// A language that does read meaning into its directories states them at
+    /// the level that carries that meaning instead - a Go directory is the
+    /// compilation and import unit, and a Rust `mod` tree carries the
+    /// nesting - so neither of those uses this kind.
+    Directory,
     /// A grouping of code within a package: a source file, a namespace.
     Module,
     /// An executable unit: a function, a method, a procedure.

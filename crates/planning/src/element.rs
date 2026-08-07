@@ -35,10 +35,10 @@ use crate::plan::Plan;
 /// The id a planned element carries until the sources give it a real one.
 ///
 /// The shape follows the ids a producer derives from the sources: a package
-/// is named by itself, a module by the path of the boundary that holds it,
-/// an item by the module it is declared in and its kind. A package
-/// therefore ignores the parent it is planned under - the project root
-/// holds every package, and a package id names the package alone.
+/// is named by itself, a directory and a module by the path of the boundary
+/// that holds it, an item by the module it is declared in and its kind. A
+/// package therefore ignores the parent it is planned under - the project
+/// root holds every package, and a package id names the package alone.
 pub fn provisional_id(
     parent: Option<&ElementId>,
     kind: ElementKind,
@@ -48,7 +48,7 @@ pub fn provisional_id(
     let id = match kind {
         ElementKind::Project => return Err(ProvisionalIdError::Whole),
         ElementKind::Package => format!("package:{name}"),
-        ElementKind::Module => format!("{}/{name}", inside()?),
+        ElementKind::Directory | ElementKind::Module => format!("{}/{name}", inside()?),
         ElementKind::Function => format!("{}#function:{name}", inside()?),
         ElementKind::Type => format!("{}#type:{name}", inside()?),
     };

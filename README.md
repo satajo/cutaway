@@ -24,9 +24,9 @@ Rust, Go, TypeScript, and JavaScript sources of its `HEAD` commit (package
 manifests, module structure, imports), and draws the boundary lens as
 nested boxes with the dependencies that cross boundary lines as arrows.
 The picture starts as closed packages; opening a box reveals one layer of
-its contents, and a vocabulary of element kinds (packages, modules, types,
-functions) picks what the picture speaks about — a hidden kind hands its
-contents to the box above it. Arrows
+its contents, and a vocabulary of element kinds (packages, directories,
+modules, types, functions) picks what the picture speaks about — a hidden
+kind hands its contents to the box above it. Arrows
 attach to the nearest visible box, framed boxes included: an arrow that ends
 at a box speaks about the box's own code or the box as a whole, and what
 passes between a box and its own contents stays inside it. Existing
