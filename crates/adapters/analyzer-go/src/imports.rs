@@ -1,13 +1,15 @@
 //! Import extraction: which directories a file imports, under which
-//! qualifier each import binds, and every qualified name the rest of the file
-//! mentions.
+//! qualifier each import binds, and every name the rest of the file writes.
 //!
 //! Go forces the two apart. An import states the coupling between two
-//! directories; the qualified name states which declaration of the imported
-//! directory the code actually touches. Both are facts about the same
-//! sources, and both witness a dependency.
+//! directories; the name written afterwards states which declaration the code
+//! actually touches - of the imported directory when a qualifier precedes it,
+//! of the file's own directory when none does, because the files of one
+//! directory share a namespace. All of them are facts about the same sources,
+//! and all of them witness a dependency.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 /// One directory a file imports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,36 +120,98 @@ fn spec(node: tree_sitter::Node<'_>, text: &str) -> Option<Import> {
     Some(Import { path, binding })
 }
 
-/// Collects every qualified name the file mentions: the qualifier and the
-/// name behind the dot.
+/// One name the file writes outside its imports, and where in the file it
+/// stands, so the mention attributes to the declaration that writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    /// The qualifier the name was written behind, when it was written behind
+    /// one. An import binds such a qualifier; without one the name belongs to
+    /// the file's own directory.
+    pub qualifier: Option<String>,
+    pub name: String,
+    pub span: Range<usize>,
+}
+
+/// Collects every name the file writes outside its imports: the qualified
+/// ones as a qualifier and the name behind the dot, and the bare ones the
+/// code writes where a name can only mean a declaration.
 ///
 /// Go writes the same qualification two ways. In an expression it is a
 /// selector whose operand may be any value, so only a plain identifier can
 /// be a directory's qualifier and `x.field.Method()` witnesses `x.field` and
 /// nothing deeper. In a type position it is a qualified type, where the
 /// qualifier is always a package name.
-pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<(String, String)> {
+///
+/// A bare name is collected only where the grammar guarantees it names a
+/// declaration: a call's callee, a type position, a composite literal's type.
+/// A plain mention is never collected, so ordinary values stay out. A local
+/// binding or a type parameter that shadows a top-level name in one of those
+/// positions is still read as that name: telling them apart needs scope
+/// tracking, and the imprecision is accepted the way qualifier shadowing is.
+/// The predeclared names of the language (`int`, `error`, `len`) are bare
+/// names like any other, and they witness a dependency only where the
+/// directory declares something under that name itself.
+pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<Reference> {
     let mut references = Vec::new();
     collect_referenced(root, text, &mut references);
     references
 }
 
-fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<(String, String)>) {
+fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Reference>) {
     let mut cursor = node.walk();
     match node.kind() {
+        // An import binds a qualifier for the rest of the file; `declared`
+        // reads it, and it speaks for the file rather than for any
+        // declaration in it.
+        "import_declaration" => return,
         "selector_expression" => {
             if let (Some(operand), Some(field)) = (
                 node.child_by_field_name("operand"),
                 node.child_by_field_name("field"),
             ) && operand.kind() == "identifier"
             {
-                out.push((segment(operand, text), segment(field, text)));
+                out.push(Reference {
+                    qualifier: Some(segment(operand, text)),
+                    name: segment(field, text),
+                    span: node.byte_range(),
+                });
             }
         }
         "qualified_type" => {
             let mut parts = node.named_children(&mut cursor);
             if let (Some(qualifier), Some(name)) = (parts.next(), parts.next()) {
-                out.push((segment(qualifier, text), segment(name, text)));
+                out.push(Reference {
+                    qualifier: Some(segment(qualifier, text)),
+                    name: segment(name, text),
+                    span: node.byte_range(),
+                });
+            }
+        }
+        // A callee is a reference by position: `helper()` names a function
+        // wherever `helper` leads. Only the bare form needs collecting here; a
+        // qualified callee is a selector the arm above already read.
+        "call_expression" => {
+            if let Some(callee) = node.child_by_field_name("function")
+                && callee.kind() == "identifier"
+            {
+                out.push(bare(callee, text));
+            }
+        }
+        // The grammar spells a type usage as its own node kind, so every bare
+        // `type_identifier` is a reference - a field's type, an interface's
+        // embedded type and method set, a signature, a variable's annotation,
+        // the right side of a type declaration, a composite literal's type.
+        // Two of them are no reference: the name a type declaration
+        // introduces, and the tail of a qualified type the arm above already
+        // read whole.
+        "type_identifier" => {
+            let introduces = node.parent().is_some_and(|parent| {
+                parent.kind() == "qualified_type"
+                    || (matches!(parent.kind(), "type_spec" | "type_alias")
+                        && parent.child_by_field_name("name") == Some(node))
+            });
+            if !introduces {
+                out.push(bare(node, text));
             }
         }
         _ => {}
@@ -155,6 +219,14 @@ fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<(St
     let mut children = node.walk();
     for child in node.named_children(&mut children) {
         collect_referenced(child, text, out);
+    }
+}
+
+fn bare(node: tree_sitter::Node<'_>, text: &str) -> Reference {
+    Reference {
+        qualifier: None,
+        name: segment(node, text),
+        span: node.byte_range(),
     }
 }
 

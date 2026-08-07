@@ -3,9 +3,20 @@
 //! projects.
 //!
 //! go.mod manifests locate the modules; the source text alone witnesses what
-//! depends on what, through the imports of every file and every qualified
-//! name the code mentions. A requirement the manifest declares but nothing
-//! names produces no relation: the sources are the one truth about coupling.
+//! depends on what, through the imports of every file and every name the code
+//! writes where a name can only mean a declaration: a call, a type position,
+//! a composite literal. A qualified name resolves against the directory its
+//! qualifier was imported from, a bare one against the file's own directory,
+//! whose files share a namespace. A requirement the manifest declares but
+//! nothing names produces no relation: the sources are the one truth about
+//! coupling.
+//!
+//! A dependency speaks from the declaration that writes it: a call in a
+//! function's body is the function's edge, a field's type the struct's, and
+//! what a method writes belongs to the type its receiver extends. An import,
+//! top-level code, and everything an unexported declaration writes speak from
+//! the file's own element - an unexported declaration is no element, so its
+//! coupling is the module's own.
 //!
 //! Directories are the boundaries. Go compiles and imports a whole
 //! directory at once and lets its files share one namespace, so the
@@ -44,10 +55,10 @@ use cutaway_inspection::ports::source_analyzer::{
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
-use crate::declarations::{Declaration, DeclarationIndex};
-use crate::imports::{Binding, Import, PackageNames};
+use crate::declarations::{Attributions, Declaration, DeclarationIndex};
+use crate::imports::{Binding, Import, PackageNames, Reference};
 use crate::manifest::DiscoveredModule;
-use crate::packages::{DirectoryCatalog, ResolvedImport};
+use crate::packages::{Directory, DirectoryCatalog, GoFile, ResolvedImport};
 
 pub struct GoSourceAnalyzer;
 
@@ -56,8 +67,10 @@ struct ParsedFile {
     path: SourcePath,
     declarations: Vec<Declaration>,
     imports: Vec<Import>,
-    /// Qualified names the file mentions, as (qualifier, name) pairs.
-    references: Vec<(String, String)>,
+    /// The names the file writes outside its imports.
+    references: Vec<Reference>,
+    /// Which declaration speaks for each part of the file.
+    attributions: Attributions,
 }
 
 impl SourceAnalyzer for GoSourceAnalyzer {
@@ -100,67 +113,41 @@ impl SourceAnalyzer for GoSourceAnalyzer {
             };
             parsed.push(ParsedFile {
                 path: file.path.clone(),
+                attributions: declarations::attributions(root, text, &declarations),
                 declarations,
                 imports: imports::declared(root, text),
                 references: imports::referenced(root, text),
             });
         }
 
-        for file in parsed {
+        for file in &parsed {
+            let cataloged = catalog
+                .file(&file.path)
+                .expect("the first pass kept only cataloged files");
             // What the file's code speaks as: the file's own module, or the
             // directory the file dissolved into.
-            let from = catalog
-                .file(&file.path)
-                .expect("the first pass kept only cataloged files")
-                .id();
-            for declaration in file.declarations {
+            let speaks_as = cataloged.id();
+            for declaration in &file.declarations {
                 // Only the directory's surface joins the architecture;
                 // unexported declarations are its internals.
                 if !declaration.exported {
                     continue;
                 }
                 elements.push(AnalyzedElement {
-                    element: declaration.element,
-                    parent: Some(from.clone()),
+                    element: declaration.element.clone(),
+                    parent: Some(speaks_as.clone()),
                 });
             }
 
-            let mut qualifiers: BTreeMap<String, ResolvedImport> = BTreeMap::new();
-            for import in &file.imports {
-                let Some(target) = catalog.resolve(&import.path, &modules) else {
-                    continue;
-                };
-                depend(&mut relations, &from, &target.id);
-                match &import.binding {
-                    Binding::Alias(alias) => {
-                        qualifiers.insert(alias.clone(), target);
-                    }
-                    Binding::PackageName => {
-                        if let Some(name) = package_names.of(&target.directory) {
-                            qualifiers.insert(name.to_owned(), target);
-                        }
-                    }
-                    Binding::Unbound => {}
-                }
-            }
-
-            // Shadowed qualifiers are accepted as imprecision: a local
-            // variable named like an imported directory makes this crate see
-            // a dependency the code does not have, which is the same class of
-            // imprecision the Rust adapter accepts for its qualified paths.
-            for (qualifier, name) in &file.references {
-                let Some(target) = qualifiers.get(qualifier) else {
-                    continue;
-                };
-                let to = match declaration_index.declaration(&target.directory, name) {
-                    Some(declaration) if declaration.exported => declaration.id.clone(),
-                    // An unexported or unknown name is the target's own
-                    // business; the dependency reaches no further than the
-                    // directory.
-                    _ => target.id.clone(),
-                };
-                depend(&mut relations, &from, &to);
-            }
+            witness_dependencies(
+                file,
+                cataloged,
+                &catalog,
+                &declaration_index,
+                &package_names,
+                &modules,
+                &mut relations,
+            );
         }
 
         Ok(SourceStructure {
@@ -168,6 +155,104 @@ impl SourceAnalyzer for GoSourceAnalyzer {
             relations: relations.into_iter().collect(),
         })
     }
+}
+
+/// Turns one file's imports and references into dependency relations. An
+/// import is the file's own plumbing whatever wrote it, so its edge speaks
+/// from the element the file speaks as; a reference speaks from the
+/// declaration enclosing it.
+fn witness_dependencies(
+    file: &ParsedFile,
+    cataloged: &GoFile,
+    catalog: &DirectoryCatalog,
+    declarations: &DeclarationIndex,
+    package_names: &PackageNames,
+    modules: &[DiscoveredModule],
+    relations: &mut BTreeSet<Relation>,
+) {
+    let speaks_as = cataloged.id();
+    let directory = catalog.directory_of(cataloged);
+    let own_directory = directory.id();
+    let mut depend = |from: &ElementId, to: &ElementId| {
+        // An edge into the element the file speaks as, into the directory
+        // holding it, or from that element onto a declaration of the file,
+        // restates containment rather than witnessing a dependency. The file
+        // may speak as its own module, as its directory, or as the package a
+        // module root dissolves into, so the guard reads the element the file
+        // actually speaks as.
+        if from == to
+            || to == &speaks_as
+            || to == &own_directory
+            || (from == &speaks_as && file.declarations.iter().any(|d| &d.element.id == to))
+        {
+            return;
+        }
+        relations.insert(Relation {
+            from: from.clone(),
+            to: to.clone(),
+            kind: RelationKind::DependsOn,
+        });
+    };
+
+    let mut qualifiers: BTreeMap<&str, ResolvedImport> = BTreeMap::new();
+    for import in &file.imports {
+        let Some(target) = catalog.resolve(&import.path, modules) else {
+            continue;
+        };
+        depend(&speaks_as, &target.id);
+        match &import.binding {
+            Binding::Alias(alias) => {
+                qualifiers.insert(alias.as_str(), target);
+            }
+            Binding::PackageName => {
+                if let Some(name) = package_names.of(&target.directory) {
+                    qualifiers.insert(name, target);
+                }
+            }
+            Binding::Unbound => {}
+        }
+    }
+
+    for reference in &file.references {
+        let Some(to) = resolve_reference(reference, directory, declarations, &qualifiers) else {
+            continue;
+        };
+        let from = file
+            .attributions
+            .speaker_at(reference.span.start)
+            .cloned()
+            .unwrap_or_else(|| speaks_as.clone());
+        depend(&from, &to);
+    }
+}
+
+/// Where one written name leads. A qualified name reads against the file's
+/// imports alone, because only an import binds a qualifier that stands for a
+/// directory. A bare name is the file's own directory, whose files share one
+/// namespace: a declaration beside it needs no import to reach.
+fn resolve_reference(
+    reference: &Reference,
+    directory: &Directory,
+    declarations: &DeclarationIndex,
+    qualifiers: &BTreeMap<&str, ResolvedImport>,
+) -> Option<ElementId> {
+    let (target_directory, target_id) = match &reference.qualifier {
+        Some(qualifier) => {
+            let target = qualifiers.get(qualifier.as_str())?;
+            (target.directory.as_str(), target.id.clone())
+        }
+        None => (directory.path(), directory.id()),
+    };
+    Some(
+        match declarations.declaration(target_directory, &reference.name) {
+            Some(declaration) if declaration.exported => declaration.id.clone(),
+            // An unexported or unknown name is the target directory's own
+            // business; the dependency reaches no further than the directory.
+            // For a bare name that directory is the file's own, so the
+            // containment guard drops the edge and the name says nothing.
+            _ => target_id,
+        },
+    )
 }
 
 /// Everything the structure of the sources alone says, before any file is
@@ -198,19 +283,6 @@ fn containment(modules: &[DiscoveredModule], catalog: &DirectoryCatalog) -> Vec<
         }
     }
     elements
-}
-
-/// Records a dependency unless it points at the element it starts from: an
-/// element needing itself says nothing.
-fn depend(relations: &mut BTreeSet<Relation>, from: &ElementId, to: &ElementId) {
-    if from == to {
-        return;
-    }
-    relations.insert(Relation {
-        from: from.clone(),
-        to: to.clone(),
-        kind: RelationKind::DependsOn,
-    });
 }
 
 /// Whether the go tool treats the file as test-only code.

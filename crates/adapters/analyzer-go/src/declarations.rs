@@ -2,6 +2,7 @@
 //! sit in offers to the rest of the project.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
 use cutaway_inspection::ports::source_tree::SourcePath;
@@ -15,6 +16,9 @@ pub struct Declaration {
     /// directory's internals - code of the same directory may name it, but
     /// the architecture shows the directory, not the item.
     pub exported: bool,
+    /// The byte range the declaration covers, so a reference found inside it
+    /// attributes to the declaration rather than to the whole module.
+    pub span: Range<usize>,
 }
 
 /// What the index answers about one declared name.
@@ -109,7 +113,84 @@ fn declared(
             kind,
         },
         exported: name.chars().next().is_some_and(char::is_uppercase),
+        span: node.byte_range(),
     })
+}
+
+/// Which element speaks for each part of the file, so a reference attributes
+/// to the declaration that writes it rather than to the whole module. Only
+/// exported declarations speak: an unexported one is no element, so what it
+/// references honestly belongs to the module. Anything outside every speaking
+/// span - the package clause, the imports, top-level code, the bodies of
+/// unexported declarations - is the module's own.
+#[derive(Debug, Default)]
+pub struct Attributions(Vec<(Range<usize>, ElementId)>);
+
+impl Attributions {
+    pub fn speaker_at(&self, offset: usize) -> Option<&ElementId> {
+        self.0
+            .iter()
+            .find(|(span, _)| span.contains(&offset))
+            .map(|(_, id)| id)
+    }
+}
+
+/// Reads the file's speaking spans: every exported top-level declaration, and
+/// every method whose receiver is one of them. Go attaches behaviour to a
+/// type in declarations that stand apart from the type's own, so what a
+/// method writes is the receiver type's coupling. A method whose receiver is
+/// unexported, or is declared in another file of the directory, speaks for no
+/// declaration of this file, and its references stay the module's.
+pub fn attributions(
+    root: tree_sitter::Node<'_>,
+    text: &str,
+    declarations: &[Declaration],
+) -> Attributions {
+    let mut spans: Vec<(Range<usize>, ElementId)> = declarations
+        .iter()
+        .filter(|declaration| declaration.exported)
+        .map(|declaration| (declaration.span.clone(), declaration.element.id.clone()))
+        .collect();
+    let mut cursor = root.walk();
+    for node in root.named_children(&mut cursor) {
+        if node.kind() != "method_declaration" {
+            continue;
+        }
+        let Some(receiver) = receiver_type(node) else {
+            continue;
+        };
+        let name = receiver
+            .utf8_text(text.as_bytes())
+            .expect("node ranges lie within the parsed text");
+        let Some(extended) = declarations
+            .iter()
+            .find(|declaration| declaration.exported && declaration.element.name.as_str() == name)
+        else {
+            continue;
+        };
+        spans.push((node.byte_range(), extended.element.id.clone()));
+    }
+    Attributions(spans)
+}
+
+/// The type a method extends, as the identifier that names it. `func (c
+/// *Config)` and `func (s *Set[T])` both extend the plain type: the pointer
+/// and the type parameters say how the method is called, not whose behaviour
+/// it holds.
+fn receiver_type(method: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    let receiver = method.child_by_field_name("receiver")?;
+    let mut cursor = receiver.walk();
+    let parameter = receiver
+        .named_children(&mut cursor)
+        .find(|node| node.kind() == "parameter_declaration")?;
+    let mut base = parameter.child_by_field_name("type")?;
+    if base.kind() == "pointer_type" {
+        base = base.named_child(0)?;
+    }
+    if base.kind() == "generic_type" {
+        base = base.child_by_field_name("type")?;
+    }
+    (base.kind() == "type_identifier").then_some(base)
 }
 
 /// Declaration ids embed the path and the kind so that same-named

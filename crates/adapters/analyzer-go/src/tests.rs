@@ -41,6 +41,10 @@ fn dependencies(structure: &SourceStructure) -> Vec<(String, String)> {
         .collect()
 }
 
+fn depends(structure: &SourceStructure, from: &str, to: &str) -> bool {
+    dependencies(structure).contains(&(from.to_owned(), to.to_owned()))
+}
+
 fn element(structure: &SourceStructure, id: &str) -> AnalyzedElement {
     structure
         .elements
@@ -255,6 +259,312 @@ fn a_reference_to_an_unexported_name_lands_on_its_directory() {
         "alpha/server".to_owned()
     )));
     assert!(!dependencies.iter().any(|(_, to)| to.contains("#function:")));
+}
+
+const STORE: (&str, &str) = (
+    "alpha/store/store.go",
+    "package store\n\nfunc Open() {}\n\nfunc Close() {}\n\ntype Handle struct{}\n\ntype Result struct{}\n\ntype Cache struct{}\n\ntype Closer interface{}\n",
+);
+
+#[test]
+fn a_qualified_reference_speaks_from_the_declaration_whose_body_writes_it() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\nfunc Run() {\n\tstore.Open()\n}\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/app/app.go#function:Run",
+        "alpha/store/store.go#function:Open"
+    ));
+    assert!(
+        depends(&structure, "alpha/app", "alpha/store"),
+        "the import itself is still the file's own plumbing"
+    );
+}
+
+#[test]
+fn the_functions_of_one_directory_wire_to_each_other() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/server/server.go",
+            "package server\n\nfunc Outer() {\n\tInner()\n}\n\nfunc Inner() {}\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/server/server.go#function:Outer",
+        "alpha/server/server.go#function:Inner"
+    ));
+}
+
+#[test]
+fn a_reference_reaches_a_declaration_of_another_file_of_the_same_directory() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/server/build.go",
+            "package server\n\nfunc Build() {\n\tPrepare()\n}\n",
+        ),
+        (
+            "alpha/server/prepare.go",
+            "package server\n\nfunc Prepare() {}\n",
+        ),
+    ]);
+    assert!(
+        depends(
+            &structure,
+            "alpha/server/build.go#function:Build",
+            "alpha/server/prepare.go#function:Prepare"
+        ),
+        "one directory is one namespace, so a sibling file needs no import"
+    );
+}
+
+#[test]
+fn a_reference_to_an_unexported_name_of_the_own_directory_says_nothing() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/server/build.go",
+            "package server\n\nfunc Build() {\n\tprepare()\n}\n",
+        ),
+        (
+            "alpha/server/prepare.go",
+            "package server\n\nfunc prepare() {}\n",
+        ),
+    ]);
+    assert!(
+        dependencies(&structure).is_empty(),
+        "an unexported name reaches no further than the directory both files sit in"
+    );
+}
+
+#[test]
+fn the_files_of_the_module_root_share_the_packages_namespace() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/main.go",
+            "package main\n\nfunc main() {\n\tServe()\n\thelper()\n}\n",
+        ),
+        ("alpha/serve.go", "package main\n\nfunc Serve() {}\n"),
+        ("alpha/util.go", "package main\n\nfunc helper() {}\n"),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/main.go",
+        "alpha/serve.go#function:Serve"
+    ));
+    assert!(
+        !depends(&structure, "alpha/main.go", "package:example.com/alpha"),
+        "the root directory speaks as the package, so a name landing on it is containment"
+    );
+}
+
+#[test]
+fn a_method_speaks_as_the_type_its_receiver_extends() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\ntype Config struct{}\n\nfunc (c *Config) Load() { store.Open() }\n\ntype Cache struct{}\n\nfunc (c Cache) Warm() { store.Close() }\n",
+        ),
+    ]);
+    assert!(
+        depends(
+            &structure,
+            "alpha/app/app.go#type:Config",
+            "alpha/store/store.go#function:Open"
+        ),
+        "a pointer receiver extends the plain type"
+    );
+    assert!(
+        depends(
+            &structure,
+            "alpha/app/app.go#type:Cache",
+            "alpha/store/store.go#function:Close"
+        ),
+        "a value receiver extends the same type"
+    );
+}
+
+#[test]
+fn a_method_on_a_generic_type_speaks_as_that_type() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\ntype Set[T any] struct{}\n\nfunc (s *Set[T]) Add(item T) { store.Open() }\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/app/app.go#type:Set",
+        "alpha/store/store.go#function:Open"
+    ));
+}
+
+#[test]
+fn a_method_on_an_unexported_type_speaks_from_the_module() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\ntype cache struct{}\n\nfunc (c *cache) Load() { store.Open() }\n",
+        ),
+    ]);
+    assert!(
+        depends(
+            &structure,
+            "alpha/app",
+            "alpha/store/store.go#function:Open"
+        ),
+        "an unexported type is no element, so what its methods write is the module's"
+    );
+}
+
+#[test]
+fn a_struct_field_type_is_the_structs_dependency() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\ntype Config struct {\n\tHandle store.Handle\n}\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/app/app.go#type:Config",
+        "alpha/store/store.go#type:Handle"
+    ));
+}
+
+#[test]
+fn an_interface_depends_on_what_it_embeds_and_on_the_types_of_its_method_set() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\ntype Reader interface {\n\tstore.Closer\n\tRead(h store.Handle) store.Result\n}\n",
+        ),
+    ]);
+    for target in ["type:Closer", "type:Handle", "type:Result"] {
+        assert!(
+            depends(
+                &structure,
+                "alpha/app/app.go#type:Reader",
+                &format!("alpha/store/store.go#{target}")
+            ),
+            "the interface speaks {target}"
+        );
+    }
+}
+
+#[test]
+fn a_composite_literal_names_the_type_it_builds() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/server/server.go",
+            "package server\n\ntype Config struct{}\n\nfunc Build() {\n\t_ = Config{}\n}\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/server/server.go#function:Build",
+        "alpha/server/server.go#type:Config"
+    ));
+}
+
+#[test]
+fn a_signature_a_variable_and_a_type_declaration_witness_the_types_they_name() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\ntype Alias store.Handle\n\nfunc Convert(in store.Handle) store.Result {\n\tvar c store.Cache\n\t_ = c\n\treturn store.Result{}\n}\n",
+        ),
+    ]);
+    assert!(
+        depends(
+            &structure,
+            "alpha/app/app.go#type:Alias",
+            "alpha/store/store.go#type:Handle"
+        ),
+        "the right side of a type declaration is the declared type's coupling"
+    );
+    for target in ["type:Handle", "type:Result", "type:Cache"] {
+        assert!(
+            depends(
+                &structure,
+                "alpha/app/app.go#function:Convert",
+                &format!("alpha/store/store.go#{target}")
+            ),
+            "the body and signature of Convert speak {target}"
+        );
+    }
+}
+
+#[test]
+fn a_reference_outside_every_declaration_stays_with_the_module() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\nvar shared = store.Open\n\nfunc Unrelated() {}\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/app",
+        "alpha/store/store.go#function:Open"
+    ));
+    assert!(
+        !depends(
+            &structure,
+            "alpha/app/app.go#function:Unrelated",
+            "alpha/store/store.go#function:Open"
+        ),
+        "a top-level reference belongs to no declaration"
+    );
+}
+
+#[test]
+fn an_unexported_declarations_references_stay_with_the_module() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/app/app.go",
+            "package app\n\nimport \"example.com/alpha/store\"\n\nfunc quietly() { store.Open() }\n\nfunc Shown() {}\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/app",
+        "alpha/store/store.go#function:Open"
+    ));
+    assert!(
+        !depends(
+            &structure,
+            "alpha/app/app.go#function:Shown",
+            "alpha/store/store.go#function:Open"
+        ),
+        "an unexported declaration is no element, so what it writes is the module's"
+    );
 }
 
 #[test]
