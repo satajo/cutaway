@@ -1,13 +1,25 @@
-//! Lenses: views of an architecture at an adjustable level of detail.
+//! Lenses: views of an architecture cut along a frontier of open boundaries.
 //!
-//! The boundary lens cuts the containment hierarchy at a [`Detail`] level:
-//! packages, the modules within them, or the individual items within the
-//! modules. Every element maps to its nearest enclosing boundary, and every
-//! dependency between elements rolls up to a dependency between boundaries.
-//! A rolled-up edge remembers the concrete relations it stands for: severing
-//! the edge means severing exactly those.
+//! The boundary lens draws the containment hierarchy as nested boxes, and a
+//! [`Cut`] holds the two independent decisions that shape the picture:
 //!
-//! A dependency edge attaches each endpoint to the nearest visible boundary
+//! - The frontier - `open` - is the set of boundaries whose direct contents
+//!   show. A boundary outside it stands as a single closed box, and opening
+//!   a boundary reveals exactly one layer: its children arrive closed, and
+//!   opening each of them is a step of its own.
+//! - The vocabulary - `kinds` - is the set of element kinds the picture
+//!   renders at all. A kind outside the vocabulary is transparent: its
+//!   elements never draw, and what they contain hoists to the nearest
+//!   rendered ancestor, so hiding modules pools their declarations directly
+//!   in the package that holds them. The project root is transparent in the
+//!   default vocabulary: the picture starts at the packages, with no box
+//!   around the whole.
+//!
+//! Every dependency between elements rolls up to a dependency between the
+//! boxes the picture draws. A rolled-up edge remembers the concrete
+//! relations it stands for: severing the edge means severing exactly those.
+//!
+//! A dependency edge attaches each endpoint to the nearest rendered boundary
 //! above it, leaf or frame alike. An edge that ends at a frame speaks about
 //! the frame's own code or the frame as a whole; the edges into its parts
 //! end at the parts. What passes between a boundary and its own contents
@@ -15,192 +27,204 @@
 //! containment - one holding the other - is the outer boundary's internal
 //! wiring, not architecture, and it is dropped from the picture.
 //!
-//! # A cut that is not uniform
+//! # The frontier
 //!
-//! A [`Cut`] carries the detail of the picture as a whole together with an
-//! override per boundary, so the reader opens the one package under study
-//! down to its items while the rest of the project stays whole, and closes a
-//! noisy package back into a single box while the rest stays open.
-//!
-//! An override on a boundary governs everything the boundary contains, never
-//! the boundary itself: what a boundary is, its own surroundings decide.
 //! The rules, in order:
 //!
-//! - The detail governing an element is the override of its nearest visible
-//!   ancestor that carries one, and the global detail when no ancestor does.
-//!   The nearest one wins, so an override inside another override refines it.
-//! - An element is visible when the detail governing it covers its kind.
-//! - An override on an invisible boundary is ignored.
+//! - A boundary's contents show while the boundary is drawn and open.
+//! - An open flag under a closed boundary stays latent: closing a boundary
+//!   keeps the flags of everything inside it, so reopening it restores the
+//!   reading the reader had built there.
+//! - An open flag naming an element the graph does not hold is ignored. The
+//!   frontier is a reading preference rather than a claim about the sources,
+//!   and re-inspecting a repository routinely removes elements; rejecting a
+//!   stale id would leave the reader with no picture at all.
 //!
-//! The last rule is what keeps a picture well formed. The kind levels nest -
-//! every detail that shows modules shows packages, every detail that shows
-//! items shows both - so a boundary hidden by the detail governing it hides
-//! its whole subtree, and no box ever floats free of the frame the sources
-//! put it in. Only an override below a hidden boundary could break that, by
-//! making a descendant finer than the ancestor that should hold it; ignoring
-//! it removes the one exception. A hidden boundary keeps its override for
-//! the moment it becomes visible again.
-//!
-//! Overrides that name elements the graph does not hold are ignored. An
-//! override is a reading preference rather than a claim about the sources,
-//! and re-inspecting a repository routinely removes elements; rejecting a
-//! stale id would leave the reader with no picture at all over a boundary
-//! that no longer exists.
+//! The latency rule is what keeps a picture well formed: nothing below a
+//! closed or hidden boundary reaches the picture, so no box ever floats
+//! free of the frame the sources put it in.
 //!
 //! # A cut scoped to one boundary
 //!
-//! Every detail below packages puts the whole project's insides in front of
-//! the reader at once. A [`Cut`] therefore carries a scope: the one boundary
+//! An open frontier over the whole project puts everything in front of the
+//! reader at once. A [`Cut`] therefore carries a scope: the one boundary
 //! the picture is about. The rules, in order:
 //!
 //! - The scoped boundary is the root frame of the picture and always
-//!   visible. The frames that contain it are not: nothing is drawn around
-//!   the root of a picture, and what holds the scope is said in words
-//!   beside it.
-//! - What the scope contains shows exactly as the unscoped cut - detail and
-//!   overrides alike - would show it.
+//!   drawn, whatever the vocabulary says. The frames that contain it are
+//!   not: nothing is drawn around the root of a picture, and what holds the
+//!   scope is said in words beside it. Only the root's own flag governs its
+//!   contents - the frontier above the root speaks about a picture the
+//!   reader has left.
+//! - What the scope contains shows exactly as the unscoped cut - frontier
+//!   and vocabulary alike - would show it.
 //! - A partner is an element outside the scope that a concrete dependency
 //!   connects with one inside it, either way round, the dependencies naming
 //!   a frame of the scope as a whole included. Each partner shows as the
 //!   topmost boundary above it that does not contain the scope: the largest
 //!   box disjoint from the scope, which is a sibling package for a partner
 //!   in another package and a sibling boundary for one in the scope's own.
-//!   Several partners behind one such box share it.
+//!   Several partners behind one such box share it. A partner draws
+//!   whatever the vocabulary says: the border of a scoped picture states
+//!   who the scope talks to, and that answer must not vanish with a kind.
 //! - Only the dependencies that reach into the scope enter the picture.
 //!   What passes between two partners is about neither of them and leaves.
-//! - A stub stands whole: [`Cut::expand`] refuses it and an override on it
-//!   is ignored. Looking inside a partner means scoping to that partner.
+//! - A stub stands whole: every opening refuses it and its open flags are
+//!   ignored. Looking inside a partner means scoping to that partner.
 //!
 //! A scope naming an element the graph does not hold is ignored, exactly as
-//! a stale override is, and for the same reason.
+//! a stale open flag is, and for the same reason.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{
-    ArchitectureGraph, Element, ElementId, ElementKind, GraphError, Relation, RelationKind,
+    ArchitectureGraph, ElementId, ElementKind, GraphError, Relation, RelationKind,
 };
 
-/// How deep into the containment hierarchy a boundary view reaches.
-///
-/// The order is the hierarchy: one detail is deeper than another when it is
-/// greater, so opening a boundary to reach two elements at once asks for the
-/// greater of the two details each of them needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Detail {
-    Packages,
-    Modules,
-    Items,
-}
-
-impl Detail {
-    /// Coarsest first; sliders and level pickers walk this order.
-    pub const ALL: [Detail; 3] = [Detail::Packages, Detail::Modules, Detail::Items];
-
-    /// One step further into the hierarchy; None at the deepest.
-    pub fn deeper(self) -> Option<Self> {
-        match self {
-            Self::Packages => Some(Self::Modules),
-            Self::Modules => Some(Self::Items),
-            Self::Items => None,
-        }
-    }
-
-    /// One step back toward the whole; None at the coarsest.
-    pub fn shallower(self) -> Option<Self> {
-        match self {
-            Self::Packages => None,
-            Self::Modules => Some(Self::Packages),
-            Self::Items => Some(Self::Modules),
-        }
-    }
-
-    /// The coarsest detail that shows a boundary of this kind, and None for
-    /// a kind no detail ever shows. Opening a picture down to one element
-    /// asks this of every step on the way to it: the boundary above the step
-    /// must show at least this much for the step to appear at all.
-    pub fn showing(kind: ElementKind) -> Option<Self> {
-        Self::ALL.into_iter().find(|detail| detail.shows(kind))
-    }
-
-    /// Whether a boundary of this kind shows at this detail. The levels
-    /// nest: a detail that shows one level shows every level above it, so a
-    /// hidden boundary never holds a visible one.
-    fn shows(self, kind: ElementKind) -> bool {
-        match self {
-            Self::Packages => kind == ElementKind::Package,
-            Self::Modules => matches!(kind, ElementKind::Package | ElementKind::Module),
-            Self::Items => matches!(
-                kind,
-                ElementKind::Package
-                    | ElementKind::Module
-                    | ElementKind::Function
-                    | ElementKind::Type
-            ),
-        }
-    }
-}
-
-/// Where the containment hierarchy is cut: one detail for the picture as a
-/// whole, and a detail of its own for the inside of single boundaries.
+/// Where the picture cuts the containment hierarchy: the frontier of open
+/// boundaries, the vocabulary of kinds it renders, and the boundary the
+/// picture is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cut {
-    /// What everything follows while no override above it says otherwise.
-    pub detail: Detail,
-    /// Boundary -> the detail governing everything inside that boundary.
-    pub overrides: BTreeMap<ElementId, Detail>,
+    /// The frontier: boundaries whose direct contents show. Everything else
+    /// stands as a single closed box. A flag under a closed boundary stays
+    /// latent, and a flag naming no element is ignored.
+    pub open: BTreeSet<ElementId>,
+    /// The vocabulary: the element kinds the picture renders. A kind
+    /// outside it is transparent - its elements never draw, and their
+    /// contents hoist to the nearest rendered ancestor.
+    pub kinds: BTreeSet<ElementKind>,
     /// The boundary the picture is about, and None for the whole project.
     /// A scope says where the reader stands rather than what the sources
     /// hold, so nothing outlives the reading that set it.
     pub scope: Option<ElementId>,
 }
 
+impl Default for Cut {
+    fn default() -> Self {
+        Self::whole()
+    }
+}
+
 impl Cut {
-    /// One detail for the whole picture.
-    pub fn uniform(detail: Detail) -> Self {
+    /// The whole project as closed boxes: nothing open, and every kind but
+    /// the project root in the vocabulary. The project is the whole
+    /// picture, so it stays transparent rather than boxing everything in
+    /// one frame.
+    #[must_use]
+    pub fn whole() -> Self {
         Self {
-            detail,
-            overrides: BTreeMap::new(),
+            open: BTreeSet::new(),
+            kinds: BTreeSet::from([
+                ElementKind::Package,
+                ElementKind::Module,
+                ElementKind::Function,
+                ElementKind::Type,
+            ]),
             scope: None,
         }
     }
 
     /// Scopes the picture to one boundary, or - with None - back to the
-    /// whole project. The detail and the overrides stand either way: a
+    /// whole project. The frontier and the vocabulary stand either way: a
     /// reader who scopes the picture keeps the cut they were reading it at.
     pub fn focus(&mut self, scope: Option<ElementId>) {
         self.scope = scope;
     }
 
-    /// Opens one boundary a step deeper than the detail governing its
-    /// contents now. Answers whether the cut changed: a boundary that
-    /// already shows its items, and one the view holds nothing for, stay as
-    /// they are.
+    /// Opens one boundary, revealing exactly one layer: its direct
+    /// contents, closed. Answers whether the cut changed: a boundary
+    /// already open, a stub, and one holding nothing the vocabulary shows
+    /// stay as they are.
     pub fn expand(&mut self, view: &BoundaryView, boundary: &ElementId) -> bool {
-        self.step(view, boundary, Detail::deeper)
+        if !view.openable.contains(boundary) {
+            return false;
+        }
+        self.open.insert(boundary.clone());
+        true
     }
 
-    /// Closes one boundary a step back toward a single box. Answers whether
-    /// the cut changed, as [`Cut::expand`] does.
+    /// Closes one boundary back into a single box. The flags inside it stay
+    /// latent, so reopening it restores the reading made there. Answers
+    /// whether the cut changed, as [`Cut::expand`] does.
     pub fn collapse(&mut self, view: &BoundaryView, boundary: &ElementId) -> bool {
-        self.step(view, boundary, Detail::shallower)
+        if !view.open.contains(boundary) {
+            return false;
+        }
+        self.open.remove(boundary);
+        true
     }
 
-    fn step(
+    /// Opens one boundary and everything beneath it, down to the deepest
+    /// frame. `graph` is the architecture the view was cut from: the walk
+    /// must reach what the picture does not draw yet. Answers whether the
+    /// picture changes; a stub refuses as it refuses every opening.
+    pub fn expand_fully(
         &mut self,
         view: &BoundaryView,
+        graph: &ArchitectureGraph,
         boundary: &ElementId,
-        step: fn(Detail) -> Option<Detail>,
     ) -> bool {
-        // A stub stands for a partner of the scope, whole and closed. The
-        // picture is about the scope, so looking inside a partner means
-        // scoping to that partner instead.
         if view.stubs.contains(boundary) {
             return false;
         }
-        let Some(detail) = view.detail_within.get(boundary).copied().and_then(step) else {
+        let children = contained_children(graph);
+        let mut subtree = BTreeSet::from([boundary.clone()]);
+        let mut walking = vec![boundary.clone()];
+        while let Some(frame) = walking.pop() {
+            for child in children.get(&frame).into_iter().flatten() {
+                if subtree.insert((*child).clone()) {
+                    walking.push((*child).clone());
+                }
+            }
+        }
+        if !view.openable.iter().any(|id| subtree.contains(id)) {
             return false;
-        };
-        self.overrides.insert(boundary.clone(), detail);
+        }
+        // A flag on a childless element would open nothing, ever; only the
+        // frames of the subtree join the frontier.
+        self.open
+            .extend(subtree.into_iter().filter(|id| children.contains_key(id)));
+        true
+    }
+
+    /// Opens every boundary the picture offers to open: the whole frontier
+    /// steps one layer deeper. Answers whether the cut changed.
+    pub fn expand_frontier(&mut self, view: &BoundaryView) -> bool {
+        if view.openable.is_empty() {
+            return false;
+        }
+        self.open.extend(view.openable.iter().cloned());
+        true
+    }
+
+    /// Closes the innermost open boundaries - the ones holding no open
+    /// boundary of their own - so the frontier steps one layer back.
+    /// Answers whether the cut changed.
+    pub fn collapse_frontier(&mut self, view: &BoundaryView) -> bool {
+        let parents = rendered_parents(&view.graph);
+        let mut holding_open: BTreeSet<ElementId> = BTreeSet::new();
+        for id in &view.open {
+            let mut current = parents.get(id);
+            while let Some(parent) = current {
+                if view.open.contains(parent) {
+                    holding_open.insert(parent.clone());
+                }
+                current = parents.get(parent);
+            }
+        }
+        let innermost: Vec<ElementId> = view
+            .open
+            .iter()
+            .filter(|id| !holding_open.contains(*id))
+            .cloned()
+            .collect();
+        if innermost.is_empty() {
+            return false;
+        }
+        for id in &innermost {
+            self.open.remove(id);
+        }
         true
     }
 }
@@ -218,11 +242,14 @@ pub struct BoundaryView {
     /// frame as a whole; the edges into its parts end at the parts.
     pub provenance: BTreeMap<Relation, BTreeSet<Relation>>,
     /// Concrete `DependsOn` relations with an endpoint outside every
-    /// boundary; they appear in no rolled-up edge.
+    /// rendered boundary; they appear in no rolled-up edge.
     pub unscoped: BTreeSet<Relation>,
-    /// Boundary -> the detail governing what it shows inside it. Expanding
-    /// the boundary deepens this detail and collapsing it coarsens it.
-    pub detail_within: BTreeMap<ElementId, Detail>,
+    /// The boundaries standing open: drawn, on the cut's frontier, and not
+    /// a stub, so the picture shows their direct contents.
+    pub open: BTreeSet<ElementId>,
+    /// The boundaries the reader can open: drawn, closed, not a stub, and
+    /// holding something the vocabulary would show.
+    pub openable: BTreeSet<ElementId>,
     /// The partners standing at the border of a scoped picture, each whole
     /// and closed. They open to nothing: a reader looks inside one by
     /// scoping the picture to it. Empty while the cut scopes to nothing.
@@ -244,31 +271,49 @@ impl BoundaryView {
 /// Cuts `graph` where the cut asks for.
 pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryView, LensError> {
     let parents = containment_parents(graph)?;
-    let contexts = contexts(graph, &parents, cut);
     let scoped = Scoped::of(graph, &parents, cut.scope.as_ref());
-    let shown = |element: &Element| {
-        contexts
-            .get(&element.id)
-            .is_some_and(|detail| detail.shows(element.kind))
-    };
-    let visible: BTreeSet<ElementId> = graph
-        .elements()
-        .filter(|element| match &scoped {
-            None => shown(element),
-            Some(scoped) => scoped.draws(&element.id, shown(element)),
-        })
-        .map(|element| element.id.clone())
-        .collect();
-    let detail_within: BTreeMap<ElementId, Detail> = visible
-        .iter()
-        .map(|id| {
-            let within = match &scoped {
-                Some(scoped) if scoped.stubs.contains(id) => closed(graph, cut, id),
-                _ => within(graph, cut, &contexts, id),
-            };
-            (id.clone(), within)
-        })
-        .collect();
+    let root = scoped.as_ref().map(|scoped| scoped.root.clone());
+
+    let mut contents_memo = BTreeMap::new();
+    let mut visible = BTreeSet::new();
+    for element in graph.elements() {
+        let shown = cut.kinds.contains(&element.kind)
+            && parents.get(&element.id).is_none_or(|parent| {
+                shows_contents(
+                    graph,
+                    &parents,
+                    cut,
+                    root.as_ref(),
+                    &mut contents_memo,
+                    parent,
+                )
+            });
+        let drawn = match &scoped {
+            None => shown,
+            Some(scoped) => scoped.draws(&element.id, shown),
+        };
+        if drawn {
+            visible.insert(element.id.clone());
+        }
+    }
+
+    let children = contained_children(graph);
+    let stubs = scoped
+        .as_ref()
+        .map(|scoped| scoped.stubs.clone())
+        .unwrap_or_default();
+    let mut open = BTreeSet::new();
+    let mut openable = BTreeSet::new();
+    for id in &visible {
+        if stubs.contains(id) {
+            continue;
+        }
+        if cut.open.contains(id) {
+            open.insert(id.clone());
+        } else if reveals(graph, &children, &cut.kinds, id) {
+            openable.insert(id.clone());
+        }
+    }
 
     let boundary_of = |id: &ElementId| -> Option<ElementId> {
         // Outside the scope only the stubs stand, and every element behind
@@ -278,7 +323,7 @@ pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryVie
         {
             return scoped.stub_of(&parents, id);
         }
-        // The scoped boundary is always visible, so a climb that starts
+        // The scoped boundary is always drawn, so a climb that starts
         // inside the scope never leaves it.
         let mut current = Some(id.clone());
         while let Some(id) = current {
@@ -331,9 +376,88 @@ pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryVie
         graph: view,
         provenance,
         unscoped,
-        detail_within,
-        stubs: scoped.map(|scoped| scoped.stubs).unwrap_or_default(),
+        open,
+        openable,
+        stubs,
     })
+}
+
+/// Whether a boundary's direct contents show: the boundary sits on the
+/// cut's frontier and its own place is exposed. A transparent boundary -
+/// one whose kind the vocabulary leaves out - passes the question up: it
+/// draws no box, so its contents stand wherever it stands. The scoped root
+/// bottoms the walk: it is the root frame of the picture, so only its own
+/// flag speaks and the frontier above it stays out of the answer.
+fn shows_contents(
+    graph: &ArchitectureGraph,
+    parents: &BTreeMap<ElementId, ElementId>,
+    cut: &Cut,
+    root: Option<&ElementId>,
+    memo: &mut BTreeMap<ElementId, bool>,
+    id: &ElementId,
+) -> bool {
+    if let Some(answer) = memo.get(id) {
+        return *answer;
+    }
+    let answer = if root == Some(id) {
+        cut.open.contains(id)
+    } else {
+        let above = parents
+            .get(id)
+            .is_none_or(|parent| shows_contents(graph, parents, cut, root, memo, parent));
+        let rendered = graph
+            .element(id)
+            .is_some_and(|element| cut.kinds.contains(&element.kind));
+        if rendered {
+            above && cut.open.contains(id)
+        } else {
+            above
+        }
+    };
+    memo.insert(id.clone(), answer);
+    answer
+}
+
+/// Whether opening a boundary would put anything new in the picture: it
+/// holds an element of a rendered kind, directly or behind transparent
+/// intermediates alone. What sits behind a rendered child stays out of the
+/// answer - that child arrives closed, and opening it is a step of its own.
+fn reveals(
+    graph: &ArchitectureGraph,
+    children: &BTreeMap<&ElementId, Vec<&ElementId>>,
+    kinds: &BTreeSet<ElementKind>,
+    id: &ElementId,
+) -> bool {
+    children.get(id).into_iter().flatten().any(|child| {
+        let rendered = graph
+            .element(child)
+            .is_some_and(|element| kinds.contains(&element.kind));
+        rendered || reveals(graph, children, kinds, child)
+    })
+}
+
+/// The direct contents of every containing element.
+fn contained_children(graph: &ArchitectureGraph) -> BTreeMap<&ElementId, Vec<&ElementId>> {
+    let mut children: BTreeMap<&ElementId, Vec<&ElementId>> = BTreeMap::new();
+    for relation in graph.relations() {
+        if relation.kind == RelationKind::Contains {
+            children
+                .entry(&relation.from)
+                .or_default()
+                .push(&relation.to);
+        }
+    }
+    children
+}
+
+/// The containment parent of every contained element of a rendered view.
+/// The view nests as a tree by construction, so nothing is validated again.
+fn rendered_parents(graph: &ArchitectureGraph) -> BTreeMap<ElementId, ElementId> {
+    graph
+        .relations()
+        .filter(|relation| relation.kind == RelationKind::Contains)
+        .map(|relation| (relation.to.clone(), relation.from.clone()))
+        .collect()
 }
 
 /// The picture one scope narrows to: the scoped boundary with everything
@@ -422,8 +546,8 @@ impl Scoped {
 
     /// Whether the picture draws one element. `shown` is what the cut alone
     /// says about it: inside the scope that answer stands unchanged, the
-    /// scoped boundary itself stands whatever it says, and outside the scope
-    /// the stubs stand alone.
+    /// scoped boundary and the stubs stand whatever it says, and outside
+    /// the scope the stubs stand alone.
     fn draws(&self, id: &ElementId, shown: bool) -> bool {
         *id == self.root || self.stubs.contains(id) || (shown && self.holds(id))
     }
@@ -447,16 +571,6 @@ fn ancestors(parents: &BTreeMap<ElementId, ElementId>, id: &ElementId) -> BTreeS
     above
 }
 
-/// The detail a boundary frozen at the border of a scope reads at: the
-/// coarsest one that shows a boundary of its kind, which is the detail that
-/// draws it as the single box it is.
-fn closed(graph: &ArchitectureGraph, cut: &Cut, id: &ElementId) -> Detail {
-    graph
-        .element(id)
-        .and_then(|element| Detail::showing(element.kind))
-        .unwrap_or(cut.detail)
-}
-
 /// Every dependency of one cut, gathered from the concrete relations.
 struct RolledUp {
     provenance: BTreeMap<Relation, BTreeSet<Relation>>,
@@ -467,7 +581,7 @@ struct RolledUp {
 /// relations are what the picture is drawn from: a scoped picture hands over
 /// the ones that reach into its scope, and every other picture all of them.
 ///
-/// Each endpoint resolves to the nearest visible boundary above it, leaf or
+/// Each endpoint resolves to the nearest rendered boundary above it, leaf or
 /// frame alike. A relation whose two resolved boundaries stand in
 /// containment - the same boundary, or one holding the other - is the outer
 /// boundary's internal wiring: a frame talking to its own part is
@@ -507,60 +621,6 @@ fn roll_up<'r>(
             .insert(relation.clone());
     }
     rolled
-}
-
-/// The detail governing each element of the graph, resolved from the
-/// outermost element inward: every element follows the detail governing the
-/// inside of its containment parent.
-fn contexts(
-    graph: &ArchitectureGraph,
-    parents: &BTreeMap<ElementId, ElementId>,
-    cut: &Cut,
-) -> BTreeMap<ElementId, Detail> {
-    let mut contexts: BTreeMap<ElementId, Detail> = BTreeMap::new();
-    for element in graph.elements() {
-        let mut ancestry = Vec::new();
-        let mut current = Some(element.id.clone());
-        while let Some(id) = current {
-            if contexts.contains_key(&id) {
-                break;
-            }
-            current = parents.get(&id).cloned();
-            ancestry.push(id);
-        }
-        // Outermost first: a context follows from the one enclosing it.
-        for id in ancestry.into_iter().rev() {
-            let context = match parents.get(&id) {
-                None => cut.detail,
-                Some(parent) => within(graph, cut, &contexts, parent),
-            };
-            contexts.insert(id, context);
-        }
-    }
-    contexts
-}
-
-/// The detail governing everything inside a boundary: the boundary's own
-/// override where the cut holds one and the boundary is visible, else the
-/// detail governing the boundary itself.
-///
-/// An override on an invisible boundary is ignored. Honoring it would show
-/// elements below a boundary the cut hides, and those have no visible frame
-/// to sit in.
-fn within(
-    graph: &ArchitectureGraph,
-    cut: &Cut,
-    contexts: &BTreeMap<ElementId, Detail>,
-    boundary: &ElementId,
-) -> Detail {
-    let context = contexts.get(boundary).copied().unwrap_or(cut.detail);
-    let visible = graph
-        .element(boundary)
-        .is_some_and(|element| context.shows(element.kind));
-    match cut.overrides.get(boundary) {
-        Some(detail) if visible => *detail,
-        _ => context,
-    }
 }
 
 /// The containment parent of every contained element. Fails when containment
@@ -631,19 +691,16 @@ mod tests {
         ElementId::new(text).unwrap()
     }
 
-    fn cut<const N: usize>(detail: Detail, overrides: [(&str, Detail); N]) -> Cut {
-        Cut {
-            detail,
-            overrides: overrides
-                .into_iter()
-                .map(|(boundary, within)| (id(boundary), within))
-                .collect(),
-            scope: None,
-        }
+    /// A cut with the named boundaries open and the default vocabulary.
+    fn opened<const N: usize>(open: [&str; N]) -> Cut {
+        let mut cut = Cut::whole();
+        cut.open = open.into_iter().map(id).collect();
+        cut
     }
 
-    fn scoped<const N: usize>(detail: Detail, scope: &str, overrides: [(&str, Detail); N]) -> Cut {
-        let mut cut = cut(detail, overrides);
+    /// A cut scoped to one boundary, with the named boundaries open.
+    fn scoped<const N: usize>(scope: &str, open: [&str; N]) -> Cut {
+        let mut cut = opened(open);
         cut.focus(Some(id(scope)));
         cut
     }
@@ -719,7 +776,7 @@ mod tests {
 
     #[test]
     fn module_dependencies_roll_up_to_their_packages() {
-        let view = boundary_view(&fixture(), &Cut::uniform(Detail::Packages)).unwrap();
+        let view = boundary_view(&fixture(), &Cut::whole()).unwrap();
         let rolled = relation("package:a", "package:b", RelationKind::DependsOn);
         assert!(view.graph.relations().any(|r| *r == rolled));
         assert_eq!(
@@ -734,7 +791,7 @@ mod tests {
         graph
             .add_relation(relation("a/util", "a/lib", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
+        let view = boundary_view(&graph, &Cut::whole()).unwrap();
         assert_eq!(
             view.provenance.len(),
             1,
@@ -743,8 +800,20 @@ mod tests {
     }
 
     #[test]
+    fn the_project_stands_transparent_at_the_root() {
+        let view = boundary_view(&fixture(), &Cut::whole()).unwrap();
+        assert_eq!(drawn(&view), ids(["package:a", "package:b"]));
+        assert!(
+            view.graph
+                .relations()
+                .all(|r| r.kind != RelationKind::Contains),
+            "no box stands around the packages: the project is the picture itself"
+        );
+    }
+
+    #[test]
     fn boundaries_nest_under_their_nearest_enclosing_boundary() {
-        let view = boundary_view(&fixture(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&fixture(), &opened(["package:a", "a/lib"])).unwrap();
         let nested = relation("a/lib", "a/util", RelationKind::Contains);
         let across = relation("package:a", "a/lib", RelationKind::Contains);
         assert!(view.graph.relations().any(|r| *r == nested));
@@ -757,7 +826,7 @@ mod tests {
         graph
             .add_relation(relation("a/lib", "b/lib", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &opened(["package:a", "a/lib", "package:b"])).unwrap();
 
         let rolled = relation("a/lib", "b/lib", RelationKind::DependsOn);
         assert!(view.graph.relations().any(|r| *r == rolled));
@@ -773,7 +842,7 @@ mod tests {
         graph
             .add_relation(relation("a/lib", "b/lib", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &opened(["package:a", "a/lib", "package:b"])).unwrap();
 
         for element in view.graph.elements() {
             assert!(
@@ -790,7 +859,7 @@ mod tests {
         graph
             .add_relation(relation("a/lib", "a/util", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &opened(["package:a", "a/lib"])).unwrap();
 
         assert!(
             !view
@@ -806,7 +875,7 @@ mod tests {
         graph
             .add_relation(relation("a/util", "a/lib", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &opened(["package:a", "a/lib"])).unwrap();
 
         assert!(!view.provenance.contains_key(&relation(
             "a/util",
@@ -821,7 +890,7 @@ mod tests {
         graph
             .add_relation(relation("package:a", "package:b", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &opened(["package:a", "package:b"])).unwrap();
 
         let rolled = relation("package:a", "package:b", RelationKind::DependsOn);
         assert!(
@@ -835,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dependency_into_a_frames_direct_content_attaches_to_the_frame() {
+    fn a_dependency_into_a_closed_frames_content_attaches_to_the_frame() {
         let mut graph = fixture();
         graph
             .add_element(element("b/util", ElementKind::Module))
@@ -855,7 +924,7 @@ mod tests {
                 RelationKind::DependsOn,
             ))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &opened(["package:a", "a/lib", "package:b"])).unwrap();
 
         let rolled = relation("a/util", "b/lib", RelationKind::DependsOn);
         assert!(view.graph.relations().any(|r| *r == rolled));
@@ -871,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn items_detail_shows_individual_declarations() {
+    fn opening_a_module_shows_the_items_it_declares() {
         let mut graph = fixture();
         graph
             .add_element(element("b/lib#type:Thing", ElementKind::Type))
@@ -890,7 +959,11 @@ mod tests {
                 RelationKind::DependsOn,
             ))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Items)).unwrap();
+        let view = boundary_view(
+            &graph,
+            &opened(["package:a", "a/lib", "package:b", "b/lib"]),
+        )
+        .unwrap();
 
         assert!(
             view.graph
@@ -902,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dependency_outside_every_boundary_is_reported_as_unscoped() {
+    fn a_dependency_outside_every_rendered_boundary_is_reported_as_unscoped() {
         let mut graph = fixture();
         graph
             .add_element(element("stray", ElementKind::Module))
@@ -913,7 +986,12 @@ mod tests {
         graph
             .add_relation(relation("stray", "b/lib", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
+        let mut cut = Cut::whole();
+        // Without modules in the vocabulary the stray module has no rendered
+        // boundary above it at all; the packaged ones climb to their
+        // packages.
+        cut.kinds.remove(&ElementKind::Module);
+        let view = boundary_view(&graph, &cut).unwrap();
         assert_eq!(
             view.unscoped,
             BTreeSet::from([relation("stray", "b/lib", RelationKind::DependsOn)])
@@ -939,81 +1017,83 @@ mod tests {
     }
 
     #[test]
-    fn an_override_opens_one_boundary_deeper_than_the_view() {
-        let view = boundary_view(
-            &fixture(),
-            &cut(Detail::Packages, [("package:a", Detail::Modules)]),
-        )
-        .unwrap();
+    fn expanding_a_boundary_opens_exactly_one_layer() {
+        let graph = fixture_with_items();
+        let mut cut = Cut::whole();
 
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(cut.expand(&view, &id("package:a")));
+        let view = boundary_view(&graph, &cut).unwrap();
         assert!(view.graph.element(&id("a/lib")).is_some());
-        assert!(view.graph.element(&id("a/util")).is_some());
+        assert!(
+            view.graph.element(&id("a/util")).is_none(),
+            "the children arrive closed; opening each is a step of its own"
+        );
         assert!(
             view.graph.element(&id("b/lib")).is_none(),
             "the package beside it stays whole"
         );
+
+        assert!(cut.expand(&view, &id("a/lib")));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(view.graph.element(&id("a/util")).is_some());
+        assert!(view.graph.element(&id("a/lib#function:near")).is_some());
+        assert!(
+            !cut.expand(&view, &id("a/lib")),
+            "an open boundary opens no further"
+        );
     }
 
     #[test]
-    fn an_override_collapses_one_boundary_below_the_view() {
-        let view = boundary_view(
-            &fixture(),
-            &cut(Detail::Modules, [("package:a", Detail::Packages)]),
-        )
-        .unwrap();
+    fn a_closed_boundary_stands_as_a_single_box_beside_open_ones() {
+        let view = boundary_view(&fixture(), &opened(["package:b"])).unwrap();
 
         assert!(view.graph.element(&id("a/lib")).is_none());
-        assert!(view.graph.element(&id("a/util")).is_none());
         assert!(
             view.graph.element(&id("b/lib")).is_some(),
-            "the package beside it keeps its modules"
+            "the package beside it keeps its contents"
         );
         let rolled = relation("package:a", "b/lib", RelationKind::DependsOn);
         assert!(view.graph.relations().any(|r| *r == rolled));
     }
 
     #[test]
-    fn a_deeper_override_wins_inside_a_shallower_one() {
-        let view = boundary_view(
-            &fixture_with_items(),
-            &cut(
-                Detail::Packages,
-                [("package:a", Detail::Modules), ("a/util", Detail::Items)],
-            ),
-        )
-        .unwrap();
-
-        assert!(
-            view.graph.element(&id("a/util#function:go")).is_some(),
-            "the nearest override governs a/util's contents"
-        );
-        assert!(
-            view.graph.element(&id("a/lib#function:near")).is_none(),
-            "the shallower override still governs everything else inside package:a"
-        );
-    }
-
-    #[test]
-    fn an_override_inside_a_collapsed_boundary_leaves_its_contents_hidden() {
-        let view = boundary_view(
-            &fixture_with_items(),
-            &cut(
-                Detail::Items,
-                [("package:a", Detail::Packages), ("a/lib", Detail::Items)],
-            ),
-        )
-        .unwrap();
+    fn an_open_flag_under_a_closed_boundary_leaves_its_contents_hidden() {
+        let view = boundary_view(&fixture_with_items(), &opened(["a/lib"])).unwrap();
 
         assert!(view.graph.element(&id("a/lib")).is_none());
         assert!(
             view.graph.element(&id("a/util")).is_none(),
-            "nothing below a hidden boundary reaches the picture"
+            "nothing below a closed boundary reaches the picture"
         );
         assert!(view.graph.element(&id("a/lib#function:near")).is_none());
     }
 
     #[test]
-    fn edges_reattach_to_the_boundaries_the_overrides_expose() {
+    fn reopening_a_boundary_restores_the_openings_made_inside_it() {
+        let graph = fixture();
+        let mut cut = Cut::whole();
+
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(cut.expand(&view, &id("package:a")));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(cut.expand(&view, &id("a/lib")));
+
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(cut.collapse(&view, &id("package:a")));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(view.graph.element(&id("a/lib")).is_none());
+
+        assert!(cut.expand(&view, &id("package:a")));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(
+            view.graph.element(&id("a/util")).is_some(),
+            "the flag on a/lib stayed latent through the closing"
+        );
+    }
+
+    #[test]
+    fn edges_reattach_to_the_boundaries_the_reader_opens() {
         let mut graph = fixture();
         graph
             .add_element(element("package:c", ElementKind::Package))
@@ -1030,17 +1110,13 @@ mod tests {
             .add_relation(relation("c/util", "b/lib", RelationKind::DependsOn))
             .unwrap();
 
-        let view = boundary_view(
-            &graph,
-            &cut(Detail::Packages, [("package:a", Detail::Modules)]),
-        )
-        .unwrap();
+        let view = boundary_view(&graph, &opened(["package:a", "a/lib"])).unwrap();
 
         let exposed = relation("a/util", "package:b", RelationKind::DependsOn);
         assert_eq!(
             view.provenance[&exposed],
             BTreeSet::from([relation("a/util", "b/lib", RelationKind::DependsOn)]),
-            "the expanded package answers with the module the dependency leaves"
+            "the opened package answers with the module the dependency leaves"
         );
         let rolled = relation("package:c", "package:b", RelationKind::DependsOn);
         assert_eq!(
@@ -1058,17 +1134,13 @@ mod tests {
             .unwrap();
         let edge = relation("package:a", "package:b", RelationKind::DependsOn);
 
-        let open = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let open = boundary_view(&graph, &opened(["package:a", "package:b"])).unwrap();
         assert!(
             open.graph.relations().any(|r| *r == edge),
             "an open frame takes the attachment on its border"
         );
 
-        let collapsed = boundary_view(
-            &graph,
-            &cut(Detail::Modules, [("package:b", Detail::Packages)]),
-        )
-        .unwrap();
+        let collapsed = boundary_view(&graph, &opened(["package:a"])).unwrap();
         assert!(
             collapsed.graph.relations().any(|r| *r == edge),
             "a collapsed package is a single box, and the same edge holds"
@@ -1076,70 +1148,185 @@ mod tests {
     }
 
     #[test]
-    fn expanding_a_boundary_opens_it_one_detail_step_at_a_time() {
-        let graph = fixture_with_items();
-        let mut cut = Cut::uniform(Detail::Packages);
+    fn hiding_functions_reattaches_their_connections_to_the_module() {
+        let mut graph = fixture();
+        graph
+            .add_element(element("b/lib#function:go", ElementKind::Function))
+            .unwrap();
+        graph
+            .add_relation(relation(
+                "b/lib",
+                "b/lib#function:go",
+                RelationKind::Contains,
+            ))
+            .unwrap();
+        graph
+            .add_relation(relation(
+                "a/util",
+                "b/lib#function:go",
+                RelationKind::DependsOn,
+            ))
+            .unwrap();
+        let mut cut = opened(["package:a", "a/lib", "package:b", "b/lib"]);
+        cut.kinds.remove(&ElementKind::Function);
+        let view = boundary_view(&graph, &cut).unwrap();
 
-        let view = boundary_view(&graph, &cut).unwrap();
-        assert!(cut.expand(&view, &id("package:a")));
-        let view = boundary_view(&graph, &cut).unwrap();
-        assert!(view.graph.element(&id("a/util")).is_some());
-        assert!(view.graph.element(&id("a/util#function:go")).is_none());
-
-        assert!(cut.expand(&view, &id("package:a")));
-        let view = boundary_view(&graph, &cut).unwrap();
-        assert!(view.graph.element(&id("a/util#function:go")).is_some());
+        assert!(view.graph.element(&id("b/lib#function:go")).is_none());
+        let edge = relation("a/util", "b/lib", RelationKind::DependsOn);
         assert!(
-            !cut.expand(&view, &id("package:a")),
-            "the items are the deepest a boundary opens"
+            view.provenance[&edge].contains(&relation(
+                "a/util",
+                "b/lib#function:go",
+                RelationKind::DependsOn
+            )),
+            "the dependency into the hidden function speaks through its module"
         );
+    }
+
+    #[test]
+    fn hiding_modules_pools_their_types_in_the_package() {
+        let mut graph = fixture();
+        graph
+            .add_element(element("a/lib#type:One", ElementKind::Type))
+            .unwrap();
+        graph
+            .add_element(element("a/beside#type:Two", ElementKind::Type))
+            .unwrap();
+        for (module, item) in [
+            ("a/lib", "a/lib#type:One"),
+            ("a/beside", "a/beside#type:Two"),
+        ] {
+            graph
+                .add_relation(relation(module, item, RelationKind::Contains))
+                .unwrap();
+        }
+        graph
+            .add_relation(relation(
+                "a/lib#type:One",
+                "a/beside#type:Two",
+                RelationKind::DependsOn,
+            ))
+            .unwrap();
+        let mut cut = opened(["package:a"]);
+        cut.kinds.remove(&ElementKind::Module);
+        let view = boundary_view(&graph, &cut).unwrap();
+
+        for item in ["a/lib#type:One", "a/beside#type:Two"] {
+            assert!(view.graph.element(&id(item)).is_some());
+            let hoisted = relation("package:a", item, RelationKind::Contains);
+            assert!(
+                view.graph.relations().any(|r| *r == hoisted),
+                "{item} hoists past its transparent module into the package"
+            );
+        }
+        let edge = relation(
+            "a/lib#type:One",
+            "a/beside#type:Two",
+            RelationKind::DependsOn,
+        );
+        assert!(
+            view.graph.relations().any(|r| *r == edge),
+            "what passed between sibling modules now passes between their types"
+        );
+    }
+
+    #[test]
+    fn a_boundary_holding_nothing_the_vocabulary_shows_cannot_open() {
+        let graph = fixture_with_items();
+        let mut cut = opened(["package:a", "a/lib"]);
+        cut.kinds.remove(&ElementKind::Function);
+        let view = boundary_view(&graph, &cut).unwrap();
+
+        assert!(
+            !view.openable.contains(&id("a/util")),
+            "a/util holds one function, and functions are outside the vocabulary"
+        );
+        assert!(!cut.expand(&view, &id("a/util")));
+
+        cut.kinds.insert(ElementKind::Function);
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(view.openable.contains(&id("a/util")));
     }
 
     #[test]
     fn a_boundary_showing_a_single_box_cannot_collapse_further() {
         let graph = fixture();
-        let mut cut = Cut::uniform(Detail::Packages);
+        let mut cut = Cut::whole();
         let view = boundary_view(&graph, &cut).unwrap();
         assert!(!cut.collapse(&view, &id("package:a")));
-        assert_eq!(cut, Cut::uniform(Detail::Packages));
+        assert_eq!(cut, Cut::whole());
     }
 
     #[test]
-    fn an_override_naming_no_element_changes_nothing() {
-        let plain = boundary_view(&fixture(), &Cut::uniform(Detail::Packages)).unwrap();
-        let stale = boundary_view(
-            &fixture(),
-            &cut(Detail::Packages, [("package:gone", Detail::Items)]),
-        )
-        .unwrap();
+    fn expand_fully_opens_a_whole_subtree() {
+        let graph = fixture_with_items();
+        let mut cut = Cut::whole();
+        let view = boundary_view(&graph, &cut).unwrap();
+
+        assert!(cut.expand_fully(&view, &graph, &id("package:a")));
+        let view = boundary_view(&graph, &cut).unwrap();
+        for inside in [
+            "a/lib",
+            "a/util",
+            "a/lib#function:near",
+            "a/util#function:go",
+        ] {
+            assert!(
+                view.graph.element(&id(inside)).is_some(),
+                "{inside} stands open with everything above it"
+            );
+        }
+        assert!(
+            view.graph.element(&id("b/lib")).is_none(),
+            "the package beside it stays whole"
+        );
+        assert!(
+            !cut.expand_fully(&view, &graph, &id("package:a")),
+            "a subtree already open opens no further"
+        );
+    }
+
+    #[test]
+    fn the_frontier_steps_one_layer_at_a_time() {
+        let graph = fixture();
+        let mut cut = Cut::whole();
+
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(cut.expand_frontier(&view));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(view.graph.element(&id("a/lib")).is_some());
+        assert!(
+            view.graph.element(&id("a/util")).is_none(),
+            "one step opens the packages, not what their modules hold"
+        );
+
+        assert!(cut.expand_frontier(&view));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(view.graph.element(&id("a/util")).is_some());
+        assert!(
+            !cut.expand_frontier(&view),
+            "a picture with nothing left to open steps nowhere"
+        );
+
+        assert!(cut.collapse_frontier(&view));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(
+            view.graph.element(&id("a/util")).is_none(),
+            "the innermost open boundary closed first"
+        );
+        assert!(view.graph.element(&id("a/lib")).is_some());
+    }
+
+    #[test]
+    fn an_open_id_naming_no_element_changes_nothing() {
+        let plain = boundary_view(&fixture(), &Cut::whole()).unwrap();
+        let stale = boundary_view(&fixture(), &opened(["package:gone"])).unwrap();
         assert_eq!(plain, stale);
     }
 
     #[test]
-    fn the_coarsest_detail_showing_a_kind_is_the_first_one_that_shows_it() {
-        assert_eq!(
-            Detail::showing(ElementKind::Package),
-            Some(Detail::Packages)
-        );
-        assert_eq!(Detail::showing(ElementKind::Module), Some(Detail::Modules));
-        assert_eq!(Detail::showing(ElementKind::Function), Some(Detail::Items));
-        assert_eq!(Detail::showing(ElementKind::Type), Some(Detail::Items));
-    }
-
-    #[test]
-    fn a_project_is_the_whole_picture_and_so_shows_at_no_detail() {
-        assert_eq!(Detail::showing(ElementKind::Project), None);
-    }
-
-    #[test]
-    fn a_detail_reaching_deeper_into_the_hierarchy_is_the_greater_one() {
-        assert!(Detail::Items > Detail::Modules);
-        assert!(Detail::Modules > Detail::Packages);
-    }
-
-    #[test]
     fn the_concrete_relations_behind_an_edge_are_its_provenance() {
-        let view = boundary_view(&fixture(), &Cut::uniform(Detail::Packages)).unwrap();
+        let view = boundary_view(&fixture(), &Cut::whole()).unwrap();
         assert_eq!(
             view.concrete_behind(&relation("package:a", "package:b", RelationKind::DependsOn)),
             BTreeSet::from([relation("a/util", "b/lib", RelationKind::DependsOn)])
@@ -1174,7 +1361,7 @@ mod tests {
                 RelationKind::DependsOn,
             ))
             .unwrap();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &opened(["package:a", "a/lib", "package:b"])).unwrap();
 
         let edge = relation("a/util", "b/lib", RelationKind::DependsOn);
         assert_eq!(
@@ -1190,7 +1377,7 @@ mod tests {
 
     #[test]
     fn an_edge_the_view_does_not_draw_answers_for_nothing() {
-        let view = boundary_view(&fixture(), &Cut::uniform(Detail::Packages)).unwrap();
+        let view = boundary_view(&fixture(), &Cut::whole()).unwrap();
         assert!(
             view.concrete_behind(&relation("package:b", "package:a", RelationKind::DependsOn))
                 .is_empty()
@@ -1242,7 +1429,7 @@ mod tests {
 
     #[test]
     fn a_scoped_picture_holds_the_scope_the_partners_at_its_border_and_nothing_else() {
-        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+        let view = boundary_view(&neighbourhood(), &scoped("a/util", [])).unwrap();
 
         assert_eq!(
             drawn(&view),
@@ -1253,7 +1440,7 @@ mod tests {
 
     #[test]
     fn a_scoped_boundary_stands_at_the_root_of_the_picture() {
-        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+        let view = boundary_view(&neighbourhood(), &scoped("a/util", [])).unwrap();
 
         assert!(
             view.graph
@@ -1265,7 +1452,7 @@ mod tests {
 
     #[test]
     fn a_partner_stands_as_the_largest_boundary_that_leaves_the_scope_out() {
-        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+        let view = boundary_view(&neighbourhood(), &scoped("a/util", [])).unwrap();
 
         assert!(
             view.graph.element(&id("b/deep")).is_none(),
@@ -1285,7 +1472,7 @@ mod tests {
 
     #[test]
     fn every_dependency_to_one_partner_gathers_on_the_stub_that_stands_for_it() {
-        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+        let view = boundary_view(&neighbourhood(), &scoped("a/util", [])).unwrap();
 
         assert_eq!(
             view.provenance[&relation("a/util", "package:b", RelationKind::DependsOn)],
@@ -1303,7 +1490,7 @@ mod tests {
 
     #[test]
     fn a_dependency_between_two_partners_leaves_a_scoped_picture() {
-        let view = boundary_view(&neighbourhood(), &scoped(Detail::Modules, "a/util", [])).unwrap();
+        let view = boundary_view(&neighbourhood(), &scoped("a/util", [])).unwrap();
 
         assert!(!view.provenance.contains_key(&relation(
             "package:b",
@@ -1319,34 +1506,30 @@ mod tests {
     #[test]
     fn a_partner_stays_closed_however_the_reader_asks_to_open_it() {
         let graph = neighbourhood();
-        let mut cut = scoped(Detail::Modules, "a/util", []);
+        let mut cut = scoped("a/util", []);
         let view = boundary_view(&graph, &cut).unwrap();
 
         assert!(!cut.expand(&view, &id("package:b")));
         assert!(!cut.collapse(&view, &id("package:b")));
-        assert_eq!(cut, scoped(Detail::Modules, "a/util", []));
+        assert!(!cut.expand_fully(&view, &graph, &id("package:b")));
+        assert_eq!(cut, scoped("a/util", []));
     }
 
     #[test]
-    fn an_override_that_would_open_a_partner_is_ignored_while_the_scope_stands() {
-        let view = boundary_view(
-            &neighbourhood(),
-            &scoped(Detail::Modules, "a/util", [("package:b", Detail::Items)]),
-        )
-        .unwrap();
+    fn an_open_flag_on_a_partner_is_ignored_while_the_scope_stands() {
+        let view = boundary_view(&neighbourhood(), &scoped("a/util", ["package:b"])).unwrap();
 
         assert!(view.graph.element(&id("b/lib")).is_none());
-        assert_eq!(
-            view.detail_within[&id("package:b")],
-            Detail::Packages,
-            "a stub stands whole, at the detail that shows a package as one box"
+        assert!(
+            !view.open.contains(&id("package:b")) && !view.openable.contains(&id("package:b")),
+            "a stub stands whole, and offers nothing to open"
         );
     }
 
     #[test]
     fn a_boundary_inside_the_scope_opens_as_it_would_without_a_scope() {
         let graph = neighbourhood();
-        let mut cut = scoped(Detail::Packages, "package:a", []);
+        let mut cut = scoped("package:a", []);
 
         let view = boundary_view(&graph, &cut).unwrap();
         assert_eq!(drawn(&view), ids(["package:a", "package:b", "package:c"]));
@@ -1363,7 +1546,7 @@ mod tests {
         graph
             .add_relation(relation("a/lib", "b/lib", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &scoped(Detail::Modules, "package:a", [])).unwrap();
+        let view = boundary_view(&graph, &scoped("package:a", ["package:a", "a/lib"])).unwrap();
 
         assert_eq!(
             view.provenance[&relation("a/lib", "package:b", RelationKind::DependsOn)],
@@ -1377,7 +1560,7 @@ mod tests {
         graph
             .add_relation(relation("c/lib", "package:a", RelationKind::DependsOn))
             .unwrap();
-        let view = boundary_view(&graph, &scoped(Detail::Modules, "package:a", [])).unwrap();
+        let view = boundary_view(&graph, &scoped("package:a", ["package:a", "a/lib"])).unwrap();
 
         assert!(view.graph.element(&id("package:c")).is_some());
         assert_eq!(
@@ -1408,7 +1591,7 @@ mod tests {
                 RelationKind::DependsOn,
             ))
             .unwrap();
-        let view = boundary_view(&graph, &scoped(Detail::Items, "a/util#function:go", [])).unwrap();
+        let view = boundary_view(&graph, &scoped("a/util#function:go", [])).unwrap();
 
         assert_eq!(drawn(&view), ids(["a/util#function:go", "package:b"]));
         assert_eq!(
@@ -1423,9 +1606,8 @@ mod tests {
 
     #[test]
     fn a_scope_naming_no_element_leaves_the_whole_picture_standing() {
-        let plain = boundary_view(&fixture(), &Cut::uniform(Detail::Packages)).unwrap();
-        let stale =
-            boundary_view(&fixture(), &scoped(Detail::Packages, "package:gone", [])).unwrap();
+        let plain = boundary_view(&fixture(), &Cut::whole()).unwrap();
+        let stale = boundary_view(&fixture(), &scoped("package:gone", [])).unwrap();
         assert_eq!(plain, stale);
     }
 
@@ -1436,7 +1618,7 @@ mod tests {
             .add_relation(relation("package:b", "a/util", RelationKind::Contains))
             .unwrap();
         assert!(matches!(
-            boundary_view(&graph, &Cut::uniform(Detail::Packages)),
+            boundary_view(&graph, &Cut::whole()),
             Err(LensError::AmbiguousContainment { .. })
         ));
     }

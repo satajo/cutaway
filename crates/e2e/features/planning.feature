@@ -78,6 +78,10 @@ Feature: Planning on the boundary view
     And a package "model" at "crates/model"
     And a source file "crates/viewer/src/lib.rs" containing:
       """
+      mod wiring;
+      """
+    And a source file "crates/viewer/src/wiring.rs" containing:
+      """
       """
     And a source file "crates/model/src/lib.rs" containing:
       """

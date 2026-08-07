@@ -1,11 +1,11 @@
-//! What a change of the whole picture's detail carries across.
+//! What a change of the picture's cut carries across.
 //!
-//! A new detail is a new picture, not a new question. The reader who studies
-//! one boundary at packages studies the same boundary at modules; it merely
-//! appears as another box, and the connection between two boundaries appears
-//! under another name. Element ids hold across details by construction, and
-//! a rolled-up connection remembers the concrete relations behind it, so
-//! both subjects can be followed from one cut into the next.
+//! A new cut is a new picture, not a new question. The reader who studies
+//! one boundary closed studies the same boundary open; it merely appears as
+//! another box, and the connection between two boundaries appears under
+//! another name. Element ids hold across cuts by construction, and a
+//! rolled-up connection remembers the concrete relations behind it, so both
+//! subjects can be followed from one cut into the next.
 //!
 //! This module answers where a selection reappears. Every answer is a pure
 //! function of the two views and the full graph; the shell only applies
@@ -56,11 +56,10 @@ pub(crate) fn translated(
 
 /// Where a selected boundary reappears. The rules, in order:
 ///
-/// - A boundary the new picture holds answers as itself. The kind levels
-///   nest, so a finer cut keeps everything a coarser one showed.
+/// - A boundary the new picture holds answers as itself.
 /// - A boundary the new picture hides answers as the nearest boundary above
 ///   it, which is where its content rolled up to.
-/// - A boundary no visible boundary holds answers nothing.
+/// - A boundary no rendered boundary holds answers nothing.
 fn node_in(graph: &ArchitectureGraph, after: &BoundaryView, id: &ElementId) -> Option<ElementId> {
     focus::boundary_in_view(&after.graph, graph, id)
 }
@@ -68,7 +67,7 @@ fn node_in(graph: &ArchitectureGraph, after: &BoundaryView, id: &ElementId) -> O
 /// Where a selected connection reappears.
 ///
 /// A rolled-up connection is named by the boundaries it joins, and those
-/// change with the detail; the concrete dependencies behind it do not. The
+/// change with the cut; the concrete dependencies behind it do not. The
 /// connection therefore answers as the connection of the new picture
 /// standing for most of the same concrete dependencies.
 ///
@@ -138,7 +137,7 @@ fn most_alike<'a>(
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{Element, ElementKind, ElementName, RelationKind};
-    use cutaway_lenses::{Cut, Detail, boundary_view};
+    use cutaway_lenses::{Cut, boundary_view};
 
     use super::*;
 
@@ -228,27 +227,56 @@ mod tests {
         graph
     }
 
-    fn view(graph: &ArchitectureGraph, detail: Detail) -> BoundaryView {
-        boundary_view(graph, &Cut::uniform(detail)).unwrap()
+    /// The whole structure of the fixture open: every package and every
+    /// frame of a module, with the items still outside the vocabulary.
+    fn structure() -> Cut {
+        let mut cut = Cut::whole();
+        cut.open = ["package:a", "package:b", "package:c", "a/one", "c/one"]
+            .into_iter()
+            .map(id)
+            .collect();
+        cut.kinds = BTreeSet::from([ElementKind::Package, ElementKind::Module]);
+        cut
     }
 
-    fn crossing(from: Detail, to: Detail, selection: &Selection) -> Option<Carried> {
+    /// Everything closed: the project as boxes.
+    fn closed() -> Cut {
+        Cut::whole()
+    }
+
+    /// The structure open with every kind in the vocabulary, so the items
+    /// stand in the picture too.
+    fn everything() -> Cut {
+        let mut cut = structure();
+        cut.kinds = Cut::whole().kinds;
+        cut
+    }
+
+    /// Only the packages in the vocabulary: what a reader who hides every
+    /// finer kind is left with.
+    fn packages_alone() -> Cut {
+        let mut cut = Cut::whole();
+        cut.kinds = BTreeSet::from([ElementKind::Package]);
+        cut
+    }
+
+    fn view(graph: &ArchitectureGraph, cut: &Cut) -> BoundaryView {
+        boundary_view(graph, cut).unwrap()
+    }
+
+    fn crossing(from: &Cut, to: &Cut, selection: &Selection) -> Option<Carried> {
         let graph = graph();
         translated(&graph, &view(&graph, from), &view(&graph, to), selection)
     }
 
-    fn carried(from: Detail, to: Detail, selection: &Selection) -> Option<Selection> {
+    fn carried(from: &Cut, to: &Cut, selection: &Selection) -> Option<Selection> {
         crossing(from, to, selection).map(|carried| carried.selection)
     }
 
     #[test]
     fn a_selected_boundary_survives_a_coarser_cut_as_its_ancestor() {
         assert_eq!(
-            carried(
-                Detail::Modules,
-                Detail::Packages,
-                &Selection::Node(id("a/one"))
-            ),
+            carried(&structure(), &closed(), &Selection::Node(id("a/one"))),
             Some(Selection::Node(id("package:a")))
         );
     }
@@ -256,24 +284,16 @@ mod tests {
     #[test]
     fn a_selected_boundary_a_finer_cut_still_shows_stays_the_selection() {
         assert_eq!(
-            carried(
-                Detail::Packages,
-                Detail::Modules,
-                &Selection::Node(id("package:a"))
-            ),
+            carried(&closed(), &structure(), &Selection::Node(id("package:a"))),
             Some(Selection::Node(id("package:a"))),
-            "every detail showing modules shows the packages around them"
+            "opening the packages keeps the packages themselves in the picture"
         );
     }
 
     #[test]
     fn a_boundary_that_opens_into_a_frame_stays_the_selection_itself() {
         assert_eq!(
-            carried(
-                Detail::Modules,
-                Detail::Items,
-                &Selection::Node(id("a/one"))
-            ),
+            carried(&structure(), &everything(), &Selection::Node(id("a/one"))),
             Some(Selection::Node(id("a/one"))),
             "the reader selected the boundary, not what it holds"
         );
@@ -283,8 +303,8 @@ mod tests {
     fn a_boundary_no_visible_boundary_holds_carries_nothing() {
         assert_eq!(
             carried(
-                Detail::Modules,
-                Detail::Packages,
+                &structure(),
+                &packages_alone(),
                 &Selection::Node(id("stray"))
             ),
             None,
@@ -296,8 +316,8 @@ mod tests {
     fn a_selected_connection_translates_through_its_concrete_relations() {
         assert_eq!(
             carried(
-                Detail::Modules,
-                Detail::Packages,
+                &structure(),
+                &closed(),
                 &Selection::Edge(depends("a/one", "b/one"))
             ),
             Some(Selection::Edge(depends("package:a", "package:b")))
@@ -308,8 +328,8 @@ mod tests {
     fn a_connection_answers_with_the_finer_one_standing_for_most_of_it() {
         assert_eq!(
             carried(
-                Detail::Packages,
-                Detail::Modules,
+                &closed(),
+                &structure(),
                 &Selection::Edge(depends("package:a", "package:b"))
             ),
             Some(Selection::Edge(depends("a/one", "b/one"))),
@@ -320,8 +340,8 @@ mod tests {
     #[test]
     fn a_partial_edge_translation_says_so() {
         let piece = crossing(
-            Detail::Packages,
-            Detail::Modules,
+            &closed(),
+            &structure(),
             &Selection::Edge(depends("package:a", "package:b")),
         )
         .expect("the connection reappears between the modules behind it")
@@ -334,8 +354,8 @@ mod tests {
     #[test]
     fn a_connection_that_came_along_whole_reports_no_piece() {
         let carried = crossing(
-            Detail::Modules,
-            Detail::Packages,
+            &structure(),
+            &closed(),
             &Selection::Edge(depends("a/one", "b/one")),
         )
         .expect("the connection reappears between the packages above it");
@@ -350,8 +370,8 @@ mod tests {
     fn a_connection_the_coarser_picture_swallows_leaves_the_boundary_it_departs_selected() {
         assert_eq!(
             carried(
-                Detail::Modules,
-                Detail::Packages,
+                &structure(),
+                &closed(),
                 &Selection::Edge(depends("a/one", "a/two"))
             ),
             Some(Selection::Node(id("package:a"))),
@@ -363,7 +383,7 @@ mod tests {
     fn a_connection_with_nothing_concrete_behind_it_survives_where_both_its_ends_do() {
         let planned = Selection::Edge(depends("b/one", "a/two"));
         assert_eq!(
-            carried(Detail::Modules, Detail::Items, &planned),
+            carried(&structure(), &everything(), &planned),
             Some(planned.clone()),
             "a planned dependency stands for itself alone"
         );

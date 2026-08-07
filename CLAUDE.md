@@ -35,15 +35,17 @@ crates/
                        Containment hierarchy: project ⊃ package ⊃ module ⊃ item.
   inspection/          Application core: builds the model from sources.
     src/ports/         SourceTree, SourceAnalyzer. One file per port.
-  lenses/              Domain: boundary views - rollups of the graph at a chosen
-                       detail level (packages, modules, items), with provenance
-                       per rolled-up edge. Edges attach to the nearest visible
-                       boundary, leaves and frames alike: an edge ending at a
-                       frame speaks about the frame's own code or the frame as
-                       a whole, and what passes between a boundary and its own
-                       contents stays inside it. A Cut carries per-boundary
-                       overrides on top of the global detail, so one boundary
-                       opens or collapses while the rest stays put.
+  lenses/              Domain: boundary views - rollups of the graph along a
+                       Cut, with provenance per rolled-up edge. A Cut holds two
+                       independent decisions: the frontier (the set of open
+                       boundaries; opening one reveals exactly one layer) and
+                       the vocabulary (the element kinds the picture renders;
+                       a hidden kind is transparent, so its contents hoist to
+                       the nearest rendered ancestor). Edges attach to the
+                       nearest rendered boundary, leaves and frames alike: an
+                       edge ending at a frame speaks about the frame's own
+                       code or the frame as a whole, and what passes between a
+                       boundary and its own contents stays inside it.
   comparison/          Domain: deltas between two architecture versions.
   planning/            Planning core: plans, change sets, notes, annotations.
     src/ports/         PlanStore.

@@ -1,11 +1,12 @@
 //! The search palette: a name typed, and the picture opens where it lives.
 //!
 //! The palette searches the whole architecture, never the picture. A reader
-//! who cuts the project at packages still asks for one type by name, and the
-//! answer must be that type rather than a shrug. Accepting a result
+//! who reads the project as closed boxes still asks for one type by name,
+//! and the answer must be that type rather than a shrug. Accepting a result
 //! therefore opens every boundary between the picture and the element - one
-//! override per step of the containment chain - and only then makes the
-//! element the selection the camera moves to.
+//! open flag per step of the containment chain, and the element's kind into
+//! the vocabulary - and only then makes the element the selection the
+//! camera moves to.
 //!
 //! A query matches a name whose letters it holds in order, gaps allowed, in
 //! either case. The ranking follows how directly the name answers: the name
@@ -14,14 +15,13 @@
 //! Ties go to the shorter name, which is the narrower answer, and then to
 //! the id, so the same query always answers the same way.
 //!
-//! Matching, ranking, the container path of a result and the override
+//! Matching, ranking, the container path of a result and the opening
 //! planning are pure functions of the graph and the query. The painter at
 //! the end of this file only shows what they answer.
 
 use std::collections::BTreeSet;
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind};
-use cutaway_lenses::Detail;
 use eframe::egui;
 use eframe::egui::text::{CCursor, CCursorRange};
 
@@ -247,17 +247,15 @@ fn container_of(graph: &ArchitectureGraph, containment: &Containment, id: &Eleme
     names.join(glyph::CONTAINER_STEP)
 }
 
-/// The overrides that open a picture down to one element: every boundary
-/// above it opens far enough to show the next step toward it.
-///
-/// The plan reads outermost first, as opening one box after another does. A
-/// boundary no detail ever shows - the project root - carries no override,
-/// because an override governs the inside of a boundary the reader can see,
-/// and that one never appears.
-pub(crate) fn overrides_revealing(
+/// The boundaries that open a picture down to one element: every boundary
+/// above it, outermost first, as opening one box after another does. A
+/// transparent boundary - the project root, a kind outside the vocabulary -
+/// gates nothing, so its flag is harmless and every ancestor is named
+/// alike.
+pub(crate) fn boundaries_revealing(
     graph: &ArchitectureGraph,
     target: &ElementId,
-) -> Vec<(ElementId, Detail)> {
+) -> Vec<ElementId> {
     let containment = Containment::of(graph);
     let mut planned = Vec::new();
     // Containment is a tree, but a walk that trusts that and meets a cycle
@@ -268,17 +266,7 @@ pub(crate) fn overrides_revealing(
         if !seen.insert(frame) {
             break;
         }
-        let step = graph
-            .element(current)
-            .and_then(|element| Detail::showing(element.kind));
-        let frame_shows = graph
-            .element(frame)
-            .is_some_and(|element| Detail::showing(element.kind).is_some());
-        if let Some(detail) = step
-            && frame_shows
-        {
-            planned.push((frame.clone(), detail));
-        }
+        planned.push(frame.clone());
         current = frame;
     }
     planned.reverse();
@@ -652,27 +640,28 @@ mod tests {
     }
 
     #[test]
-    fn revealing_a_hidden_item_plans_overrides_down_its_ancestry() {
+    fn revealing_a_hidden_item_opens_its_whole_ancestry() {
         assert_eq!(
-            overrides_revealing(
+            boundaries_revealing(
                 &graph(),
                 &id("inspection/ports/source_tree.rs#type:SourceTree")
             ),
             vec![
-                (id("package:inspection"), Detail::Modules),
-                (id("inspection/ports.rs"), Detail::Modules),
-                (id("inspection/ports/source_tree.rs"), Detail::Items),
+                id("project:cutaway"),
+                id("package:inspection"),
+                id("inspection/ports.rs"),
+                id("inspection/ports/source_tree.rs"),
             ],
-            "each boundary opens far enough to show the next step toward the item"
+            "every boundary on the way opens, the transparent root included"
         );
     }
 
     #[test]
-    fn revealing_a_package_plans_no_overrides_at_all() {
+    fn revealing_a_package_opens_only_the_root_above_it() {
         assert_eq!(
-            overrides_revealing(&graph(), &id("package:inspection")),
-            vec![],
-            "every picture shows packages, and the root governs nothing"
+            boundaries_revealing(&graph(), &id("package:inspection")),
+            vec![id("project:cutaway")],
+            "a flag on the transparent root gates nothing"
         );
     }
 }

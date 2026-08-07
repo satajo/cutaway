@@ -7,7 +7,7 @@ use cutaway_architecture::{
     ArchitectureGraph, ElementId, ElementKind, ElementName, Relation, RelationKind,
 };
 use cutaway_inspection::inspect;
-use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
+use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{
     GroupStanding, Modification, ModificationKind, Note, Plan, ProposedChange, SplitParts, Subject,
@@ -89,6 +89,12 @@ fn element_kind(kind: &str) -> Result<ElementKind, String> {
     }
 }
 
+/// Opens every boundary of one architecture: the scenario levels above
+/// packages read the whole tree at once.
+fn open_everything(cut: &mut Cut, graph: &ArchitectureGraph) {
+    cut.open = graph.elements().map(|element| element.id.clone()).collect();
+}
+
 /// Drives the application cores in-process, with the same analyzer the
 /// composition root wires into the real application.
 #[derive(Debug, Default)]
@@ -137,7 +143,7 @@ impl InProcessDriver {
         let view = self.view.as_ref().ok_or("no boundary view yet")?;
         let cut = self.cut.as_mut().ok_or("no boundary view yet")?;
         if !step(cut, view, &id) {
-            return Err(format!("the detail inside {name} cannot go any further"));
+            return Err(format!("the boundary {name} opens or closes no further"));
         }
         self.rebuild_view()
     }
@@ -238,18 +244,26 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn view_boundaries(&mut self, level: &str) -> Result<(), String> {
-        let detail = match level {
-            "packages" => Detail::Packages,
-            "modules" => Detail::Modules,
-            "items" => Detail::Items,
+        let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
+        // The scenario levels read as cuts: packages is the whole project as
+        // closed boxes, modules opens the whole tree with the structural
+        // kinds in the vocabulary, and items opens it with every kind.
+        let viewed = self.plan.viewed_architecture(graph);
+        let mut cut = Cut::whole();
+        match level {
+            "packages" => {}
+            "modules" => {
+                open_everything(&mut cut, &viewed);
+                cut.kinds = BTreeSet::from([ElementKind::Package, ElementKind::Module]);
+            }
+            "items" => open_everything(&mut cut, &viewed),
             other => return Err(format!("unknown detail level {other}")),
-        };
-        // A new detail for the whole picture drops the boundaries opened or
-        // closed under the old one: those decisions answered the old detail.
-        // The scope stands through it: a detail says how a boundary is read,
-        // never which boundary is read.
+        }
+        // A fresh viewing drops the boundaries opened or closed before it:
+        // those decisions answered the picture they were made in. The scope
+        // stands through it: a viewing says how boundaries are read, never
+        // which boundary is read.
         let scope = self.cut.as_ref().and_then(|cut| cut.scope.clone());
-        let mut cut = Cut::uniform(detail);
         cut.focus(scope);
         self.cut = Some(cut);
         self.rebuild_view()

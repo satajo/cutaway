@@ -4,13 +4,15 @@
 //! build sandbox strips from the source. Run it from a checkout with
 //! `cargo test -p cutaway -- --ignored`.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use cutaway_analyzer_go::GoSourceAnalyzer;
 use cutaway_analyzer_rust::RustSourceAnalyzer;
 use cutaway_analyzer_typescript::TypeScriptSourceAnalyzer;
+use cutaway_architecture::ElementKind;
 use cutaway_inspection::inspect;
-use cutaway_lenses::{Cut, Detail, boundary_view};
+use cutaway_lenses::{Cut, boundary_view};
 use cutaway_source_git::GitSourceTree;
 
 #[test]
@@ -32,7 +34,7 @@ fn the_boundary_lens_shows_cutaways_own_packages() {
     )
     .unwrap();
 
-    let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
+    let view = boundary_view(&graph, &Cut::whole()).unwrap();
     let packages: Vec<&str> = view
         .graph
         .elements()
@@ -47,11 +49,23 @@ fn the_boundary_lens_shows_cutaways_own_packages() {
         "the workspace crates depend on each other"
     );
 
-    for detail in Detail::ALL {
-        let view = boundary_view(&graph, &Cut::uniform(detail)).unwrap();
+    // Every reading keeps the workspace's own dependencies in the picture:
+    // the closed boxes, the opened structure, and the opened structure with
+    // the items in the vocabulary.
+    let mut structure = Cut::whole();
+    structure.open = graph.elements().map(|element| element.id.clone()).collect();
+    structure.kinds = BTreeSet::from([ElementKind::Package, ElementKind::Module]);
+    let mut everything = Cut::whole();
+    everything.open.clone_from(&structure.open);
+    for (reading, cut) in [
+        ("closed", Cut::whole()),
+        ("structural", structure),
+        ("complete", everything),
+    ] {
+        let view = boundary_view(&graph, &cut).unwrap();
         assert!(
             !view.provenance.is_empty(),
-            "the {detail:?} detail shows connections"
+            "the {reading} reading shows connections"
         );
     }
 }

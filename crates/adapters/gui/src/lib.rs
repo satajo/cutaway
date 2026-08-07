@@ -3,8 +3,8 @@
 //! The GUI drives the application core and knows nothing about where
 //! architectures or plans come from: the composition root hands it a
 //! [`ProjectOpener`] and every opened project carries its own
-//! [`PlanStore`]. The boundary canvas shows the architecture at an
-//! adjustable level of detail; the user severs, draws, and annotates
+//! [`PlanStore`]. The boundary canvas shows the architecture cut along a
+//! frontier of open boundaries; the user severs, draws, and annotates
 //! connections, marks whole boundaries for removal, and plans new ones, and
 //! every markup lands in the project's plan immediately.
 //!
@@ -17,25 +17,24 @@
 //! amber: a modification states intent for whoever implements the plan and
 //! redraws nothing, so only the mark can say it.
 //!
-//! The toolbar's three stops set the detail of the whole picture, and single
-//! boundaries open or close on top of it: a double click on a boundary, or
-//! the inspector's Expand and Collapse, moves that one boundary a step.
-//! Choosing another stop drops those decisions, because a new whole is a new
-//! question, and carries the selection across, because the subject of the
-//! question stays the reader's.
+//! The toolbar's chips set the vocabulary of the picture - which element
+//! kinds it renders at all - and the frontier says how deep it reaches: a
+//! double click on a boundary, or the inspector's Expand and Collapse,
+//! opens or closes one layer of that boundary, and the layer buttons step
+//! the whole frontier at once. Every such change carries the selection
+//! across, because the subject of the question stays the reader's.
 //!
 //! Focusing scopes the picture to one boundary: it becomes the whole
 //! picture, its dependency partners stand at the border as single closed
-//! boxes, and the rest of the project leaves. The scope outlives every stop
-//! and every expansion - those say how the boundary is read, not which
-//! boundary is read - and the toolbar names it until the reader shows
+//! boxes, and the rest of the project leaves. The scope outlives the
+//! vocabulary and every expansion - those say how the boundary is read, not
+//! which boundary is read - and the toolbar names it until the reader shows
 //! everything again.
 
 mod bundle;
 mod camera;
 mod canvas;
 mod continuity;
-mod detail;
 mod focus;
 mod glyph;
 mod inspector;
@@ -45,6 +44,7 @@ mod minimap;
 mod palette;
 mod routing;
 mod summary;
+mod vocabulary;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -53,7 +53,7 @@ use std::sync::mpsc;
 use cutaway_architecture::{
     ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
 };
-use cutaway_lenses::{BoundaryView, Cut, Detail, boundary_view};
+use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{
     GroupStanding, Modification, ModificationKind, Note, Plan, PlanError, ProposedChange,
@@ -121,14 +121,14 @@ fn subject_of(layout: &Layout, selection: &Selection) -> Option<Rect> {
     }
 }
 
-/// What the toolbar says when a connection carried into a new detail only in
-/// part: the new picture draws the dependencies behind it as several
+/// What the toolbar says when a connection carried into a new picture only
+/// in part: the new picture draws the dependencies behind it as several
 /// connections, and the selection follows the largest of them. Naming the
 /// connection the reader asked about tells them which question the picture
 /// is still answering.
 fn following_a_piece(from: &str, to: &str, piece: &Piece) -> String {
     format!(
-        "Following {from} {} {to}: largest piece at this detail, {} of {} dependencies.",
+        "Following {from} {} {to}: largest piece in this picture, {} of {} dependencies.",
         glyph::OUTWARD,
         piece.carried,
         piece.whole
@@ -163,8 +163,9 @@ struct Session {
     viewed: ArchitectureGraph,
     plan: Plan,
     store: Box<dyn PlanStore>,
-    /// Where the picture cuts the hierarchy: the detail of the whole, and
-    /// the boundaries the reader opened or closed on top of it.
+    /// Where the picture cuts the hierarchy: the frontier of open
+    /// boundaries, the vocabulary of kinds it renders, and the boundary the
+    /// picture is about.
     cut: Cut,
     /// The new names the plan gives elements. Both the arrangement and the
     /// paint read the labels, so the renames resolve once per rebuild.
@@ -251,7 +252,7 @@ impl Session {
             graph: project.graph,
             plan,
             store: project.store,
-            cut: Cut::uniform(Detail::Packages),
+            cut: Cut::whole(),
             renames: Renames::default(),
             scene: Err("not built yet".to_owned()),
             generation: 0,
@@ -275,8 +276,8 @@ impl Session {
     }
 
     /// The element behind an id, read from the architecture the picture
-    /// shows: it holds every element a view can draw, so an element below
-    /// the current detail - and a planned one - still has a name.
+    /// shows: it holds every element a view can draw, so an element the
+    /// picture does not draw - and a planned one - still has a name.
     fn element_of(&self, id: &ElementId) -> Option<&Element> {
         self.viewed.element(id)
     }
@@ -336,35 +337,25 @@ impl Session {
         }
     }
 
-    /// Cuts the whole picture at one detail again, dropping every boundary
-    /// the reader opened or closed: those decisions answered the detail they
-    /// were made in.
+    /// Repaints the picture after a change of vocabulary or of the whole
+    /// frontier, carrying the selection across.
     ///
-    /// The subject of the reading is not dropped with them. Element ids hold
-    /// across details, so whatever stood selected reappears as another box or
-    /// another connection, and the camera travels to where it reappeared.
-    /// Nothing selected leaves the camera where it is, unless the new picture
-    /// no longer meets it at all.
+    /// Element ids hold across cuts, so whatever stood selected reappears as
+    /// another box or another connection, and the camera travels to where it
+    /// reappeared. Nothing selected leaves the camera where it is, unless
+    /// the new picture no longer meets it at all.
     ///
     /// A connection can reappear as several, and then the selection follows
     /// the largest piece alone; the toolbar says so, because the reader
     /// asked about the whole.
-    fn recut(&mut self, detail: Detail) {
-        if self.cut.detail == detail {
-            return;
-        }
-        // A new detail is a new question, and the answers to the last one no
+    fn recut(&mut self) {
+        // A new cut is a new question, and the answers to the last one no
         // longer stand.
         self.status = None;
         let before = self
             .selection
             .take()
             .and_then(|selection| Some((self.scene.as_ref().ok()?.view.clone(), selection)));
-        // The scope survives the new whole: a detail says how the reader
-        // reads a boundary, never which boundary they are reading.
-        let scope = self.cut.scope.clone();
-        self.cut = Cut::uniform(detail);
-        self.cut.focus(scope);
         self.rebuild_view();
         let carried = before.and_then(|(before, selection)| {
             let after = self.scene.as_ref().ok()?;
@@ -387,7 +378,7 @@ impl Session {
             self.select(Some(selection.clone()));
             self.reveal(&selection);
         } else {
-            // Each detail lays the picture out anew, so the old camera
+            // Every cut lays the picture out anew, so the old camera
             // coordinates point at arbitrary new content: without a subject
             // to follow, only a fresh fit shows something meaningful.
             self.select(None);
@@ -395,21 +386,47 @@ impl Session {
         }
     }
 
-    /// Opens the boundary one detail step deeper than what it shows now.
+    /// Adds one kind to the picture's vocabulary, or takes it out.
+    fn toggle_kind(&mut self, kind: ElementKind) {
+        if !self.cut.kinds.remove(&kind) {
+            self.cut.kinds.insert(kind);
+        }
+        self.recut();
+    }
+
+    /// Opens every boundary the picture offers to open: the whole frontier
+    /// steps one layer deeper.
+    fn open_layer(&mut self) {
+        let Ok(scene) = &self.scene else {
+            return;
+        };
+        if self.cut.expand_frontier(&scene.view) {
+            self.recut();
+        }
+    }
+
+    /// Closes the innermost open boundaries: the frontier steps one layer
+    /// back.
+    fn close_layer(&mut self) {
+        let Ok(scene) = &self.scene else {
+            return;
+        };
+        if self.cut.collapse_frontier(&scene.view) {
+            self.recut();
+        }
+    }
+
+    /// Opens the boundary, revealing one layer of its contents.
     fn expand(&mut self, id: &ElementId) {
-        self.step_detail(id, Cut::expand);
+        self.step(id, Cut::expand);
     }
 
-    /// Closes the boundary one detail step back toward a single box.
+    /// Closes the boundary back into a single box.
     fn collapse(&mut self, id: &ElementId) {
-        self.step_detail(id, Cut::collapse);
+        self.step(id, Cut::collapse);
     }
 
-    fn step_detail(
-        &mut self,
-        id: &ElementId,
-        step: fn(&mut Cut, &BoundaryView, &ElementId) -> bool,
-    ) {
+    fn step(&mut self, id: &ElementId, step: fn(&mut Cut, &BoundaryView, &ElementId) -> bool) {
         let Ok(scene) = &self.scene else {
             return;
         };
@@ -452,15 +469,6 @@ impl Session {
             return true;
         };
         Containment::of(&self.viewed).subtree(scope).contains(id)
-    }
-
-    /// The detail governing what a boundary shows inside it; None while the
-    /// picture holds no such boundary.
-    fn detail_within(&self, id: &ElementId) -> Option<Detail> {
-        self.scene
-            .as_ref()
-            .ok()
-            .and_then(|scene| scene.view.detail_within.get(id).copied())
     }
 
     fn shows(&self, id: &ElementId) -> bool {
@@ -532,7 +540,7 @@ impl Session {
 
     /// Travels until the whole subject of a selection stands in front of the
     /// reader: a selection made beside the picture, or carried into a
-    /// picture cut at another detail, must be findable in it. A subject
+    /// picture cut another way, must be findable in it. A subject
     /// already in comfortable view moves nothing.
     fn reveal(&mut self, selection: &Selection) {
         let (Some(at), Ok(scene)) = (self.camera.now(), &self.scene) else {
@@ -564,10 +572,11 @@ impl Session {
     /// Puts one element of the full architecture in front of the reader.
     ///
     /// A search reaches past the picture, so the element found is often
-    /// finer than the detail the picture cuts at. The cut then opens down to
-    /// it - one override per boundary on the way, exactly as expanding each
-    /// of them by hand would - and the element itself becomes the selection
-    /// the camera moves to. Where even that leaves it hidden, the nearest
+    /// hidden inside closed boundaries. The cut then opens down to it - one
+    /// open flag per boundary on the way, exactly as expanding each of them
+    /// by hand would - and the element's kind joins the vocabulary where it
+    /// was outside it, and the element itself becomes the selection the
+    /// camera moves to. Where even that leaves it hidden, the nearest
     /// boundary above it answers instead, so the reader always lands
     /// somewhere the picture holds.
     fn locate(&mut self, target: &ElementId) {
@@ -578,14 +587,13 @@ impl Session {
             self.unfocus();
         }
         if !self.shows(target) {
-            for (boundary, detail) in palette::overrides_revealing(&self.graph, target) {
+            for boundary in palette::boundaries_revealing(&self.graph, target) {
                 // A boundary the reader closed opens again: the search is
                 // the later question, and the later question wins.
-                self.cut
-                    .overrides
-                    .entry(boundary)
-                    .and_modify(|open| *open = (*open).max(detail))
-                    .or_insert(detail);
+                self.cut.open.insert(boundary);
+            }
+            if let Some(element) = self.graph.element(target) {
+                self.cut.kinds.insert(element.kind);
             }
             self.rebuild_view();
         }
@@ -1311,8 +1319,8 @@ impl eframe::App for CutawayApp {
             // one of this frame: an open palette answers to keys of its own,
             // and a digit typed into its field is part of a name.
             if !session.palette.is_open() {
-                if let Some(detail) = detail::requested(ui.ctx()) {
-                    session.recut(detail);
+                if let Some(request) = vocabulary::requested(ui.ctx()) {
+                    obey(session, request);
                 }
                 if camera::refit_requested(ui.ctx()) {
                     session.refit();
@@ -1340,6 +1348,15 @@ impl eframe::App for CutawayApp {
                 }
             }
         }
+    }
+}
+
+/// Carries out what a key or a toolbar button asked of the picture.
+fn obey(session: &mut Session, request: vocabulary::Request) {
+    match request {
+        vocabulary::Request::Toggle(kind) => session.toggle_kind(kind),
+        vocabulary::Request::OpenLayer => session.open_layer(),
+        vocabulary::Request::CloseLayer => session.close_layer(),
     }
 }
 
@@ -1393,18 +1410,26 @@ fn invitation(ui: &mut egui::Ui, picking: bool) -> bool {
 /// and leaves the mode by clicking the same label again.
 fn project_tools(ui: &mut egui::Ui, session: &mut Session) {
     ui.separator();
-    ui.label("Detail");
-    if let Some(chosen) = detail::stops(ui, session.cut.detail) {
-        session.recut(chosen);
+    ui.label("Show");
+    if let Some(kind) = vocabulary::chips(ui, &session.cut.kinds) {
+        session.toggle_kind(kind);
     }
-    // What the reader opened or closed by hand departs from the stop beside
-    // it, so the stop alone would misname the picture.
-    if let Some(departures) = detail::departures(&session.cut) {
-        ui.label(egui::RichText::new(departures).weak().small());
+    if let Some(request) = vocabulary::layer_buttons(ui) {
+        obey(session, request);
+    }
+    // How deep the reader's openings reach, so the row of closed chips alone
+    // never misnames the picture.
+    let open = session
+        .scene
+        .as_ref()
+        .map(|scene| scene.view.open.len())
+        .unwrap_or_default();
+    if let Some(standing) = vocabulary::standing(open) {
+        ui.label(egui::RichText::new(standing).weak().small());
     }
     // A scoped picture leaves the rest of the project out, and a reader who
     // forgets that reads a whole project into one package. The scope
-    // therefore names itself beside the stops, where the picture's own terms
+    // therefore names itself beside the chips, where the picture's own terms
     // stand, together with the way back out.
     if let Some(scope) = session.cut.scope.clone() {
         ui.separator();
@@ -1612,6 +1637,13 @@ mod tests {
         graph
     }
 
+    /// A cut with the named boundaries open and the default vocabulary.
+    fn opened<const N: usize>(open: [&str; N]) -> Cut {
+        let mut cut = Cut::whole();
+        cut.open = open.into_iter().map(id).collect();
+        cut
+    }
+
     fn visuals(graph: &ArchitectureGraph, plan: &Plan, cut: &Cut) -> Vec<EdgeVisual> {
         let view = boundary_view(&plan.viewed_architecture(graph), cut).unwrap();
         edge_visuals(&view, plan)
@@ -1640,7 +1672,7 @@ mod tests {
         let statuses = statuses(
             &two_packages(),
             &removing_package_a(),
-            &Cut::uniform(Detail::Modules),
+            &opened(["package:a", "package:b"]),
         );
         for inside in ["package:a", "a/one", "a/two"] {
             assert_eq!(
@@ -1672,7 +1704,7 @@ mod tests {
             },
         );
 
-        let statuses = statuses(&two_packages(), &plan, &Cut::uniform(Detail::Modules));
+        let statuses = statuses(&two_packages(), &plan, &opened(["package:a", "package:b"]));
         assert_eq!(statuses.get(&id("package:a")), Some(&NodeStatus::Modified));
         assert_eq!(
             statuses.get(&id("a/one")),
@@ -1686,7 +1718,7 @@ mod tests {
         let mut plan = removing_package_a();
         modifying(&mut plan, "package:a", ModificationKind::Rework);
 
-        let statuses = statuses(&two_packages(), &plan, &Cut::uniform(Detail::Modules));
+        let statuses = statuses(&two_packages(), &plan, &opened(["package:a", "package:b"]));
         assert_eq!(
             statuses.get(&id("package:a")),
             Some(&NodeStatus::Removed),
@@ -1711,7 +1743,7 @@ mod tests {
     #[test]
     fn a_planned_element_stands_in_the_picture_marked_as_planned() {
         let plan = planning_a_module("package:a", "wiring");
-        let statuses = statuses(&two_packages(), &plan, &Cut::uniform(Detail::Modules));
+        let statuses = statuses(&two_packages(), &plan, &opened(["package:a", "package:b"]));
         assert_eq!(
             statuses.get(&id("package:a/wiring")),
             Some(&NodeStatus::Added)
@@ -1728,7 +1760,7 @@ mod tests {
         .unwrap();
         let graph = two_packages();
 
-        let fine = visuals(&graph, &plan, &Cut::uniform(Detail::Modules));
+        let fine = visuals(&graph, &plan, &opened(["package:a", "package:b"]));
         assert!(
             fine.iter()
                 .any(|edge| edge.relation == depends("b/one", "package:a/wiring")
@@ -1736,7 +1768,7 @@ mod tests {
             "the planned element is in the viewed graph, so the lens draws to it: {fine:?}"
         );
 
-        let coarse = visuals(&graph, &plan, &Cut::uniform(Detail::Packages));
+        let coarse = visuals(&graph, &plan, &Cut::whole());
         assert!(
             coarse
                 .iter()
@@ -1758,7 +1790,7 @@ mod tests {
     #[test]
     fn a_connection_with_every_dependency_severed_draws_as_severed() {
         let plan = removing(&[depends("a/one", "b/one"), depends("a/two", "b/one")]);
-        let edges = visuals(&two_packages(), &plan, &Cut::uniform(Detail::Packages));
+        let edges = visuals(&two_packages(), &plan, &Cut::whole());
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].status, EdgeStatus::Severed);
         assert_eq!(edges[0].weight, 2);
@@ -1767,7 +1799,7 @@ mod tests {
     #[test]
     fn a_connection_with_part_of_its_dependencies_severed_draws_the_partial_mark() {
         let plan = removing(&[depends("a/one", "b/one")]);
-        let edges = visuals(&two_packages(), &plan, &Cut::uniform(Detail::Packages));
+        let edges = visuals(&two_packages(), &plan, &Cut::whole());
         assert_eq!(
             edges[0].status,
             EdgeStatus::PartiallySevered {
@@ -1780,12 +1812,7 @@ mod tests {
     #[test]
     fn a_planned_removal_keeps_its_mark_when_the_target_boundary_opens() {
         let plan = removing(&[depends("a/one", "b/one"), depends("a/two", "b/one")]);
-        let opened = Cut {
-            detail: Detail::Packages,
-            overrides: BTreeMap::from([(id("package:b"), Detail::Modules)]),
-            scope: None,
-        };
-        let edges = visuals(&two_packages(), &plan, &opened);
+        let edges = visuals(&two_packages(), &plan, &opened(["package:b"]));
         assert_eq!(edges.len(), 1);
         assert_eq!(
             edges[0].relation,
@@ -1805,12 +1832,12 @@ mod tests {
         plan.propose(ProposedChange::AddRelation(depends("a/one", "b/one")))
             .unwrap();
 
-        let coarse = visuals(&graph, &plan, &Cut::uniform(Detail::Packages));
+        let coarse = visuals(&graph, &plan, &Cut::whole());
         assert_eq!(coarse.len(), 1);
         assert_eq!(coarse[0].relation, depends("package:a", "package:b"));
         assert_eq!(coarse[0].status, EdgeStatus::Drawn);
 
-        let fine = visuals(&graph, &plan, &Cut::uniform(Detail::Modules));
+        let fine = visuals(&graph, &plan, &opened(["package:a", "package:b"]));
         assert_eq!(fine.len(), 1);
         assert_eq!(fine[0].relation, depends("a/one", "b/one"));
         assert_eq!(fine[0].status, EdgeStatus::Drawn);
@@ -1826,7 +1853,7 @@ mod tests {
         plan.propose(ProposedChange::AddRelation(depends("a/one", "package:b")))
             .unwrap();
 
-        let edges = visuals(&graph, &plan, &Cut::uniform(Detail::Modules));
+        let edges = visuals(&graph, &plan, &opened(["package:a", "package:b"]));
         assert_eq!(
             edges.len(),
             1,
@@ -1850,8 +1877,8 @@ mod tests {
         assert_eq!(
             note,
             format!(
-                "Following cutaway-gui {} cutaway-architecture: largest piece at this \
-                 detail, 4 of 11 dependencies.",
+                "Following cutaway-gui {} cutaway-architecture: largest piece in this \
+                 picture, 4 of 11 dependencies.",
                 glyph::OUTWARD
             )
         );

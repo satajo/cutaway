@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, ElementName, Relation};
-use cutaway_lenses::{BoundaryView, Detail};
+use cutaway_lenses::BoundaryView;
 use cutaway_planning::ModificationKind;
 use eframe::egui;
 
@@ -20,7 +20,7 @@ use crate::canvas::{self, EdgeStatus};
 use crate::focus::Containment;
 use crate::glyph;
 use crate::label::{Labels, kind_name, kind_symbol};
-use crate::{Modifying, Scene, Selection, Session, Standing, detail, focus};
+use crate::{Modifying, Scene, Selection, Session, Standing, focus};
 
 /// How many rows one list shows before it names the rest. The cap is a
 /// display limit and not a data limit: the count above every list still
@@ -130,12 +130,13 @@ fn help(ui: &mut egui::Ui) {
          parts. What passes between a boundary and its own contents stays inside it.",
     );
     ui.label(
-        "Double-click a boundary to open it one level deeper than the rest of the \
-         picture; select it to expand or collapse it from here.",
+        "Double-click a boundary to open one layer of its contents; select it to \
+         expand or collapse it from here.",
     );
     ui.label(
-        "Keys 1, 2 and 3 cut the whole picture at packages, modules or items; \
-         whatever you selected carries over to the new one.",
+        "Keys 1-4 toggle packages, modules, types and functions in and out of the \
+         picture; + and - open and close a whole layer of boundaries. Whatever you \
+         selected carries over to the new picture.",
     );
     ui.label(
         "Press F to focus the picture on the selected boundary; Escape shows \
@@ -179,7 +180,7 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     ui.small(egui::RichText::new(id.as_str()).monospace());
     plan_controls(ui, session, id);
     modify_controls(ui, session, id);
-    detail_controls(ui, session, id);
+    opening_controls(ui, session, id);
     note_editor(ui, session);
     add_controls(
         ui,
@@ -517,30 +518,32 @@ fn add_controls(
     }
 }
 
-/// Opens or closes this one boundary on top of the detail the rest of the
-/// picture follows, so the project stays whole while the boundary under
-/// study shows its parts. Double-clicking the boundary expands it too.
+/// Opens or closes this one boundary while the rest of the picture stays
+/// put, so the project stays whole while the boundary under study shows its
+/// parts. Double-clicking the boundary opens it too.
 ///
 /// Scoping the picture to the boundary stands beside them: it is the other
 /// way of reading one boundary closely, and the only way of reading a
 /// partner standing closed at the border of a scope.
-fn detail_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
-    let (Some(within), Ok(Scene { view, .. })) = (session.detail_within(id), &session.scene) else {
+fn opening_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
+    let Ok(Scene { view, .. }) = &session.scene else {
         return;
     };
+    if view.graph.element(id).is_none() {
+        return;
+    }
     let stub = view.stubs.contains(id);
+    let open = view.open.contains(id);
+    let openable = view.openable.contains(id);
     let line = if stub {
         "Stands whole at the border of the focus.".to_owned()
     } else {
-        inside(&view.graph, &session.graph, id, within)
+        standing_line(open, openable)
     };
     ui.separator();
     ui.label(line);
     ui.horizontal(|ui| {
-        let expand = ui.add_enabled(
-            !stub && within.deeper().is_some(),
-            egui::Button::new("Expand"),
-        );
+        let expand = ui.add_enabled(openable, egui::Button::new("Expand"));
         // A partner is closed because the picture is about the scope, not
         // because it holds nothing; the button says which of the two it is.
         let expand = if stub {
@@ -552,10 +555,7 @@ fn detail_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
             session.expand(id);
         }
         if ui
-            .add_enabled(
-                !stub && within.shallower().is_some(),
-                egui::Button::new("Collapse"),
-            )
+            .add_enabled(open, egui::Button::new("Collapse"))
             .clicked()
         {
             session.collapse(id);
@@ -573,27 +573,17 @@ fn detail_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     });
 }
 
-/// What a boundary shows inside itself, in one line.
-///
-/// The detail governing a boundary answers what its contents would stand at,
-/// not whether the picture draws them: a package cut at packages "shows
-/// packages" and draws nothing within, which tells the reader nothing.
-/// Naming the detail is therefore reserved for a boundary the picture opens.
-/// A closed one says it is closed, and one holding nothing anywhere says
-/// that instead, because there is nothing for Expand to reach.
-fn inside(
-    view: &ArchitectureGraph,
-    graph: &ArchitectureGraph,
-    id: &ElementId,
-    within: Detail,
-) -> String {
-    if !focus::contents_of(view, id).is_empty() {
-        return format!("Shows: {}", detail::name(within).to_lowercase());
-    }
-    if focus::contents_of(graph, id).is_empty() {
-        "Nothing inside.".to_owned()
+/// What a boundary shows of its contents, in one line. An open boundary
+/// says it is open; a closed one that can open invites the reader; and one
+/// whose opening would show nothing says that instead, because there is
+/// nothing for Expand to reach.
+fn standing_line(open: bool, openable: bool) -> String {
+    if open {
+        "Open.".to_owned()
+    } else if openable {
+        "Closed. Expand to open.".to_owned()
     } else {
-        "Contents hidden. Expand to open.".to_owned()
+        "Closed - nothing more to show.".to_owned()
     }
 }
 
@@ -951,7 +941,7 @@ fn ranked(tally: Tally<'_>) -> Vec<Crossing<'_>> {
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{Element, ElementKind, ElementName, RelationKind};
-    use cutaway_lenses::{Cut, Detail, boundary_view};
+    use cutaway_lenses::{Cut, boundary_view};
 
     use super::*;
 
@@ -1025,6 +1015,24 @@ mod tests {
         graph
     }
 
+    /// The cut the module-level tests read the fixtures at: every package
+    /// open, everything deeper closed.
+    fn all_packages_open() -> Cut {
+        let mut cut = Cut::whole();
+        cut.open = [
+            "package:a",
+            "package:b",
+            "package:c",
+            "package:app",
+            "package:engine",
+            "package:store",
+        ]
+        .into_iter()
+        .map(id)
+        .collect();
+        cut
+    }
+
     fn rows_of(view: &BoundaryView, id_text: &str) -> Connections {
         let labels = Labels::of(&view.graph);
         connection_rows(view, &labels, &id(id_text))
@@ -1037,7 +1045,7 @@ mod tests {
 
     #[test]
     fn a_boundary_lists_what_it_depends_on_apart_from_what_uses_it() {
-        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
         let connections = rows_of(&view, "package:a");
         assert_eq!(
             texts(&connections.depends_on),
@@ -1056,7 +1064,7 @@ mod tests {
 
     #[test]
     fn a_boundary_nothing_crosses_lists_neither_way() {
-        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
         assert!(
             rows_of(&view, "c/one").depends_on.is_empty(),
             "c/one is reached and reaches nothing"
@@ -1077,7 +1085,7 @@ mod tests {
             "package:c",
             RelationKind::DependsOn,
         );
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &all_packages_open()).unwrap();
         let rows = rows_of(&view, "package:a").depends_on;
         assert_eq!(
             texts(&rows),
@@ -1096,7 +1104,7 @@ mod tests {
 
     #[test]
     fn a_connection_row_wears_the_ink_the_canvas_paints_it_in() {
-        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
         let connections = rows_of(&view, "package:a");
         let worn = |rows: &[Row]| -> Vec<(Option<&'static str>, Option<egui::Color32>)> {
             rows.iter().map(|row| (row.glyph, row.ink)).collect()
@@ -1118,7 +1126,7 @@ mod tests {
 
     #[test]
     fn a_row_that_answers_no_question_leaves_its_colour_to_the_theme() {
-        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
         let labels = Labels::of(&view.graph);
         for row in contents_rows(&view.graph, &labels, &id("package:a")) {
             assert_eq!(
@@ -1130,7 +1138,7 @@ mod tests {
 
     #[test]
     fn a_connection_row_counts_every_concrete_dependency_behind_it() {
-        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
         let rows = rows_of(&view, "a/two").depends_on;
         assert_eq!(
             texts(&rows),
@@ -1141,7 +1149,7 @@ mod tests {
 
     #[test]
     fn a_connection_row_selects_the_heaviest_edge_to_its_partner() {
-        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
         let rows = rows_of(&view, "package:a").depends_on;
         assert_eq!(
             rows[0].target,
@@ -1152,7 +1160,7 @@ mod tests {
 
     #[test]
     fn the_connections_of_a_leaf_are_the_edges_that_touch_it() {
-        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
         let connections = rows_of(&view, "a/one");
         assert_eq!(
             texts(&connections.depends_on),
@@ -1184,7 +1192,7 @@ mod tests {
         for partner in ["engine/lib.rs", "store/lib.rs"] {
             relate(&mut graph, "app/lib.rs", partner, RelationKind::DependsOn);
         }
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph, &all_packages_open()).unwrap();
         assert_eq!(
             texts(&rows_of(&view, "app/lib.rs").depends_on),
             [
@@ -1204,7 +1212,7 @@ mod tests {
 
     #[test]
     fn a_frame_lists_the_boundaries_it_directly_holds() {
-        let view = boundary_view(&graph(), &Cut::uniform(Detail::Modules)).unwrap();
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
         let labels = Labels::of(&view.graph);
         let rows = contents_rows(&view.graph, &labels, &id("package:a"));
         assert_eq!(
@@ -1224,7 +1232,9 @@ mod tests {
         add(&mut graph, "stray", ElementKind::Module);
         relate(&mut graph, "project", "stray", RelationKind::Contains);
         relate(&mut graph, "stray", "b/one", RelationKind::DependsOn);
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
+        let mut cut = Cut::whole();
+        cut.kinds = BTreeSet::from([ElementKind::Package]);
+        let view = boundary_view(&graph, &cut).unwrap();
         let rows = unscoped_rows(&view, &Labels::of(&graph));
         assert_eq!(texts(&rows), [format!("stray {} b/one", glyph::OUTWARD)]);
         assert_eq!(rows[0].target, None);
@@ -1233,7 +1243,7 @@ mod tests {
     #[test]
     fn a_concrete_dependency_leads_to_the_boundary_its_source_shows_up_as() {
         let graph = graph();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
+        let view = boundary_view(&graph, &Cut::whole()).unwrap();
         let rows = provenance_rows(
             &view,
             &graph,
@@ -1257,7 +1267,7 @@ mod tests {
     #[test]
     fn a_partly_severed_connection_lists_which_dependencies_are_going() {
         let graph = graph();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
+        let view = boundary_view(&graph, &Cut::whole()).unwrap();
         let mut plan = cutaway_planning::Plan::new();
         plan.propose(cutaway_planning::ProposedChange::RemoveRelation(depends(
             "a/one", "b/one",
@@ -1281,33 +1291,20 @@ mod tests {
     }
 
     #[test]
-    fn an_opened_boundary_names_the_detail_its_contents_stand_at() {
-        let graph = graph();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Modules)).unwrap();
-        assert_eq!(
-            inside(&view.graph, &graph, &id("package:a"), Detail::Modules),
-            "Shows: modules"
-        );
+    fn an_open_boundary_says_it_is_open() {
+        assert_eq!(standing_line(true, false), "Open.");
     }
 
     #[test]
-    fn a_boundary_drawing_nothing_of_what_it_holds_says_it_is_closed() {
-        let graph = graph();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Packages)).unwrap();
-        assert_eq!(
-            inside(&view.graph, &graph, &id("package:a"), Detail::Packages),
-            "Contents hidden. Expand to open.",
-            "a package cut at packages holds modules the picture does not draw"
-        );
+    fn a_closed_boundary_with_something_to_show_invites_opening() {
+        assert_eq!(standing_line(false, true), "Closed. Expand to open.");
     }
 
     #[test]
-    fn a_boundary_holding_nothing_anywhere_says_so() {
-        let graph = graph();
-        let view = boundary_view(&graph, &Cut::uniform(Detail::Items)).unwrap();
+    fn a_boundary_whose_opening_would_show_nothing_says_so() {
         assert_eq!(
-            inside(&view.graph, &graph, &id("a/two#type:X"), Detail::Items),
-            "Nothing inside."
+            standing_line(false, false),
+            "Closed - nothing more to show."
         );
     }
 
