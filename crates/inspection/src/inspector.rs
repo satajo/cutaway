@@ -50,6 +50,7 @@ fn project_element(name: &ProjectName) -> Element {
         id: ElementId::new(format!("project:{name}")).expect("a project name is never empty"),
         name: ElementName::new(name.as_str()).expect("a project name is never empty"),
         kind: ElementKind::Project,
+        fingerprint: None,
     }
 }
 
@@ -101,6 +102,7 @@ mod tests {
             id: ElementId::new(id).unwrap(),
             name: ElementName::new(id).unwrap(),
             kind,
+            fingerprint: None,
         }
     }
 

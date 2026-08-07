@@ -1377,6 +1377,7 @@ mod tests {
                     id: id(element),
                     name: ElementName::new(element).unwrap(),
                     kind: ElementKind::Module,
+                    fingerprint: None,
                 })
                 .unwrap();
         }
@@ -1600,6 +1601,7 @@ mod tests {
                 id: id("package:b"),
                 name: ElementName::new("package:b").unwrap(),
                 kind: ElementKind::Package,
+                fingerprint: None,
             })
             .unwrap();
         let edges = vec![

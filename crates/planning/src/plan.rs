@@ -315,6 +315,7 @@ mod tests {
                     id: ElementId::new(*id).unwrap(),
                     name: ElementName::new(*id).unwrap(),
                     kind: ElementKind::Module,
+                    fingerprint: None,
                 })
                 .unwrap();
         }
@@ -348,6 +349,7 @@ mod tests {
             id: ElementId::new("a/new").unwrap(),
             name: ElementName::new("new").unwrap(),
             kind: ElementKind::Module,
+            fingerprint: None,
         }))
         .unwrap();
         plan.propose(ProposedChange::AddRelation(Relation {

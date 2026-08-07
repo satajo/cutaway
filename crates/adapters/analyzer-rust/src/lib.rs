@@ -287,6 +287,7 @@ fn package_element(package: &DiscoveredPackage) -> Element {
         id: package_id(package),
         name: ElementName::new(&package.name).expect("a package name is never empty"),
         kind: ElementKind::Package,
+        fingerprint: None,
     }
 }
 

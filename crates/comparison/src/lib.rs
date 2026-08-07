@@ -24,6 +24,11 @@ use cutaway_architecture::{ArchitectureGraph, Element, ElementId, Relation, Rela
 pub struct ArchitectureDelta {
     pub added_elements: Vec<Element>,
     pub removed_elements: Vec<Element>,
+    /// Elements present in both versions whose id survived but which
+    /// differ: in name, in kind, or in fingerprint where both versions
+    /// carry one - a `None` on either side is absence of evidence, not a
+    /// change. The list holds the after shape.
+    pub changed_elements: Vec<Element>,
     pub added_relations: Vec<Relation>,
     pub removed_relations: Vec<Relation>,
 }
@@ -40,6 +45,15 @@ impl ArchitectureDelta {
             removed_elements: before
                 .elements()
                 .filter(|element| after.element(&element.id).is_none())
+                .cloned()
+                .collect(),
+            changed_elements: after
+                .elements()
+                .filter(|element| {
+                    before
+                        .element(&element.id)
+                        .is_some_and(|earlier| differs(earlier, element))
+                })
                 .cloned()
                 .collect(),
             added_relations: after
@@ -59,9 +73,22 @@ impl ArchitectureDelta {
     pub fn is_empty(&self) -> bool {
         self.added_elements.is_empty()
             && self.removed_elements.is_empty()
+            && self.changed_elements.is_empty()
             && self.added_relations.is_empty()
             && self.removed_relations.is_empty()
     }
+}
+
+/// Whether an element whose id survived differs between the versions: in
+/// name, in kind, or in fingerprint where both versions carry one. A
+/// fingerprint on one side alone is absence of evidence, not a change.
+fn differs(before: &Element, after: &Element) -> bool {
+    before.name != after.name
+        || before.kind != after.kind
+        || matches!(
+            (before.fingerprint, after.fingerprint),
+            (Some(earlier), Some(later)) if earlier != later
+        )
 }
 
 /// Two versions of one architecture, held together: the union graph the
@@ -183,8 +210,9 @@ impl Comparison {
         readings
     }
 
-    /// The rendered boundaries that survive both versions and hide a change
-    /// inside themselves.
+    /// The rendered boundaries that survive both versions and carry a
+    /// change: churn hidden inside them, or a change of the element itself -
+    /// its name, kind, or contents.
     fn boundaries_hiding_change(&self, rendered: &BTreeSet<ElementId>) -> BTreeSet<ElementId> {
         let mut hiding = BTreeSet::new();
 
@@ -198,6 +226,17 @@ impl Comparison {
             .map(|element| &element.id)
             .filter(|id| !rendered.contains(*id));
         hiding.extend(churned.filter_map(|id| self.nearest_rendered(rendered, id)));
+
+        // A changed element speaks from wherever it is drawn: from itself
+        // when rendered - the climb starts at the element, so a rendered one
+        // answers with itself - and from the nearest rendered boundary above
+        // it otherwise.
+        let changed = self
+            .delta
+            .changed_elements
+            .iter()
+            .map(|element| &element.id);
+        hiding.extend(changed.filter_map(|id| self.nearest_rendered(rendered, id)));
 
         // A dependency that appeared or disappeared belongs to the rendered
         // edge between its two endpoints - unless both endpoints roll up to
@@ -282,16 +321,17 @@ pub enum ElementChange {
     /// The boundary exists only in the older version.
     Removed,
     /// The boundary stands in both versions and hides a change inside itself:
-    /// something beneath it arrived, left, or rewired. Neither what is
-    /// arriving nor what is going describes it.
+    /// something beneath it arrived, left, rewired, or changed - its own
+    /// name, kind, or contents included. Neither what is arriving nor what
+    /// is going describes it.
     Modified,
 }
 
 /// Every element and relation of either version, in one graph.
 ///
 /// Where an id exists in both versions, the union takes the newer element:
-/// the comparison reads toward the change, so the picture shows the name and
-/// kind the project is arriving at.
+/// the comparison reads toward the change, so the picture shows the name,
+/// kind, and fingerprint the project is arriving at.
 fn union_of(before: &ArchitectureGraph, after: &ArchitectureGraph) -> ArchitectureGraph {
     let mut union = ArchitectureGraph::new();
     let surviving_or_arriving = after.elements();
@@ -330,7 +370,7 @@ fn containment_parents(graph: &ArchitectureGraph) -> BTreeMap<ElementId, BTreeSe
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{ElementKind, ElementName};
+    use cutaway_architecture::{ElementKind, ElementName, Fingerprint};
 
     use super::*;
 
@@ -339,6 +379,14 @@ mod tests {
             id: ElementId::new(id).unwrap(),
             name: ElementName::new(id).unwrap(),
             kind: ElementKind::Module,
+            fingerprint: None,
+        }
+    }
+
+    fn fingerprinted(id: &str, contents: &[u8]) -> Element {
+        Element {
+            fingerprint: Some(Fingerprint::of(contents)),
+            ..element(id)
         }
     }
 
@@ -346,6 +394,17 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for id in ids {
             graph.add_element(element(id)).unwrap();
+        }
+        graph
+    }
+
+    fn version_of(elements: Vec<Element>, relations: &[Relation]) -> ArchitectureGraph {
+        let mut graph = ArchitectureGraph::new();
+        for element in elements {
+            graph.add_element(element).unwrap();
+        }
+        for relation in relations {
+            graph.add_relation(relation.clone()).unwrap();
         }
         graph
     }
@@ -371,11 +430,7 @@ mod tests {
     }
 
     fn version(ids: &[&str], relations: &[Relation]) -> ArchitectureGraph {
-        let mut graph = graph_of(ids);
-        for relation in relations {
-            graph.add_relation(relation.clone()).unwrap();
-        }
-        graph
+        version_of(ids.iter().map(|id| element(id)).collect(), relations)
     }
 
     fn rendered(ids: &[&str]) -> BTreeSet<ElementId> {
@@ -448,6 +503,7 @@ mod tests {
                 id: id("a"),
                 name: ElementName::new("renamed").unwrap(),
                 kind: ElementKind::Type,
+                fingerprint: None,
             })
             .unwrap();
 
@@ -591,6 +647,134 @@ mod tests {
         assert_eq!(
             readings(&before, &after, &["p", "d", "e"]),
             BTreeMap::from([(id("e"), ElementChange::Modified)])
+        );
+    }
+
+    #[test]
+    fn an_element_whose_fingerprint_changed_reads_as_modified_where_it_is_rendered() {
+        let before = version_of(vec![fingerprinted("a", b"old contents")], &[]);
+        let after = version_of(vec![fingerprinted("a", b"new contents")], &[]);
+
+        assert_eq!(
+            readings(&before, &after, &["a"]),
+            BTreeMap::from([(id("a"), ElementChange::Modified)])
+        );
+    }
+
+    #[test]
+    fn a_hidden_fingerprint_change_reads_as_modified_on_the_nearest_rendered_ancestor() {
+        let structure = [contains("p", "a")];
+        let before = version_of(
+            vec![element("p"), fingerprinted("a", b"old contents")],
+            &structure,
+        );
+        let after = version_of(
+            vec![element("p"), fingerprinted("a", b"new contents")],
+            &structure,
+        );
+
+        assert_eq!(
+            readings(&before, &after, &["p"]),
+            BTreeMap::from([(id("p"), ElementChange::Modified)])
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_appearing_or_disappearing_is_not_a_change() {
+        let bare = version_of(vec![element("a")], &[]);
+        let carrying = version_of(vec![fingerprinted("a", b"contents")], &[]);
+
+        assert!(ArchitectureDelta::between(&bare, &carrying).is_empty());
+        assert!(ArchitectureDelta::between(&carrying, &bare).is_empty());
+    }
+
+    #[test]
+    fn a_name_change_with_a_surviving_id_reads_as_modified() {
+        let renamed = Element {
+            name: ElementName::new("renamed").unwrap(),
+            ..element("a")
+        };
+        let before = graph_of(&["a"]);
+        let after = version_of(vec![renamed], &[]);
+
+        assert_eq!(
+            readings(&before, &after, &["a"]),
+            BTreeMap::from([(id("a"), ElementChange::Modified)])
+        );
+    }
+
+    #[test]
+    fn an_arriving_boundary_reads_as_added_even_when_a_change_hides_inside_it() {
+        let before = version_of(vec![fingerprinted("a", b"old contents")], &[]);
+        let after = version_of(
+            vec![element("p"), fingerprinted("a", b"new contents")],
+            &[contains("p", "a")],
+        );
+
+        assert_eq!(
+            readings(&before, &after, &["p"]),
+            BTreeMap::from([(id("p"), ElementChange::Added)])
+        );
+    }
+
+    #[test]
+    fn a_departing_boundary_reads_as_removed_even_when_a_change_hides_inside_it() {
+        let before = version_of(
+            vec![element("p"), fingerprinted("a", b"old contents")],
+            &[contains("p", "a")],
+        );
+        let after = version_of(vec![fingerprinted("a", b"new contents")], &[]);
+
+        assert_eq!(
+            readings(&before, &after, &["p"]),
+            BTreeMap::from([(id("p"), ElementChange::Removed)])
+        );
+    }
+
+    #[test]
+    fn a_module_becoming_a_file_reads_as_modified() {
+        let file = Element {
+            kind: ElementKind::File,
+            ..element("a")
+        };
+        let before = graph_of(&["a"]);
+        let after = version_of(vec![file], &[]);
+
+        assert_eq!(
+            readings(&before, &after, &["a"]),
+            BTreeMap::from([(id("a"), ElementChange::Modified)])
+        );
+    }
+
+    #[test]
+    fn a_changed_element_drawn_beside_its_parent_marks_itself_alone() {
+        let structure = [contains("p", "a")];
+        let before = version_of(
+            vec![element("p"), fingerprinted("a", b"old contents")],
+            &structure,
+        );
+        let after = version_of(
+            vec![element("p"), fingerprinted("a", b"new contents")],
+            &structure,
+        );
+
+        assert_eq!(
+            readings(&before, &after, &["p", "a"]),
+            BTreeMap::from([(id("a"), ElementChange::Modified)])
+        );
+    }
+
+    #[test]
+    fn a_delta_with_only_a_changed_element_is_not_empty() {
+        let delta = ArchitectureDelta::between(
+            &version_of(vec![fingerprinted("a", b"old contents")], &[]),
+            &version_of(vec![fingerprinted("a", b"new contents")], &[]),
+        );
+
+        assert!(!delta.is_empty());
+        assert_eq!(
+            delta.changed_elements,
+            [fingerprinted("a", b"new contents")]
         );
     }
 }

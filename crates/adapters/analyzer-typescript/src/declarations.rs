@@ -97,6 +97,7 @@ pub fn nested(
                     id,
                     name: ElementName::new(&name).expect("a parsed identifier is never empty"),
                     kind: ElementKind::Function,
+                    fingerprint: None,
                 },
                 holder: holder.element.id.clone(),
                 span: member.byte_range(),
@@ -537,6 +538,7 @@ fn declaration(
             id: declaration_id(path, kind, name),
             name: ElementName::new(name).expect("a parsed identifier is never empty"),
             kind,
+            fingerprint: None,
         },
         exported,
         span,
@@ -552,6 +554,7 @@ fn declaration_id(path: &SourcePath, kind: ElementKind, name: &str) -> ElementId
         ElementKind::Package => "package",
         ElementKind::Directory => "directory",
         ElementKind::Module => "module",
+        ElementKind::File => "file",
         ElementKind::Function => "function",
         ElementKind::Type => "type",
     };

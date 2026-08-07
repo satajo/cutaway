@@ -457,7 +457,9 @@ fn modification_field(
 /// The kinds of boundary a reader may plan inside one of this kind: the
 /// project takes packages, a package and a directory take directories and
 /// modules, a module takes further modules and the items declared in it. An
-/// item holds nothing the picture draws, so nothing is planned inside one.
+/// item holds nothing the picture draws, and a file holds nothing at all,
+/// so nothing is planned inside either. Files are discovered from the
+/// sources, never planned, so no list offers them.
 fn addable_kinds(parent: Option<ElementKind>) -> &'static [ElementKind] {
     match parent {
         None | Some(ElementKind::Project) => &[ElementKind::Package],
@@ -469,7 +471,7 @@ fn addable_kinds(parent: Option<ElementKind>) -> &'static [ElementKind] {
             ElementKind::Type,
             ElementKind::Function,
         ],
-        Some(ElementKind::Function | ElementKind::Type) => &[],
+        Some(ElementKind::File | ElementKind::Function | ElementKind::Type) => &[],
     }
 }
 
@@ -990,6 +992,7 @@ mod tests {
                 id: id(id_text),
                 name: ElementName::new(name).unwrap(),
                 kind,
+                fingerprint: None,
             })
             .unwrap();
     }

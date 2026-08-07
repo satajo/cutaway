@@ -94,6 +94,7 @@ impl Module {
             id: self.id(),
             name: ElementName::new(&self.name).expect("a module name is never empty"),
             kind: ElementKind::Module,
+            fingerprint: None,
         })
     }
 }
@@ -126,6 +127,7 @@ impl Directory {
             id: self.id.clone(),
             name: ElementName::new(&self.name).expect("a directory name is never empty"),
             kind: ElementKind::Directory,
+            fingerprint: None,
         }
     }
 }

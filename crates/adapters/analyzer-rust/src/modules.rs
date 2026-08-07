@@ -60,6 +60,7 @@ impl Module {
             id: self.id(),
             name: ElementName::new(&self.name).expect("a module name is never empty"),
             kind: ElementKind::Module,
+            fingerprint: None,
         })
     }
 

@@ -151,6 +151,7 @@ mod tests {
                 id: id(id_text),
                 name: ElementName::new(id_text).unwrap(),
                 kind,
+                fingerprint: None,
             })
             .unwrap();
     }

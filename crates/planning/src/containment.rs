@@ -58,6 +58,7 @@ mod tests {
                     id: id(element),
                     name: ElementName::new(element).unwrap(),
                     kind: ElementKind::Module,
+                    fingerprint: None,
                 })
                 .unwrap();
         }

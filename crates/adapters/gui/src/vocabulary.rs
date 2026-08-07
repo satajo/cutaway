@@ -13,12 +13,13 @@ use eframe::egui;
 
 /// The kinds the picture can speak about, with the label and the digit each
 /// answers to. Coarsest first, so the digits read down the hierarchy.
-const KINDS: [(ElementKind, &str, egui::Key); 5] = [
+const KINDS: [(ElementKind, &str, egui::Key); 6] = [
     (ElementKind::Package, "Packages", egui::Key::Num1),
     (ElementKind::Directory, "Directories", egui::Key::Num2),
     (ElementKind::Module, "Modules", egui::Key::Num3),
-    (ElementKind::Type, "Types", egui::Key::Num4),
-    (ElementKind::Function, "Functions", egui::Key::Num5),
+    (ElementKind::File, "Files", egui::Key::Num4),
+    (ElementKind::Type, "Types", egui::Key::Num5),
+    (ElementKind::Function, "Functions", egui::Key::Num6),
 ];
 
 /// What a key or a toolbar button asks of the picture.

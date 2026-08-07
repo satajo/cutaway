@@ -119,6 +119,7 @@ impl Cut {
                 ElementKind::Package,
                 ElementKind::Directory,
                 ElementKind::Module,
+                ElementKind::File,
                 ElementKind::Function,
                 ElementKind::Type,
             ]),
@@ -685,6 +686,7 @@ mod tests {
             id: ElementId::new(id).unwrap(),
             name: ElementName::new(id).unwrap(),
             kind,
+            fingerprint: None,
         }
     }
 

@@ -240,6 +240,7 @@ mod tests {
                     id: id(element),
                     name: ElementName::new(element).unwrap(),
                     kind,
+                    fingerprint: None,
                 })
                 .unwrap();
         }
@@ -564,6 +565,7 @@ mod tests {
             id: id("package:a/new"),
             name: ElementName::new("new").unwrap(),
             kind: ElementKind::Module,
+            fingerprint: None,
         };
         let mut plan = Plan::new();
         plan.propose(ProposedChange::AddElement(planned)).unwrap();

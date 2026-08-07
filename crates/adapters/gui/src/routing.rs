@@ -858,6 +858,7 @@ mod tests {
                 id: id(element),
                 name: ElementName::new(element).unwrap(),
                 kind: ElementKind::Module,
+                fingerprint: None,
             })
             .unwrap();
         }
@@ -1125,6 +1126,7 @@ mod tests {
                 id: id(element),
                 name: ElementName::new(element).unwrap(),
                 kind,
+                fingerprint: None,
             })
             .unwrap();
         }
@@ -1183,6 +1185,7 @@ mod tests {
                 id: id(element),
                 name: ElementName::new(element).unwrap(),
                 kind: ElementKind::Module,
+                fingerprint: None,
             })
             .unwrap();
         }
@@ -1262,6 +1265,7 @@ mod tests {
                 id: id(element),
                 name: ElementName::new(element).unwrap(),
                 kind,
+                fingerprint: None,
             })
             .unwrap();
         }

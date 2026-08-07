@@ -301,6 +301,7 @@ mod tests {
                     id: id(element),
                     name: ElementName::new(element).unwrap(),
                     kind,
+                    fingerprint: None,
                 })
                 .unwrap();
         }
@@ -455,6 +456,7 @@ mod tests {
                 id: id("a/one#type:X"),
                 name: ElementName::new("X").unwrap(),
                 kind: ElementKind::Type,
+                fingerprint: None,
             })
             .unwrap();
         graph
@@ -476,6 +478,7 @@ mod tests {
                     id: id(package),
                     name: ElementName::new(package).unwrap(),
                     kind: ElementKind::Package,
+                    fingerprint: None,
                 })
                 .unwrap();
         }
@@ -508,6 +511,7 @@ mod tests {
                 id: id("stray"),
                 name: ElementName::new("stray").unwrap(),
                 kind: ElementKind::Module,
+                fingerprint: None,
             })
             .unwrap();
         assert_eq!(boundary_in_view(&packages(), &graph, &id("stray")), None);

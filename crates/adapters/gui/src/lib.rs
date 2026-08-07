@@ -1838,6 +1838,7 @@ mod tests {
                 id: id(id_text),
                 name: cutaway_architecture::ElementName::new(id_text).unwrap(),
                 kind,
+                fingerprint: None,
             })
             .unwrap();
     }

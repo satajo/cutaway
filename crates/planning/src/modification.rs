@@ -133,6 +133,7 @@ mod tests {
                     id: id(element),
                     name: name(element),
                     kind: ElementKind::Package,
+                    fingerprint: None,
                 })
                 .unwrap();
         }

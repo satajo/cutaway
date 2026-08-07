@@ -56,6 +56,7 @@ enum StoredKind {
     Package,
     Directory,
     Module,
+    File,
     Function,
     Type,
 }
@@ -258,6 +259,7 @@ impl StoredAction {
                 id: element_id(element.id)?,
                 name: ElementName::new(element.name).map_err(corrupt)?,
                 kind: element.kind.into_kind(),
+                fingerprint: None,
             }),
             Self::RemoveElement { element } => ProposedChange::RemoveElement(element_id(element)?),
             Self::AddRelation { relation } => {
@@ -277,6 +279,7 @@ impl StoredKind {
             ElementKind::Package => Self::Package,
             ElementKind::Directory => Self::Directory,
             ElementKind::Module => Self::Module,
+            ElementKind::File => Self::File,
             ElementKind::Function => Self::Function,
             ElementKind::Type => Self::Type,
         }
@@ -288,6 +291,7 @@ impl StoredKind {
             Self::Package => ElementKind::Package,
             Self::Directory => ElementKind::Directory,
             Self::Module => ElementKind::Module,
+            Self::File => ElementKind::File,
             Self::Function => ElementKind::Function,
             Self::Type => ElementKind::Type,
         }

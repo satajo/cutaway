@@ -10,7 +10,7 @@ mod graph;
 mod relation;
 
 pub use element::{
-    Element, ElementId, ElementKind, ElementName, InvalidElementId, InvalidElementName,
+    Element, ElementId, ElementKind, ElementName, Fingerprint, InvalidElementId, InvalidElementName,
 };
 pub use graph::{ArchitectureGraph, GraphError};
 pub use relation::{Relation, RelationKind};

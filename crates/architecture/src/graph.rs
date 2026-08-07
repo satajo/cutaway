@@ -107,6 +107,7 @@ mod tests {
             id: ElementId::new(id).unwrap(),
             name: ElementName::new(id).unwrap(),
             kind: ElementKind::Module,
+            fingerprint: None,
         }
     }
 

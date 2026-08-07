@@ -31,6 +31,11 @@ glyphs! {
     /// One module of a package. Denser than the package and the directory
     /// around it, so the three read apart at the size a box gives them.
     MODULE = "■";
+    /// One source file standing as itself. A file is a leaf like the items,
+    /// so it takes a letterlike mark as they do, and the pilcrow says plain
+    /// text rather than code. The fonts cover none of the page-like squares
+    /// (U+25A2..U+25AF), so the square family stays with the containers.
+    FILE = "¶";
     /// One function.
     FUNCTION = "ƒ";
     /// One type.

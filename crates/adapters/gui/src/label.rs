@@ -312,6 +312,7 @@ pub(crate) fn kind_symbol(kind: ElementKind) -> &'static str {
         ElementKind::Package => glyph::PACKAGE,
         ElementKind::Directory => glyph::DIRECTORY,
         ElementKind::Module => glyph::MODULE,
+        ElementKind::File => glyph::FILE,
         ElementKind::Function => glyph::FUNCTION,
         ElementKind::Type => glyph::TYPE,
     }
@@ -325,6 +326,7 @@ pub(crate) fn kind_name(kind: ElementKind) -> &'static str {
         ElementKind::Package => "Package",
         ElementKind::Directory => "Directory",
         ElementKind::Module => "Module",
+        ElementKind::File => "File",
         ElementKind::Function => "Function",
         ElementKind::Type => "Type",
     }
@@ -346,6 +348,7 @@ mod tests {
                 id: id(id_text),
                 name: ElementName::new(name).unwrap(),
                 kind,
+                fingerprint: None,
             })
             .unwrap();
     }

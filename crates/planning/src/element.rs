@@ -48,7 +48,9 @@ pub fn provisional_id(
     let id = match kind {
         ElementKind::Project => return Err(ProvisionalIdError::Whole),
         ElementKind::Package => format!("package:{name}"),
-        ElementKind::Directory | ElementKind::Module => format!("{}/{name}", inside()?),
+        ElementKind::Directory | ElementKind::Module | ElementKind::File => {
+            format!("{}/{name}", inside()?)
+        }
         ElementKind::Function => format!("{}#function:{name}", inside()?),
         ElementKind::Type => format!("{}#type:{name}", inside()?),
     };
@@ -80,6 +82,7 @@ pub fn addition_of_element(
         id: id.clone(),
         name: name.clone(),
         kind,
+        fingerprint: None,
     })];
     if let Some(parent) = parent {
         changes.push(ProposedChange::AddRelation(Relation {
@@ -272,6 +275,7 @@ mod tests {
                     id: id(element),
                     name: name(element),
                     kind,
+                    fingerprint: None,
                 })
                 .unwrap();
         }
@@ -359,6 +363,7 @@ mod tests {
                     id: id("package:a/wiring"),
                     name: name("wiring"),
                     kind: ElementKind::Module,
+                    fingerprint: None,
                 }),
                 ProposedChange::AddRelation(contains("package:a", "package:a/wiring")),
             ]

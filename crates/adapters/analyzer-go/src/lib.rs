@@ -347,6 +347,7 @@ fn module_element(module: &DiscoveredModule) -> Element {
         id: module_id(module),
         name: ElementName::new(&module.path).expect("a module path is never empty"),
         kind: ElementKind::Package,
+        fingerprint: None,
     }
 }
 

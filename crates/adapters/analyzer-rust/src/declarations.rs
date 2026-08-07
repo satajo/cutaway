@@ -128,6 +128,7 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
                 id: declaration_id(path, kind, name),
                 name: ElementName::new(name).expect("a parsed identifier is never empty"),
                 kind,
+                fingerprint: None,
             },
             public,
             span: node.byte_range(),
@@ -196,6 +197,7 @@ pub fn nested(
                     id,
                     name: ElementName::new(name).expect("a parsed identifier is never empty"),
                     kind: ElementKind::Function,
+                    fingerprint: None,
                 },
                 holder: implemented.element.id.clone(),
                 holder_name,
@@ -300,6 +302,7 @@ fn declaration_id(path: &SourcePath, kind: ElementKind, name: &str) -> ElementId
         ElementKind::Package => "package",
         ElementKind::Directory => "directory",
         ElementKind::Module => "module",
+        ElementKind::File => "file",
         ElementKind::Function => "function",
         ElementKind::Type => "type",
     };

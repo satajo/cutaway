@@ -72,6 +72,7 @@ impl Directory {
             id: self.id(),
             name: ElementName::new(&self.name).expect("a non-root directory has a name"),
             kind: ElementKind::Module,
+            fingerprint: None,
         })
     }
 }
@@ -102,6 +103,7 @@ impl GoFile {
             id: self.id(),
             name: ElementName::new(name).expect("a go file name has a non-empty stem"),
             kind: ElementKind::Module,
+            fingerprint: None,
         })
     }
 }

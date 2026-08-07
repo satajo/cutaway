@@ -698,6 +698,7 @@ mod tests {
                 id: id.clone(),
                 name: ElementName::new(name).unwrap(),
                 kind: ElementKind::Package,
+                fingerprint: None,
             })
             .unwrap();
         id
@@ -719,6 +720,7 @@ mod tests {
                 id: id.clone(),
                 name: ElementName::new(name).unwrap(),
                 kind: ElementKind::Module,
+                fingerprint: None,
             })
             .unwrap();
         graph

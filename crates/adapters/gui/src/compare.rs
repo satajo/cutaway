@@ -368,9 +368,10 @@ fn default_pair(versions: &[Version]) -> Option<(VersionId, VersionId)> {
 }
 
 /// Every boundary standing above a change: the frames to open so each
-/// arrival and each departure shows at its own level. A changed dependency
-/// counts through both of its endpoints - a connection drawn between two
-/// surviving boundaries is as much a change as a boundary of its own.
+/// arrival, each departure, and each element changed inside shows at its
+/// own level. A changed dependency counts through both of its endpoints -
+/// a connection drawn between two surviving boundaries is as much a change
+/// as a boundary of its own.
 fn boundaries_hiding_changes(comparison: &Comparison) -> BTreeSet<ElementId> {
     let containment = Containment::of(comparison.union());
     let delta = comparison.delta();
@@ -378,6 +379,7 @@ fn boundaries_hiding_changes(comparison: &Comparison) -> BTreeSet<ElementId> {
         .added_elements
         .iter()
         .chain(&delta.removed_elements)
+        .chain(&delta.changed_elements)
         .map(|element| &element.id)
         .chain(
             delta
@@ -607,9 +609,10 @@ fn whole_story(ui: &mut egui::Ui, session: &CompareSession) {
             .count()
     };
     ui.label(format!(
-        "{} boundaries arrive, {} leave; {} dependencies arrive, {} leave.",
+        "{} boundaries arrive, {} leave, {} change inside; {} dependencies arrive, {} leave.",
         delta.added_elements.len(),
         delta.removed_elements.len(),
+        delta.changed_elements.len(),
         dependencies(&delta.added_relations),
         dependencies(&delta.removed_relations),
     ));
@@ -637,7 +640,8 @@ fn told(status: Option<NodeStatus>) -> &'static str {
         Some(NodeStatus::Added) => "Arrives: only the newer version has it.",
         Some(NodeStatus::Removed) => "Leaves: only the older version has it.",
         Some(NodeStatus::Modified) => {
-            "Changes inside: it stands in both versions, and something beneath it moved."
+            "Changes inside: it stands in both versions, and something beneath it moved - \
+             or its own name, kind, or contents changed."
         }
         None => "Unchanged.",
     }
@@ -758,6 +762,7 @@ mod tests {
                     id: ElementId::new(*id).unwrap(),
                     name: ElementName::new(*id).unwrap(),
                     kind: ElementKind::Module,
+                    fingerprint: None,
                 })
                 .unwrap();
         }
