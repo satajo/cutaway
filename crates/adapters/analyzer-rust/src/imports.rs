@@ -1,7 +1,9 @@
 //! Path extraction: every name a file imports through its `use`
-//! declarations, and every qualified path the rest of the file mentions.
-//! Both witness dependencies - code that writes `engine::physics::step()`
-//! depends on it whether or not a `use` brought the name in.
+//! declarations, and every path the rest of the file mentions. Both witness
+//! dependencies - code that writes `engine::physics::step()` depends on it
+//! whether or not a `use` brought the name in.
+
+use std::ops::Range;
 
 /// One name a `use` declaration brings into its module.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,32 +44,97 @@ pub fn declared(root: tree_sitter::Node<'_>, text: &str) -> Vec<Import> {
         .collect()
 }
 
-/// Collects every qualified path the file mentions outside its `use`
-/// declarations: in expressions, type positions, attributes, and macro
-/// names. Paths inside macro arguments are token soup to the parser and
-/// stay unseen.
-///
-/// A collected path that is a strict prefix of another is dropped: the
-/// syntax tree nests a path inside every longer path over it, and the
-/// longest one witnesses the same dependency most precisely.
-pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<Vec<String>> {
-    let mut paths = Vec::new();
-    collect_referenced(root, text, &mut paths);
-    let all = paths.clone();
-    paths.retain(|path| {
-        !all.iter()
-            .any(|other| other.len() > path.len() && other[..path.len()] == path[..])
-    });
-    paths
+/// One path the file mentions outside its `use` declarations, and where in
+/// the file it stands, so the mention attributes to the declaration that
+/// writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    pub path: Vec<String>,
+    pub span: Range<usize>,
 }
 
-fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Vec<String>>) {
+/// Collects every path the file mentions outside its `use` declarations:
+/// qualified paths in expressions, type positions, attributes, and macro
+/// names; the bare names calls and type positions speak. Paths inside macro
+/// arguments are token soup to the parser and stay unseen.
+///
+/// A bare name is collected only where the grammar guarantees it names a
+/// declaration - a call's callee, a type position - never as a plain
+/// mention, so most local variables stay out. A local binding that shadows
+/// a top-level name in one of those positions is still read as the
+/// top-level name: telling them apart needs scope tracking, and the
+/// imprecision is accepted the way qualifier shadowing is elsewhere.
+///
+/// A collected path that is a strict prefix of another at the same site is
+/// dropped: the syntax tree nests a path inside every longer path over it,
+/// and the longest one witnesses the same dependency most precisely.
+pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<Reference> {
+    let mut references = Vec::new();
+    collect_referenced(root, text, &mut references);
+    let all = references.clone();
+    references.retain(|reference| {
+        !all.iter().any(|other| {
+            other.path.len() > reference.path.len()
+                && other.path[..reference.path.len()] == reference.path[..]
+                && other.span.start <= reference.span.start
+                && reference.span.end <= other.span.end
+        })
+    });
+    references
+}
+
+fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Reference>) {
+    let segment = |n: tree_sitter::Node<'_>| {
+        n.utf8_text(text.as_bytes())
+            .expect("node ranges lie within the parsed text")
+            .to_owned()
+    };
     match node.kind() {
         // `use` paths carry binding and re-export semantics; `declared`
         // reads them.
         "use_declaration" => return,
         "scoped_identifier" | "scoped_type_identifier" => {
-            out.extend(leaves_of(node, text).into_iter().map(|leaf| leaf.path));
+            out.extend(leaves_of(node, text).into_iter().map(|leaf| Reference {
+                path: leaf.path,
+                span: node.byte_range(),
+            }));
+        }
+        // A callee is a reference by position: `helper()` names a function
+        // wherever `helper` leads. Only the bare form needs collecting here;
+        // a scoped callee is a scoped path like any other.
+        "call_expression" => {
+            if let Some(callee) = node.child_by_field_name("function") {
+                let callee = if callee.kind() == "generic_function" {
+                    callee.child_by_field_name("function").unwrap_or(callee)
+                } else {
+                    callee
+                };
+                if callee.kind() == "identifier" {
+                    out.push(Reference {
+                        path: vec![segment(callee)],
+                        span: callee.byte_range(),
+                    });
+                }
+            }
+        }
+        // The grammar spells a type usage as its own node kind, so every
+        // bare `type_identifier` is a reference - except the name a
+        // declaration introduces, a generic parameter, and the tail of a
+        // scoped path the scoped arm already collected whole.
+        "type_identifier" => {
+            let introduces = node.parent().is_some_and(|parent| {
+                matches!(parent.kind(), "type_parameter" | "scoped_type_identifier")
+                    || (matches!(
+                        parent.kind(),
+                        "struct_item" | "enum_item" | "trait_item" | "union_item" | "type_item"
+                    ) && parent.child_by_field_name("name") == Some(node))
+            });
+            if !introduces {
+                out.push(Reference {
+                    path: vec![segment(node)],
+                    span: node.byte_range(),
+                });
+            }
         }
         _ => {}
     }

@@ -3,10 +3,17 @@
 //! projects.
 //!
 //! Cargo manifests locate the packages; the source text alone witnesses
-//! what depends on what, through `use` declarations and every qualified
-//! path the code mentions. A dependency the manifest declares but nothing
-//! names produces no relation: the sources are the one truth about
-//! coupling.
+//! what depends on what, through `use` declarations, every qualified path
+//! the code mentions, and the bare names its calls and type positions
+//! speak. A dependency the manifest declares but nothing names produces no
+//! relation: the sources are the one truth about coupling.
+//!
+//! A dependency speaks from the declaration that writes it: a call in a
+//! function's body is the function's edge, a field's type the struct's, and
+//! what an `impl` block references belongs to the type it implements. A
+//! `use` declaration, top-level code, and everything a private declaration
+//! writes speak from the module - a private declaration is no element, so
+//! its coupling is the module's own.
 //!
 //! Modules are files: the module tree of a package derives from the `src/`
 //! file layout (`foo.rs` or `foo/mod.rs`), and inline `mod` blocks stay
@@ -31,7 +38,7 @@ mod manifest;
 mod modules;
 mod reexports;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, Relation, RelationKind};
 use cutaway_inspection::ports::source_analyzer::{
@@ -39,8 +46,8 @@ use cutaway_inspection::ports::source_analyzer::{
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
-use crate::declarations::{Declaration, DeclarationIndex};
-use crate::imports::Import;
+use crate::declarations::{Attributions, Declaration, DeclarationIndex};
+use crate::imports::{Import, Reference};
 use crate::manifest::DiscoveredPackage;
 use crate::modules::{ModuleCatalog, ModuleSurface, ResolvedTarget};
 use crate::reexports::ReexportTable;
@@ -52,8 +59,10 @@ struct ParsedFile {
     path: SourcePath,
     declarations: Vec<Declaration>,
     imports: Vec<Import>,
-    /// Qualified paths the file mentions outside its `use` declarations.
-    references: Vec<Vec<String>>,
+    /// Paths the file mentions outside its `use` declarations.
+    references: Vec<Reference>,
+    /// Which declaration speaks for each part of the file.
+    attributions: Attributions,
 }
 
 impl SourceAnalyzer for RustSourceAnalyzer {
@@ -103,11 +112,13 @@ impl SourceAnalyzer for RustSourceAnalyzer {
             let imports = imports::declared(root, text);
             reexports.add(&file.path, &imports);
             let references = imports::referenced(root, text);
+            let attributions = declarations::attributions(root, text, &declarations);
             parsed.push(ParsedFile {
                 path: file.path.clone(),
                 declarations,
                 imports,
                 references,
+                attributions,
             });
         }
 
@@ -119,44 +130,101 @@ impl SourceAnalyzer for RustSourceAnalyzer {
             let module = catalog
                 .module_of(&file.path)
                 .expect("the first pass kept only cataloged files");
-            for declaration in file.declarations {
+            for declaration in &file.declarations {
                 // Only the module's surface joins the architecture; bare
                 // declarations are its internals.
                 if !declaration.public {
                     continue;
                 }
                 elements.push(AnalyzedElement {
-                    element: declaration.element,
+                    element: declaration.element.clone(),
                     parent: Some(module.id()),
                 });
             }
-            let imported = file.imports.iter().map(|import| import.path.as_slice());
-            let referenced = file.references.iter().map(Vec::as_slice);
-            for path in imported.chain(referenced) {
-                let Some(target) = catalog.resolve(module, path, &packages, surface) else {
-                    continue;
-                };
-                let to = match target {
-                    ResolvedTarget::Element(id) => {
-                        if id == module.id() {
-                            continue;
-                        }
-                        id
-                    }
-                    ResolvedTarget::Package(package) => package_id(package),
-                };
-                relations.insert(Relation {
-                    from: module.id(),
-                    to,
-                    kind: RelationKind::DependsOn,
-                });
-            }
+
+            witness_dependencies(&file, module, &catalog, &packages, surface, &mut relations);
         }
 
         Ok(SourceStructure {
             elements,
             relations: relations.into_iter().collect(),
         })
+    }
+}
+
+/// Turns one file's imports and references into dependency relations. A
+/// `use` declaration is the module's plumbing whatever wrote it, so its
+/// edge speaks from the module; a reference speaks from the declaration
+/// enclosing it.
+fn witness_dependencies(
+    file: &ParsedFile,
+    module: &modules::Module,
+    catalog: &ModuleCatalog,
+    packages: &[DiscoveredPackage],
+    surface: ModuleSurface<'_>,
+    relations: &mut BTreeSet<Relation>,
+) {
+    // What a `use` binds in this file, so a bare name resolves to what the
+    // import brought in. The first `use` of a name in source order answers,
+    // as everywhere else.
+    let mut bindings: BTreeMap<&str, &[String]> = BTreeMap::new();
+    for import in &file.imports {
+        if let Some(binding) = &import.binding {
+            bindings.entry(binding).or_insert(&import.path);
+        }
+    }
+
+    let mut depend = |from: ElementId, target: ResolvedTarget<'_>| {
+        let to = match target {
+            ResolvedTarget::Element(id) => {
+                // An edge into one's own module, or from a module onto a
+                // declaration it contains, restates containment rather than
+                // witnessing a dependency.
+                if id == from
+                    || id == module.id()
+                    || (from == module.id() && file.declarations.iter().any(|d| d.element.id == id))
+                {
+                    return;
+                }
+                id
+            }
+            ResolvedTarget::Package(package) => package_id(package),
+        };
+        if to == from {
+            return;
+        }
+        relations.insert(Relation {
+            from,
+            to,
+            kind: RelationKind::DependsOn,
+        });
+    };
+
+    for import in &file.imports {
+        if let Some(target) = catalog.resolve(module, &import.path, packages, surface) {
+            depend(module.id(), target);
+        }
+    }
+    for reference in &file.references {
+        let resolved = catalog
+            .resolve(module, &reference.path, packages, surface)
+            .or_else(|| {
+                // A name no declaration of this module claims may be one a
+                // `use` brought in: the bound path says where it leads.
+                let bound = bindings.get(reference.path.first()?.as_str())?;
+                let mut expanded = bound.to_vec();
+                expanded.extend_from_slice(&reference.path[1..]);
+                catalog.resolve(module, &expanded, packages, surface)
+            });
+        let Some(target) = resolved else {
+            continue;
+        };
+        let from = file
+            .attributions
+            .speaker_at(reference.span.start)
+            .cloned()
+            .unwrap_or_else(|| module.id());
+        depend(from, target);
     }
 }
 

@@ -329,6 +329,32 @@ Feature: The boundary lens
     Then the boundaries do not include "physics"
     And the boundary "engine" contains "Body"
 
+  Scenario: Hidden modules leave the functions their connections
+    Given a package "app" at "crates/app"
+    And a source file "crates/app/src/lib.rs" containing:
+      """
+      pub mod caller;
+      pub mod callee;
+      """
+    And a source file "crates/app/src/caller.rs" containing:
+      """
+      use crate::callee::serve;
+
+      pub fn drive() {
+          serve();
+      }
+      """
+    And a source file "crates/app/src/callee.rs" containing:
+      """
+      pub fn serve() {}
+      """
+    When the project is inspected
+    And the boundaries are viewed
+    And every boundary is opened
+    And "modules" are hidden from the picture
+    Then the boundary "app" contains "drive"
+    And a connection goes from "drive" to "serve"
+
   Scenario: Hidden directories pool their modules in the package
     Given a source file "app/package.json" containing:
       """

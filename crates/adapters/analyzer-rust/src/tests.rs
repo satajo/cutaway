@@ -82,7 +82,7 @@ fn a_qualified_path_in_a_function_body_witnesses_the_dependency() {
         ("crates/b/src/util.rs", "pub fn init() {}\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:a".to_owned(),
+        "crates/a/src/lib.rs#function:go".to_owned(),
         "crates/b/src/util.rs#function:init".to_owned()
     )));
 }
@@ -100,7 +100,7 @@ fn a_qualified_path_in_a_type_position_witnesses_the_dependency() {
         ("crates/b/src/util.rs", "pub struct Thing;\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:a".to_owned(),
+        "crates/a/src/lib.rs#function:go".to_owned(),
         "crates/b/src/util.rs#type:Thing".to_owned()
     )));
 }
@@ -116,7 +116,7 @@ fn a_qualified_path_to_a_child_module_witnesses_the_use_within_the_package() {
         ("crates/a/src/foo.rs", "pub fn helper() {}\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:a".to_owned(),
+        "crates/a/src/lib.rs#function:go".to_owned(),
         "crates/a/src/foo.rs#function:helper".to_owned()
     )));
 }
@@ -135,9 +135,10 @@ fn a_qualified_macro_invocation_witnesses_the_package_it_names() {
             "#[macro_export]\nmacro_rules! mac {\n    () => {};\n}\n",
         ),
     ]);
-    assert!(
-        dependencies(&structure).contains(&("package:a".to_owned(), "package:b-lib".to_owned()))
-    );
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs#function:go".to_owned(),
+        "package:b-lib".to_owned()
+    )));
 }
 
 #[test]
@@ -409,6 +410,195 @@ fn integration_tests_are_their_own_crate_roots_using_the_package_by_name() {
         "crates/b/tests/smoke.rs".to_owned(),
         "crates/b/src/util.rs#type:Thing".to_owned()
     )));
+}
+
+#[test]
+fn a_bare_name_a_use_brought_in_speaks_from_the_declaration_using_it() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        ("crates/a/src/lib.rs", "pub mod caller;\npub mod callee;\n"),
+        (
+            "crates/a/src/caller.rs",
+            "use crate::callee::serve;\n\npub fn drive() {\n    serve();\n}\n",
+        ),
+        ("crates/a/src/callee.rs", "pub fn serve() {}\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/caller.rs#function:drive".to_owned(),
+        "crates/a/src/callee.rs#function:serve".to_owned()
+    )));
+}
+
+#[test]
+fn a_qualified_call_through_a_use_bound_name_resolves_onto_the_item() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        (
+            "crates/a/src/lib.rs",
+            "use b_lib::util;\n\npub fn go() {\n    util::init();\n}\n",
+        ),
+        ("crates/b/src/lib.rs", "pub mod util;\n"),
+        ("crates/b/src/util.rs", "pub fn init() {}\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs#function:go".to_owned(),
+        "crates/b/src/util.rs#function:init".to_owned()
+    )));
+}
+
+#[test]
+fn the_functions_of_one_module_wire_to_each_other() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        (
+            "crates/b/src/lib.rs",
+            "pub fn outer() {\n    inner();\n}\npub fn inner() {}\n",
+        ),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/b/src/lib.rs#function:outer".to_owned(),
+        "crates/b/src/lib.rs#function:inner".to_owned()
+    )));
+}
+
+#[test]
+fn a_signature_witnesses_the_types_it_speaks() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        (
+            "crates/b/src/lib.rs",
+            "pub struct Input;\npub struct Output;\npub fn convert(input: Input) -> Output {\n    let _ = input;\n    Output\n}\n",
+        ),
+    ]);
+    let dependencies = dependencies(&structure);
+    for target in ["Input", "Output"] {
+        assert!(
+            dependencies.contains(&(
+                "crates/b/src/lib.rs#function:convert".to_owned(),
+                format!("crates/b/src/lib.rs#type:{target}")
+            )),
+            "convert speaks {target} in its signature; the view has {dependencies:?}"
+        );
+    }
+}
+
+#[test]
+fn a_struct_field_witnesses_the_type_it_holds() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        (
+            "crates/b/src/lib.rs",
+            "pub struct Part;\npub struct Holder {\n    part: Part,\n}\n",
+        ),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/b/src/lib.rs#type:Holder".to_owned(),
+        "crates/b/src/lib.rs#type:Part".to_owned()
+    )));
+}
+
+#[test]
+fn an_enum_variant_witnesses_the_type_it_carries() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        (
+            "crates/b/src/lib.rs",
+            "pub struct Payload;\npub enum Message {\n    Carrying(Payload),\n}\n",
+        ),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/b/src/lib.rs#type:Message".to_owned(),
+        "crates/b/src/lib.rs#type:Payload".to_owned()
+    )));
+}
+
+#[test]
+fn an_impl_block_speaks_as_the_type_it_implements() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        (
+            "crates/a/src/lib.rs",
+            "pub mod store;\npub struct Config;\nimpl Config {\n    pub fn load() {\n        crate::store::fetch();\n    }\n}\n",
+        ),
+        ("crates/a/src/store.rs", "pub fn fetch() {}\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs#type:Config".to_owned(),
+        "crates/a/src/store.rs#function:fetch".to_owned()
+    )));
+}
+
+#[test]
+fn a_trait_impl_couples_the_type_to_the_trait() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        (
+            "crates/b/src/lib.rs",
+            "pub trait Draw {}\npub struct Shape;\nimpl Draw for Shape {}\n",
+        ),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/b/src/lib.rs#type:Shape".to_owned(),
+        "crates/b/src/lib.rs#type:Draw".to_owned()
+    )));
+}
+
+#[test]
+fn a_private_declarations_references_stay_with_the_module() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        ("crates/a/src/lib.rs", "pub mod caller;\npub mod callee;\n"),
+        (
+            "crates/a/src/caller.rs",
+            "fn quietly() {\n    crate::callee::serve();\n}\n",
+        ),
+        ("crates/a/src/callee.rs", "pub fn serve() {}\n"),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/caller.rs".to_owned(),
+        "crates/a/src/callee.rs#function:serve".to_owned()
+    )));
+}
+
+#[test]
+fn a_reference_outside_every_declaration_stays_with_the_module() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        ("crates/a/src/lib.rs", "pub mod holder;\npub mod parts;\n"),
+        (
+            "crates/a/src/holder.rs",
+            "use crate::parts::Part;\n\npub static FIXED: Part = Part;\npub fn unrelated() {}\n",
+        ),
+        ("crates/a/src/parts.rs", "pub struct Part;\n"),
+    ]);
+    let dependencies = dependencies(&structure);
+    assert!(dependencies.contains(&(
+        "crates/a/src/holder.rs".to_owned(),
+        "crates/a/src/parts.rs#type:Part".to_owned()
+    )));
+    assert!(
+        !dependencies.contains(&(
+            "crates/a/src/holder.rs#function:unrelated".to_owned(),
+            "crates/a/src/parts.rs#type:Part".to_owned()
+        )),
+        "a top-level reference belongs to no declaration"
+    );
+}
+
+#[test]
+fn a_declaration_naming_its_own_modules_internals_says_nothing() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        (
+            "crates/b/src/lib.rs",
+            "pub fn run() {\n    helper();\n}\nfn helper() {}\n",
+        ),
+    ]);
+    assert!(
+        dependencies(&structure).is_empty(),
+        "a private sibling is the module's internals, not a dependency"
+    );
 }
 
 #[test]
