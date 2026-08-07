@@ -130,7 +130,8 @@ fn help(ui: &mut egui::Ui) {
          parts. What passes between a boundary and its own contents stays inside it.",
     );
     ui.label(
-        "Double-click a boundary to open one layer of its contents; select it to \
+        "Double-click a boundary to open one layer of its contents, or \
+         shift+double-click it to open every layer beneath it; select it to \
          expand or collapse it from here.",
     );
     ui.label(
@@ -520,7 +521,8 @@ fn add_controls(
 
 /// Opens or closes this one boundary while the rest of the picture stays
 /// put, so the project stays whole while the boundary under study shows its
-/// parts. Double-clicking the boundary opens it too.
+/// parts. Double-clicking the boundary opens it too, and shift held with the
+/// double-click opens it fully.
 ///
 /// Scoping the picture to the boundary stands beside them: it is the other
 /// way of reading one boundary closely, and the only way of reading a
@@ -535,6 +537,7 @@ fn opening_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     let stub = view.stubs.contains(id);
     let open = view.open.contains(id);
     let openable = view.openable.contains(id);
+    let deepens = can_deepen(view, id);
     let line = if stub {
         "Stands whole at the border of the focus.".to_owned()
     } else {
@@ -554,6 +557,16 @@ fn opening_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
         if expand.clicked() {
             session.expand(id);
         }
+        let deepen = ui.add_enabled(deepens, egui::Button::new("Open fully"));
+        let deepen = if stub {
+            deepen.on_disabled_hover_text("Focus this boundary to look inside it.")
+        } else {
+            deepen
+                .on_hover_text("Open this boundary and everything beneath it (Shift+double-click).")
+        };
+        if deepen.clicked() {
+            session.expand_fully(id);
+        }
         if ui
             .add_enabled(open, egui::Button::new("Collapse"))
             .clicked()
@@ -571,6 +584,22 @@ fn opening_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
             session.focus(id);
         }
     });
+}
+
+/// Whether opening this boundary and everything beneath it would show
+/// anything the picture does not show yet. A closed boundary deepens when it
+/// can open at all; an open one deepens only while something drawn inside it
+/// still stands closed over contents of its own.
+fn can_deepen(view: &BoundaryView, id: &ElementId) -> bool {
+    if view.openable.contains(id) {
+        return true;
+    }
+    if !view.open.contains(id) {
+        return false;
+    }
+    let containment = Containment::of(&view.graph);
+    let inside = containment.subtree(id);
+    view.openable.iter().any(|deeper| inside.contains(deeper))
 }
 
 /// What a boundary shows of its contents, in one line. An open boundary
@@ -1306,6 +1335,42 @@ mod tests {
             standing_line(false, false),
             "Closed - nothing more to show."
         );
+    }
+
+    #[test]
+    fn a_closed_boundary_deepens_as_soon_as_it_can_open() {
+        let view = boundary_view(&graph(), &Cut::whole()).unwrap();
+        assert!(can_deepen(&view, &id("package:a")));
+    }
+
+    #[test]
+    fn an_open_boundary_deepens_while_anything_inside_it_stands_closed() {
+        let view = boundary_view(&graph(), &all_packages_open()).unwrap();
+        assert!(
+            can_deepen(&view, &id("package:a")),
+            "a/two is drawn closed over the type inside it"
+        );
+        assert!(
+            !can_deepen(&view, &id("package:b")),
+            "everything package:b holds is already drawn whole"
+        );
+    }
+
+    #[test]
+    fn a_boundary_open_to_its_depth_deepens_no_further() {
+        let mut cut = all_packages_open();
+        cut.open.insert(id("a/two"));
+        let view = boundary_view(&graph(), &cut).unwrap();
+        assert!(!can_deepen(&view, &id("package:a")));
+    }
+
+    #[test]
+    fn a_boundary_standing_at_the_border_of_a_focus_deepens_not_at_all() {
+        let mut cut = all_packages_open();
+        cut.focus(Some(id("package:a")));
+        let view = boundary_view(&graph(), &cut).unwrap();
+        assert!(view.stubs.contains(&id("package:b")));
+        assert!(!can_deepen(&view, &id("package:b")));
     }
 
     #[test]

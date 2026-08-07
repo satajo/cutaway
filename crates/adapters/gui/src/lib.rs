@@ -426,6 +426,18 @@ impl Session {
         self.step(id, Cut::collapse);
     }
 
+    /// Opens the boundary and every boundary beneath it, down to the deepest
+    /// frame. The walk reaches past what the picture draws, so it reads the
+    /// architecture the lens cuts rather than the view cut from it.
+    fn expand_fully(&mut self, id: &ElementId) {
+        let Ok(scene) = &self.scene else {
+            return;
+        };
+        if self.cut.expand_fully(&scene.view, &self.viewed, id) {
+            self.rebuild_view();
+        }
+    }
+
     fn step(&mut self, id: &ElementId, step: fn(&mut Cut, &BoundaryView, &ElementId) -> bool) {
         let Ok(scene) = &self.scene else {
             return;
@@ -1030,7 +1042,7 @@ impl Session {
             .map(|(edge, _)| edge.clone())
     }
 
-    fn handle(&mut self, action: CanvasAction) {
+    fn handle(&mut self, ui: &egui::Ui, action: CanvasAction) {
         self.status = None;
         match action {
             CanvasAction::Node(id) => {
@@ -1054,7 +1066,14 @@ impl Session {
             CanvasAction::Expand(id) => {
                 if !self.drawing && self.merging.is_none() {
                     self.select(Some(Selection::Node(id.clone())));
-                    self.expand(&id);
+                    // A reader who already knows they want the whole depth
+                    // says so with shift, instead of clicking down layer by
+                    // layer.
+                    if ui.input(|input| input.modifiers.shift) {
+                        self.expand_fully(&id);
+                    } else {
+                        self.expand(&id);
+                    }
                 }
             }
             CanvasAction::Edge(relation) => {
@@ -1524,7 +1543,7 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
         &mut session.strokes,
     );
     if let Some(action) = action {
-        session.handle(action);
+        session.handle(ui, action);
     }
 }
 
