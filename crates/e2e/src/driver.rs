@@ -22,10 +22,23 @@ use crate::fakes::{InMemoryPlanStore, InMemorySourceTree};
 pub trait ApplicationDriver {
     fn add_source_file(&mut self, path: &str, contents: &str);
     fn inspect_project(&mut self) -> Result<(), String>;
-    /// `level` is `packages`, `modules`, or `items`.
-    fn view_boundaries(&mut self, level: &str) -> Result<(), String>;
+    /// Reads the architecture anew: every boundary closed, every kind
+    /// spoken.
+    fn view_boundaries(&mut self) -> Result<(), String>;
+    /// Opens every boundary at once, so the whole tree stands in the
+    /// picture.
+    fn open_all_boundaries(&mut self) -> Result<(), String>;
+    /// Drops one kind from the picture's vocabulary. `kind` is the plural
+    /// word a picture speaks: `packages`, `modules`, `types`, or
+    /// `functions`.
+    fn hide_kind(&mut self, kind: &str) -> Result<(), String>;
+    /// Puts one kind back in the picture's vocabulary, named as
+    /// [`ApplicationDriver::hide_kind`] names it.
+    fn show_kind(&mut self, kind: &str) -> Result<(), String>;
     /// Opens one boundary a step deeper than the rest of the picture.
     fn expand_boundary(&mut self, name: &str) -> Result<(), String>;
+    /// Opens one boundary and everything beneath it in a single act.
+    fn expand_boundary_fully(&mut self, name: &str) -> Result<(), String>;
     /// Closes one boundary a step back toward a single box.
     fn collapse_boundary(&mut self, name: &str) -> Result<(), String>;
     /// Scopes the picture to one boundary: it and the partners at its
@@ -89,10 +102,15 @@ fn element_kind(kind: &str) -> Result<ElementKind, String> {
     }
 }
 
-/// Opens every boundary of one architecture: the scenario levels above
-/// packages read the whole tree at once.
-fn open_everything(cut: &mut Cut, graph: &ArchitectureGraph) {
-    cut.open = graph.elements().map(|element| element.id.clone()).collect();
+/// The kind a scenario names by the plural word the picture speaks.
+fn rendered_kind(kind: &str) -> Result<ElementKind, String> {
+    match kind {
+        "packages" => Ok(ElementKind::Package),
+        "modules" => Ok(ElementKind::Module),
+        "types" => Ok(ElementKind::Type),
+        "functions" => Ok(ElementKind::Function),
+        other => Err(format!("unknown kind {other}")),
+    }
 }
 
 /// Drives the application cores in-process, with the same analyzer the
@@ -243,22 +261,8 @@ impl ApplicationDriver for InProcessDriver {
         Ok(())
     }
 
-    fn view_boundaries(&mut self, level: &str) -> Result<(), String> {
-        let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
-        // The scenario levels read as cuts: packages is the whole project as
-        // closed boxes, modules opens the whole tree with the structural
-        // kinds in the vocabulary, and items opens it with every kind.
-        let viewed = self.plan.viewed_architecture(graph);
+    fn view_boundaries(&mut self) -> Result<(), String> {
         let mut cut = Cut::whole();
-        match level {
-            "packages" => {}
-            "modules" => {
-                open_everything(&mut cut, &viewed);
-                cut.kinds = BTreeSet::from([ElementKind::Package, ElementKind::Module]);
-            }
-            "items" => open_everything(&mut cut, &viewed),
-            other => return Err(format!("unknown detail level {other}")),
-        }
         // A fresh viewing drops the boundaries opened or closed before it:
         // those decisions answered the picture they were made in. The scope
         // stands through it: a viewing says how boundaries are read, never
@@ -269,8 +273,49 @@ impl ApplicationDriver for InProcessDriver {
         self.rebuild_view()
     }
 
+    fn open_all_boundaries(&mut self) -> Result<(), String> {
+        // The frontier reaches every element of the architecture at once. A
+        // flag on a leaf opens nothing and a flag on a stub is ignored, so
+        // the whole tree is the shortest way to say "hold nothing back".
+        let viewed = self.viewed.as_ref().ok_or("no project inspected yet")?;
+        let open = viewed
+            .elements()
+            .map(|element| element.id.clone())
+            .collect();
+        let cut = self.cut.as_mut().ok_or("no boundary view yet")?;
+        cut.open = open;
+        self.rebuild_view()
+    }
+
+    fn hide_kind(&mut self, kind: &str) -> Result<(), String> {
+        let kind = rendered_kind(kind)?;
+        let cut = self.cut.as_mut().ok_or("no boundary view yet")?;
+        cut.kinds.remove(&kind);
+        self.rebuild_view()
+    }
+
+    fn show_kind(&mut self, kind: &str) -> Result<(), String> {
+        let kind = rendered_kind(kind)?;
+        let cut = self.cut.as_mut().ok_or("no boundary view yet")?;
+        cut.kinds.insert(kind);
+        self.rebuild_view()
+    }
+
     fn expand_boundary(&mut self, name: &str) -> Result<(), String> {
         self.step_boundary(name, Cut::expand)
+    }
+
+    fn expand_boundary_fully(&mut self, name: &str) -> Result<(), String> {
+        let id = self.boundary_id(name)?;
+        let view = self.view.as_ref().ok_or("no boundary view yet")?;
+        // The walk reaches beneath the picture, so it reads the architecture
+        // the view was cut from rather than the view itself.
+        let viewed = self.viewed.as_ref().ok_or("no project inspected yet")?;
+        let cut = self.cut.as_mut().ok_or("no boundary view yet")?;
+        if !cut.expand_fully(view, viewed, &id) {
+            return Err(format!("the boundary {name} opens no further"));
+        }
+        self.rebuild_view()
     }
 
     fn collapse_boundary(&mut self, name: &str) -> Result<(), String> {

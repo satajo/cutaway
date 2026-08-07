@@ -10,7 +10,7 @@ Feature: Planning modifications of what stays
     Given a package "app" at "crates/app" depending on "engine"
     And a package "engine" at "crates/engine"
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
 
   Scenario: A rename records the name the element takes
     When the rename of "engine" to "motor" is planned

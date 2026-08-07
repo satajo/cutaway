@@ -21,7 +21,7 @@ Feature: Planning whole elements
       pub fn run() {}
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
 
   Scenario: Planning the removal of a package severs what crosses its border
     When the removal of "model" is planned
@@ -48,7 +48,9 @@ Feature: Planning whole elements
     And the saved plan equals the working plan
 
   Scenario: A planned module appears inside the boundary that holds it
-    When the boundaries are viewed at "modules" level
+    When the boundaries are viewed
+    And every boundary is opened
+    And only the structure is shown
     And a "module" named "physics" is planned inside "model"
     Then the boundaries include "physics"
     And the boundary "model" contains "physics"
@@ -56,12 +58,15 @@ Feature: Planning whole elements
     And the saved plan equals the working plan
 
   Scenario: A connection drawn to a planned element survives the cut changing
-    When the boundaries are viewed at "modules" level
+    When the boundaries are viewed
+    And every boundary is opened
+    And only the structure is shown
     And a "module" named "physics" is planned inside "model"
     And a connection is drawn from "wiring" to "physics"
     Then the plan proposes a connection from "wiring" to "physics"
-    When the boundaries are viewed at "packages" level
-    And the boundaries are viewed at "modules" level
+    When the boundaries are viewed
+    And every boundary is opened
+    And only the structure is shown
     Then the boundaries include "physics"
     And a connection goes from "wiring" to "physics"
     And the plan proposes a connection from "wiring" to "physics"

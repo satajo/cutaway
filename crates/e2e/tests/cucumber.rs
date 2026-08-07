@@ -51,12 +51,39 @@ fn the_project_is_inspected(world: &mut CutawayWorld) {
     world.driver.inspect_project().expect("inspection succeeds");
 }
 
-#[when(expr = "the boundaries are viewed at {string} level")]
-fn the_boundaries_are_viewed(world: &mut CutawayWorld, level: String) {
+#[when("the boundaries are viewed")]
+fn the_boundaries_are_viewed(world: &mut CutawayWorld) {
     world
         .driver
-        .view_boundaries(&level)
+        .view_boundaries()
         .expect("the boundary view builds");
+}
+
+#[when("every boundary is opened")]
+fn every_boundary_is_opened(world: &mut CutawayWorld) {
+    world
+        .driver
+        .open_all_boundaries()
+        .expect("the boundaries open");
+}
+
+/// The structure is the boxes the sources are organised in; the declarations
+/// inside them are the detail a reader drops to see it.
+#[when("only the structure is shown")]
+fn only_the_structure_is_shown(world: &mut CutawayWorld) {
+    for kind in ["types", "functions"] {
+        world.driver.hide_kind(kind).expect("the kind hides");
+    }
+}
+
+#[when(expr = "{string} are hidden from the picture")]
+fn a_kind_is_hidden(world: &mut CutawayWorld, kind: String) {
+    world.driver.hide_kind(&kind).expect("the kind hides");
+}
+
+#[when(expr = "{string} are shown in the picture")]
+fn a_kind_is_shown(world: &mut CutawayWorld, kind: String) {
+    world.driver.show_kind(&kind).expect("the kind shows");
 }
 
 #[when(expr = "the boundary {string} is expanded")]
@@ -65,6 +92,14 @@ fn the_boundary_is_expanded(world: &mut CutawayWorld, name: String) {
         .driver
         .expand_boundary(&name)
         .expect("the boundary expands");
+}
+
+#[when(expr = "the boundary {string} is opened fully")]
+fn the_boundary_is_opened_fully(world: &mut CutawayWorld, name: String) {
+    world
+        .driver
+        .expand_boundary_fully(&name)
+        .expect("the boundary opens");
 }
 
 #[when(expr = "the boundary {string} is collapsed")]

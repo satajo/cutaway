@@ -1,7 +1,7 @@
 Feature: Focusing the picture on one boundary
 
-  Every detail below packages puts the whole project's insides in front of
-  the reader at once. Focusing scopes the picture to one boundary: it is the
+  An open frontier puts the whole project's insides in front of the reader
+  at once. Focusing scopes the picture to one boundary: it is the
   whole picture, the boundaries it depends on and those that depend on it
   stand at the border as single closed boxes, and everything else leaves.
   What passes between two of those partners is about neither of them and
@@ -30,7 +30,7 @@ Feature: Focusing the picture on one boundary
       pub fn put() {}
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     Then the boundaries are "app, engine, other, store"
     When the picture is focused on "engine"
     Then the boundaries are "app, engine, store"
@@ -56,7 +56,7 @@ Feature: Focusing the picture on one boundary
       pub fn put() {}
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     Then a connection goes from "engine" to "store"
     When the picture is focused on "app"
     Then the boundaries are "app, engine, store"
@@ -79,7 +79,7 @@ Feature: Focusing the picture on one boundary
       pub fn step() {}
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     And the boundary "engine" is expanded
     Then the boundaries include "physics"
     When the picture is focused on "app"
@@ -105,7 +105,7 @@ Feature: Focusing the picture on one boundary
       pub fn put() {}
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     And the picture is focused on "app"
     Then the boundaries are "app, engine"
     When the picture is focused on "engine"
@@ -127,7 +127,7 @@ Feature: Focusing the picture on one boundary
       """
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     And the picture is focused on "app"
     Then the boundaries do not include "other"
     When the whole picture is shown again
@@ -154,10 +154,12 @@ Feature: Focusing the picture on one boundary
       pub fn step() {}
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     And the picture is focused on "app"
     Then the boundaries are "app, engine"
-    When the boundaries are viewed at "modules" level
+    When the boundaries are viewed
+    And every boundary is opened
+    And only the structure is shown
     Then the boundaries include "wiring"
     And the boundaries do not include "physics"
     And a connection goes from "wiring" to "engine"

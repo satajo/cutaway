@@ -8,7 +8,7 @@ Feature: Planning on the boundary view
     Given a package "app" at "crates/app" depending on "engine"
     And a package "engine" at "crates/engine"
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
 
   Scenario: Severing a connection marks it for removal
     When the connection from "app" to "engine" is severed
@@ -42,7 +42,7 @@ Feature: Planning on the boundary view
       pub fn run() {}
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     And the connection from "viewer" to "model" is severed
     And the boundary "model" is expanded
     Then a connection goes from "viewer" to "runner"
@@ -67,9 +67,11 @@ Feature: Planning on the boundary view
       """
       """
     When the project is inspected
-    And the boundaries are viewed at "modules" level
+    And the boundaries are viewed
+    And every boundary is opened
+    And only the structure is shown
     And a connection is drawn from "physics" to "wiring"
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     Then a connection goes from "model" to "viewer"
     And the plan proposes a connection from "model" to "viewer"
 
@@ -87,7 +89,7 @@ Feature: Planning on the boundary view
       """
       """
     When the project is inspected
-    And the boundaries are viewed at "packages" level
+    And the boundaries are viewed
     And a connection is drawn from "model" to "viewer"
     And the boundary "viewer" is expanded
     Then a connection goes from "model" to "viewer"
