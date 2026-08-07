@@ -143,6 +143,12 @@ impl CompareSession {
         }
         self.comparison = Comparison::between(&self.graphs[&before], &self.graphs[&after]);
         self.weights = layout::concept_weights(self.comparison.union());
+        // The pair was named to see what changed between it, so the
+        // boundaries hiding a change open by themselves. The reader closes
+        // what they do not care for, and the Focus changes button reopens.
+        self.cut
+            .open
+            .extend(boundaries_hiding_changes(&self.comparison));
         self.repaint();
         // A new pair lays the world out anew, so the old camera coordinates
         // point at arbitrary content: only a fresh fit shows the picture the
@@ -251,6 +257,20 @@ impl CompareSession {
         }
     }
 
+    /// Opens every boundary that hides a change, so each arrival and each
+    /// departure shows at its own level rather than as amber on an
+    /// ancestor. The vocabulary stands: a change of a hidden kind still
+    /// reads on the nearest rendered boundary, because hiding the kind was
+    /// the reader's own decision.
+    fn focus_changes(&mut self) {
+        let hiding = boundaries_hiding_changes(&self.comparison);
+        let already = self.cut.open.len();
+        self.cut.open.extend(hiding);
+        if self.cut.open.len() > already {
+            self.repaint();
+        }
+    }
+
     /// Opens the boundary and every boundary beneath it, down to the
     /// deepest frame. The walk reaches past what the picture draws, so it
     /// reads the union the lens cuts rather than the view cut from it.
@@ -345,6 +365,41 @@ fn default_pair(versions: &[Version]) -> Option<(VersionId, VersionId)> {
     let after = versions.first()?;
     let before = versions.get(1).unwrap_or(after);
     Some((before.id.clone(), after.id.clone()))
+}
+
+/// Every boundary standing above a change: the frames to open so each
+/// arrival and each departure shows at its own level. A changed dependency
+/// counts through both of its endpoints - a connection drawn between two
+/// surviving boundaries is as much a change as a boundary of its own.
+fn boundaries_hiding_changes(comparison: &Comparison) -> BTreeSet<ElementId> {
+    let containment = Containment::of(comparison.union());
+    let delta = comparison.delta();
+    let changed = delta
+        .added_elements
+        .iter()
+        .chain(&delta.removed_elements)
+        .map(|element| &element.id)
+        .chain(
+            delta
+                .added_relations
+                .iter()
+                .chain(&delta.removed_relations)
+                .filter(|relation| relation.kind == RelationKind::DependsOn)
+                .flat_map(|relation| [&relation.from, &relation.to]),
+        );
+    let mut above = BTreeSet::new();
+    for id in changed {
+        let mut current = id;
+        while let Some(frame) = containment.parent(current) {
+            // A frame already collected brought its own ancestors with it,
+            // and the same check bounds the walk should containment cycle.
+            if !above.insert(frame.clone()) {
+                break;
+            }
+            current = frame;
+        }
+    }
+    above
 }
 
 /// How each box of the picture reads. A box neither version changed stays
@@ -447,6 +502,17 @@ pub(crate) fn tools(ui: &mut egui::Ui, history: &History, session: &mut CompareS
     }
     if let Some(request) = vocabulary::layer_buttons(ui) {
         session.obey(request);
+    }
+    if ui
+        .button("Focus changes")
+        .on_hover_text(
+            "Open every boundary that hides a change, so each arrival \
+             and each departure shows at its own level.",
+        )
+        .clicked()
+    {
+        session.focus_changes();
+        session.refit();
     }
     let open = session
         .scene
@@ -676,7 +742,92 @@ pub(crate) fn overlay(ctx: &egui::Context, session: &mut CompareSession) {
 
 #[cfg(test)]
 mod tests {
+    use cutaway_architecture::{Element, ElementName};
+
     use super::*;
+
+    fn wired(
+        ids: &[&str],
+        contains: &[(&str, &str)],
+        depends: &[(&str, &str)],
+    ) -> ArchitectureGraph {
+        let mut graph = ArchitectureGraph::new();
+        for id in ids {
+            graph
+                .add_element(Element {
+                    id: ElementId::new(*id).unwrap(),
+                    name: ElementName::new(*id).unwrap(),
+                    kind: ElementKind::Module,
+                })
+                .unwrap();
+        }
+        let relation = |from: &str, to: &str, kind| Relation {
+            from: ElementId::new(from).unwrap(),
+            to: ElementId::new(to).unwrap(),
+            kind,
+        };
+        for (from, to) in contains {
+            graph
+                .add_relation(relation(from, to, RelationKind::Contains))
+                .unwrap();
+        }
+        for (from, to) in depends {
+            graph
+                .add_relation(relation(from, to, RelationKind::DependsOn))
+                .unwrap();
+        }
+        graph
+    }
+
+    fn opened(before: &ArchitectureGraph, after: &ArchitectureGraph) -> BTreeSet<ElementId> {
+        boundaries_hiding_changes(&Comparison::between(before, after))
+    }
+
+    fn ids(ids: &[&str]) -> BTreeSet<ElementId> {
+        ids.iter().map(|id| ElementId::new(*id).unwrap()).collect()
+    }
+
+    #[test]
+    fn focusing_changes_opens_every_boundary_above_an_arrival() {
+        let held = &[("root", "pkg"), ("pkg", "old")];
+        let before = wired(&["root", "pkg", "old"], held, &[]);
+        let after = wired(
+            &["root", "pkg", "old", "new"],
+            &[("root", "pkg"), ("pkg", "old"), ("pkg", "new")],
+            &[],
+        );
+        assert_eq!(opened(&before, &after), ids(&["root", "pkg"]));
+    }
+
+    #[test]
+    fn focusing_changes_opens_the_boundaries_that_held_a_departure() {
+        let before = wired(
+            &["root", "pkg", "old", "gone"],
+            &[("root", "pkg"), ("pkg", "old"), ("pkg", "gone")],
+            &[],
+        );
+        let after = wired(
+            &["root", "pkg", "old"],
+            &[("root", "pkg"), ("pkg", "old")],
+            &[],
+        );
+        assert_eq!(opened(&before, &after), ids(&["root", "pkg"]));
+    }
+
+    #[test]
+    fn focusing_changes_opens_the_boundaries_above_both_ends_of_a_drawn_dependency() {
+        let elements = &["root", "a", "b", "a/x", "b/y"];
+        let held = &[("root", "a"), ("root", "b"), ("a", "a/x"), ("b", "b/y")];
+        let before = wired(elements, held, &[]);
+        let after = wired(elements, held, &[("a/x", "b/y")]);
+        assert_eq!(opened(&before, &after), ids(&["root", "a", "b"]));
+    }
+
+    #[test]
+    fn focusing_changes_opens_nothing_where_nothing_changed() {
+        let graph = wired(&["root", "pkg"], &[("root", "pkg")], &[]);
+        assert!(opened(&graph, &graph).is_empty());
+    }
 
     fn version(id: &str) -> Version {
         Version {
