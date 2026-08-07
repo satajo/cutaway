@@ -778,10 +778,12 @@ fn a_class_member_speaks_as_the_class_that_holds_it() {
         MANIFEST_APP,
         (
             "packages/app/src/a.ts",
-            "import { store } from \"./b\";\nexport class Config {\n  load() {\n    store();\n  }\n}\n",
+            "import { store } from \"./b\";\nexport class Config {\n  load = () => {\n    store();\n  };\n}\n",
         ),
         ("packages/app/src/b.ts", "export function store() {}\n"),
     ]);
+    // An arrow-function property is no method definition, so it declares no
+    // element of its own and its writing stays the class's.
     assert!(depends(
         &structure,
         "packages/app/src/a.ts#type:Config",
@@ -1239,4 +1241,82 @@ fn the_same_dependency_witnessed_twice_is_one_relation() {
         .filter(|(_, to)| to == "packages/app/src/b.ts")
         .collect();
     assert_eq!(to_b.len(), 1);
+}
+
+#[test]
+fn a_public_method_is_an_element_inside_its_class() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/store.ts",
+            "export class Store {\n  load(): void {}\n}\n",
+        ),
+        (
+            "packages/app/src/other.ts",
+            "export const other = () => 1;\n",
+        ),
+    ]);
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/store.ts#function:Store.load"),
+        Some("packages/app/src/store.ts#type:Store".to_owned())
+    );
+}
+
+#[test]
+fn a_public_methods_reference_speaks_from_the_method() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/api.ts",
+            "export const fetchBooks = () => [];\n",
+        ),
+        (
+            "packages/app/src/store.ts",
+            "import { fetchBooks } from './api';\n\nexport class Store {\n  refresh(): void {\n    fetchBooks();\n  }\n}\n",
+        ),
+        (
+            "packages/app/src/other.ts",
+            "export const other = () => 1;\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/store.ts#function:Store.refresh",
+        "packages/app/src/api.ts#function:fetchBooks"
+    ));
+}
+
+#[test]
+fn a_private_members_writing_stays_the_classs_own() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/api.ts",
+            "export const fetchBooks = () => [];\n",
+        ),
+        (
+            "packages/app/src/store.ts",
+            "import { fetchBooks } from './api';\n\nexport class Store {\n  private warm(): void {\n    fetchBooks();\n  }\n  #prime(): void {\n    fetchBooks();\n  }\n}\n",
+        ),
+        (
+            "packages/app/src/other.ts",
+            "export const other = () => 1;\n",
+        ),
+    ]);
+    assert!(
+        !has_element(&structure, "packages/app/src/store.ts#function:Store.warm"),
+        "a private-modifier member is the class's internals"
+    );
+    assert!(
+        !has_element(
+            &structure,
+            "packages/app/src/store.ts#function:Store.#prime"
+        ),
+        "a #name never leaves the class"
+    );
+    assert!(depends(
+        &structure,
+        "packages/app/src/store.ts#type:Store",
+        "packages/app/src/api.ts#function:fetchBooks"
+    ));
 }

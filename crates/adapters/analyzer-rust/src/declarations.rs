@@ -21,6 +21,20 @@ pub struct Declaration {
     pub span: Range<usize>,
 }
 
+/// One declaration living inside another: a public method or associated
+/// function of a public type. It is an element of its own, contained by the
+/// type whose `impl` block declares it.
+#[derive(Debug, Clone)]
+pub struct NestedDeclaration {
+    pub element: Element,
+    /// The type element that holds this declaration.
+    pub holder: ElementId,
+    /// The holder's declared name, so a path that walked onto the holder
+    /// can take one more segment.
+    pub holder_name: String,
+    pub span: Range<usize>,
+}
+
 /// What the index answers about one declared name.
 #[derive(Debug)]
 pub struct IndexedDeclaration {
@@ -34,12 +48,19 @@ pub struct IndexedDeclaration {
 /// resolution must know the name lands here. When one name declares several
 /// items in a file, the first declaration in source order answers.
 #[derive(Debug, Default)]
-pub struct DeclarationIndex(BTreeMap<(SourcePath, String), IndexedDeclaration>);
+pub struct DeclarationIndex {
+    by_name: BTreeMap<(SourcePath, String), IndexedDeclaration>,
+    /// (file, holder name, method name) -> the method element, so a path
+    /// continuing one segment past a type lands on the method. Only public
+    /// methods enter: a path naming a private one lands on the type, the
+    /// way a path naming a private item lands on the module.
+    nested: BTreeMap<(SourcePath, String, String), ElementId>,
+}
 
 impl DeclarationIndex {
     pub fn add(&mut self, path: &SourcePath, declarations: &[Declaration]) {
         for declaration in declarations {
-            self.0
+            self.by_name
                 .entry((path.clone(), declaration.element.name.as_str().to_owned()))
                 .or_insert_with(|| IndexedDeclaration {
                     id: declaration.element.id.clone(),
@@ -48,13 +69,35 @@ impl DeclarationIndex {
         }
     }
 
+    pub fn add_nested(&mut self, path: &SourcePath, nested: &[NestedDeclaration]) {
+        for declaration in nested {
+            self.nested
+                .entry((
+                    path.clone(),
+                    declaration.holder_name.clone(),
+                    declaration.element.name.as_str().to_owned(),
+                ))
+                .or_insert_with(|| declaration.element.id.clone());
+        }
+    }
+
     pub fn declaration(&self, path: &SourcePath, name: &str) -> Option<&IndexedDeclaration> {
-        self.0.get(&(path.clone(), name.to_owned()))
+        self.by_name.get(&(path.clone(), name.to_owned()))
+    }
+
+    pub fn nested_declaration(
+        &self,
+        path: &SourcePath,
+        holder: &str,
+        name: &str,
+    ) -> Option<&ElementId> {
+        self.nested
+            .get(&(path.clone(), holder.to_owned(), name.to_owned()))
     }
 }
 
 /// The top-level functions, types, and inline modules a file declares.
-/// Nested items stay undeclared until the architecture model needs them.
+/// What lives inside a declaration is [`nested`]'s business.
 pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> Vec<Declaration> {
     let mut cursor = root.walk();
     let mut declarations = Vec::new();
@@ -93,6 +136,76 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
     declarations
 }
 
+/// The public methods and associated functions the file's inherent `impl`
+/// blocks declare for its public types. Each becomes an element of the type
+/// that holds it, named `Type::method` in its id so that same-named methods
+/// of different types stay distinct.
+///
+/// A trait impl (`impl Show for Config`) contributes no method elements:
+/// two traits may hand the same type same-named methods, which one id per
+/// name cannot tell apart, so trait-given behaviour stays the type's own -
+/// its spans keep speaking as the type through [`attributions`].
+pub fn nested(
+    root: tree_sitter::Node<'_>,
+    text: &str,
+    path: &SourcePath,
+    declarations: &[Declaration],
+) -> Vec<NestedDeclaration> {
+    let mut found = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cursor = root.walk();
+    for node in root.named_children(&mut cursor) {
+        if node.kind() != "impl_item" || node.child_by_field_name("trait").is_some() {
+            continue;
+        }
+        let Some(implemented) = implemented_type(node, text, declarations) else {
+            continue;
+        };
+        let Some(body) = node.child_by_field_name("body") else {
+            continue;
+        };
+        let mut items = body.walk();
+        for item in body.named_children(&mut items) {
+            if item.kind() != "function_item" {
+                continue;
+            }
+            let mut children = item.walk();
+            let public = item
+                .named_children(&mut children)
+                .any(|child| child.kind() == "visibility_modifier");
+            if !public {
+                continue;
+            }
+            let Some(name_node) = item.child_by_field_name("name") else {
+                continue;
+            };
+            let name = name_node
+                .utf8_text(text.as_bytes())
+                .expect("node ranges lie within the parsed text");
+            let holder_name = implemented.element.name.as_str().to_owned();
+            let id = declaration_id(
+                path,
+                ElementKind::Function,
+                &format!("{holder_name}::{name}"),
+            );
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            found.push(NestedDeclaration {
+                element: Element {
+                    id,
+                    name: ElementName::new(name).expect("a parsed identifier is never empty"),
+                    kind: ElementKind::Function,
+                },
+                holder: implemented.element.id.clone(),
+                holder_name,
+                span: item.byte_range(),
+            });
+        }
+    }
+    found
+}
+
 /// Which element speaks for each part of the file, so a reference
 /// attributes to the declaration that writes it rather than to the whole
 /// module. Only public declarations speak: a private declaration is no
@@ -103,25 +216,33 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
 pub struct Attributions(Vec<(Range<usize>, ElementId)>);
 
 impl Attributions {
+    /// The innermost declaration whose span covers the offset: spans nest -
+    /// a method inside its impl block - and the nearest enclosing
+    /// declaration is the one that writes the reference.
     pub fn speaker_at(&self, offset: usize) -> Option<&ElementId> {
         self.0
             .iter()
-            .find(|(span, _)| span.contains(&offset))
+            .filter(|(span, _)| span.contains(&offset))
+            .min_by_key(|(span, _)| span.end - span.start)
             .map(|(_, id)| id)
     }
 }
 
-/// Reads the file's speaking spans: every public top-level declaration, and
-/// every `impl` block whose self type is one of them. Rust attaches
-/// behaviour to types in blocks apart from the type's own declaration, so
-/// the references an `impl Config` makes are Config's coupling - including
-/// a `impl Show for Config`, which couples Config to Show. An impl of a
-/// private, foreign, or qualified type speaks for no declaration, and its
-/// references stay the module's.
+/// Reads the file's speaking spans: every public top-level declaration,
+/// every `impl` block whose self type is one of them, and every method
+/// element the file declares. Rust attaches behaviour to types in blocks
+/// apart from the type's own declaration, so the references an `impl
+/// Config` makes are Config's coupling - including a `impl Show for
+/// Config`, which couples Config to Show. Within such a block a public
+/// method of an inherent impl speaks for itself; the rest - associated
+/// consts, private methods, trait-given methods - keeps speaking as the
+/// type. An impl of a private, foreign, or qualified type speaks for no
+/// declaration, and its references stay the module's.
 pub fn attributions(
     root: tree_sitter::Node<'_>,
     text: &str,
     declarations: &[Declaration],
+    nested: &[NestedDeclaration],
 ) -> Attributions {
     let mut spans: Vec<(Range<usize>, ElementId)> = declarations
         .iter()
@@ -133,31 +254,41 @@ pub fn attributions(
         if node.kind() != "impl_item" {
             continue;
         }
-        let Some(self_type) = node.child_by_field_name("type") else {
-            continue;
-        };
-        // `impl<T> Wrapper<T>` implements Wrapper; the generic arguments
-        // narrow it, they do not change whose behaviour the block holds.
-        let self_type = if self_type.kind() == "generic_type" {
-            self_type.child_by_field_name("type").unwrap_or(self_type)
-        } else {
-            self_type
-        };
-        if self_type.kind() != "type_identifier" {
-            continue;
-        }
-        let name = self_type
-            .utf8_text(text.as_bytes())
-            .expect("node ranges lie within the parsed text");
-        let Some(implemented) = declarations
-            .iter()
-            .find(|declaration| declaration.public && declaration.element.name.as_str() == name)
-        else {
+        let Some(implemented) = implemented_type(node, text, declarations) else {
             continue;
         };
         spans.push((node.byte_range(), implemented.element.id.clone()));
     }
+    for declaration in nested {
+        spans.push((declaration.span.clone(), declaration.element.id.clone()));
+    }
     Attributions(spans)
+}
+
+/// The public same-file declaration an `impl` block implements, when its
+/// self type names one.
+fn implemented_type<'a>(
+    node: tree_sitter::Node<'_>,
+    text: &str,
+    declarations: &'a [Declaration],
+) -> Option<&'a Declaration> {
+    let self_type = node.child_by_field_name("type")?;
+    // `impl<T> Wrapper<T>` implements Wrapper; the generic arguments
+    // narrow it, they do not change whose behaviour the block holds.
+    let self_type = if self_type.kind() == "generic_type" {
+        self_type.child_by_field_name("type").unwrap_or(self_type)
+    } else {
+        self_type
+    };
+    if self_type.kind() != "type_identifier" {
+        return None;
+    }
+    let name = self_type
+        .utf8_text(text.as_bytes())
+        .expect("node ranges lie within the parsed text");
+    declarations
+        .iter()
+        .find(|declaration| declaration.public && declaration.element.name.as_str() == name)
 }
 
 /// Declaration ids embed the path and the kind so that same-named

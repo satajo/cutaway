@@ -1290,6 +1290,86 @@ mod tests {
         assert!(view.graph.element(&id("a/dir/two")).is_some());
     }
 
+    /// The fixture with a method inside a type: `a/lib` ⊃ `a/lib#type:Config`
+    /// ⊃ `a/lib#function:Config::load`, the method depending on `b/lib`.
+    fn fixture_with_a_method() -> ArchitectureGraph {
+        let mut graph = fixture();
+        graph
+            .add_element(element("a/lib#type:Config", ElementKind::Type))
+            .unwrap();
+        graph
+            .add_element(element(
+                "a/lib#function:Config::load",
+                ElementKind::Function,
+            ))
+            .unwrap();
+        for (from, to, kind) in [
+            ("a/lib", "a/lib#type:Config", RelationKind::Contains),
+            (
+                "a/lib#type:Config",
+                "a/lib#function:Config::load",
+                RelationKind::Contains,
+            ),
+            (
+                "a/lib#function:Config::load",
+                "b/lib",
+                RelationKind::DependsOn,
+            ),
+        ] {
+            graph.add_relation(relation(from, to, kind)).unwrap();
+        }
+        graph
+    }
+
+    #[test]
+    fn opening_a_type_reveals_its_methods_one_layer_down() {
+        let graph = fixture_with_a_method();
+        let mut cut = opened(["package:a", "a/lib"]);
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(view.graph.element(&id("a/lib#type:Config")).is_some());
+        assert!(
+            view.graph
+                .element(&id("a/lib#function:Config::load"))
+                .is_none(),
+            "a type with methods arrives closed, as every boundary does"
+        );
+
+        assert!(cut.expand(&view, &id("a/lib#type:Config")));
+        let view = boundary_view(&graph, &cut).unwrap();
+        assert!(
+            view.graph
+                .element(&id("a/lib#function:Config::load"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn hiding_functions_pools_a_methods_connections_in_its_type() {
+        let graph = fixture_with_a_method();
+        let mut cut = opened(["package:a", "a/lib", "a/lib#type:Config", "package:b"]);
+        cut.kinds.remove(&ElementKind::Function);
+        let view = boundary_view(&graph, &cut).unwrap();
+
+        assert!(
+            view.graph
+                .element(&id("a/lib#function:Config::load"))
+                .is_none()
+        );
+        let rolled = relation("a/lib#type:Config", "b/lib", RelationKind::DependsOn);
+        assert!(
+            view.graph.relations().any(|r| *r == rolled),
+            "the hidden method hands its connection to the type that holds it"
+        );
+        assert_eq!(
+            view.provenance[&rolled],
+            BTreeSet::from([relation(
+                "a/lib#function:Config::load",
+                "b/lib",
+                RelationKind::DependsOn
+            )])
+        );
+    }
+
     #[test]
     fn a_boundary_holding_nothing_the_vocabulary_shows_cannot_open() {
         let graph = fixture_with_items();

@@ -23,8 +23,11 @@
 //! code rather than a module of its own: its declarations are the package's
 //! items, its child modules are the package's modules, and an import that
 //! resolves to it lands on the package. Imports resolve down to the deepest
-//! file module that exists, and one segment further onto a top-level
-//! declaration of that module when the path continues. A module that re-exports the
+//! file module that exists, one segment further onto a top-level
+//! declaration of that module when the path continues, and one more onto a
+//! public method the declaration holds (`Config::new`). A public method of
+//! an inherent impl is an element of its own, contained by its type; what
+//! a trait impl gives a type stays the type's own. A module that re-exports the
 //! named item instead of declaring it forwards the import onwards, so
 //! facades (`pub use element::Element;`) resolve to the item behind them.
 //! Targets outside the project (std, third-party crates) are not part of
@@ -46,7 +49,7 @@ use cutaway_inspection::ports::source_analyzer::{
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
-use crate::declarations::{Attributions, Declaration, DeclarationIndex};
+use crate::declarations::{Attributions, Declaration, DeclarationIndex, NestedDeclaration};
 use crate::imports::{Import, Reference};
 use crate::manifest::DiscoveredPackage;
 use crate::modules::{ModuleCatalog, ModuleSurface, ResolvedTarget};
@@ -58,6 +61,9 @@ pub struct RustSourceAnalyzer;
 struct ParsedFile {
     path: SourcePath,
     declarations: Vec<Declaration>,
+    /// The public methods the file's inherent impl blocks declare for its
+    /// public types.
+    nested: Vec<NestedDeclaration>,
     imports: Vec<Import>,
     /// Paths the file mentions outside its `use` declarations.
     references: Vec<Reference>,
@@ -109,13 +115,16 @@ impl SourceAnalyzer for RustSourceAnalyzer {
             let root = tree.root_node();
             let declarations = declarations::top_level(root, text, &file.path);
             declaration_index.add(&file.path, &declarations);
+            let nested = declarations::nested(root, text, &file.path, &declarations);
+            declaration_index.add_nested(&file.path, &nested);
             let imports = imports::declared(root, text);
             reexports.add(&file.path, &imports);
             let references = imports::referenced(root, text);
-            let attributions = declarations::attributions(root, text, &declarations);
+            let attributions = declarations::attributions(root, text, &declarations, &nested);
             parsed.push(ParsedFile {
                 path: file.path.clone(),
                 declarations,
+                nested,
                 imports,
                 references,
                 attributions,
@@ -139,6 +148,12 @@ impl SourceAnalyzer for RustSourceAnalyzer {
                 elements.push(AnalyzedElement {
                     element: declaration.element.clone(),
                     parent: Some(module.id()),
+                });
+            }
+            for declaration in &file.nested {
+                elements.push(AnalyzedElement {
+                    element: declaration.element.clone(),
+                    parent: Some(declaration.holder.clone()),
                 });
             }
 
@@ -174,15 +189,34 @@ fn witness_dependencies(
         }
     }
 
+    // The containment chain within this file: a method sits in its type, a
+    // declaration in its module. An edge along that chain, in either
+    // direction, restates containment rather than witnessing a dependency.
+    let holder_of = |id: &ElementId| -> Option<ElementId> {
+        if let Some(nested) = file.nested.iter().find(|n| n.element.id == *id) {
+            return Some(nested.holder.clone());
+        }
+        file.declarations
+            .iter()
+            .any(|d| d.element.id == *id)
+            .then(|| module.id())
+    };
+    let holders = |id: &ElementId| -> Vec<ElementId> {
+        let mut chain = Vec::new();
+        let mut current = id.clone();
+        while let Some(above) = holder_of(&current) {
+            chain.push(above.clone());
+            current = above;
+        }
+        chain
+    };
     let mut depend = |from: ElementId, target: ResolvedTarget<'_>| {
         let to = match target {
             ResolvedTarget::Element(id) => {
-                // An edge into one's own module, or from a module onto a
-                // declaration it contains, restates containment rather than
-                // witnessing a dependency.
                 if id == from
                     || id == module.id()
-                    || (from == module.id() && file.declarations.iter().any(|d| d.element.id == id))
+                    || holders(&from).contains(&id)
+                    || holders(&id).contains(&from)
                 {
                     return;
                 }

@@ -13,10 +13,13 @@
 //!
 //! A dependency speaks from the declaration that writes it: a call in a
 //! function's body is the function's edge, a field's type the struct's, and
-//! what a method writes belongs to the type its receiver extends. An import,
-//! top-level code, and everything an unexported declaration writes speak from
-//! the file's own element - an unexported declaration is no element, so its
-//! coupling is the module's own.
+//! what a method writes belongs to the type its receiver extends. An
+//! exported method of an exported same-file type is an element of its own,
+//! contained by the type and speaking for itself; an unexported method
+//! keeps speaking as the type. An import, top-level code, and everything an
+//! unexported declaration writes speak from the file's own element - an
+//! unexported declaration is no element, so its coupling is the module's
+//! own.
 //!
 //! Directories are the boundaries. Go compiles and imports a whole
 //! directory at once and lets its files share one namespace, so the
@@ -55,7 +58,7 @@ use cutaway_inspection::ports::source_analyzer::{
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
-use crate::declarations::{Attributions, Declaration, DeclarationIndex};
+use crate::declarations::{Attributions, Declaration, DeclarationIndex, NestedDeclaration};
 use crate::imports::{Binding, Import, PackageNames, Reference};
 use crate::manifest::DiscoveredModule;
 use crate::packages::{Directory, DirectoryCatalog, GoFile, ResolvedImport};
@@ -66,6 +69,8 @@ pub struct GoSourceAnalyzer;
 struct ParsedFile {
     path: SourcePath,
     declarations: Vec<Declaration>,
+    /// The exported methods the file declares for its exported types.
+    nested: Vec<NestedDeclaration>,
     imports: Vec<Import>,
     /// The names the file writes outside its imports.
     references: Vec<Reference>,
@@ -111,10 +116,12 @@ impl SourceAnalyzer for GoSourceAnalyzer {
                 }
                 declarations
             };
+            let nested = declarations::nested(root, text, &file.path, &declarations);
             parsed.push(ParsedFile {
                 path: file.path.clone(),
-                attributions: declarations::attributions(root, text, &declarations),
+                attributions: declarations::attributions(root, text, &declarations, &nested),
                 declarations,
+                nested,
                 imports: imports::declared(root, text),
                 references: imports::referenced(root, text),
             });
@@ -136,6 +143,12 @@ impl SourceAnalyzer for GoSourceAnalyzer {
                 elements.push(AnalyzedElement {
                     element: declaration.element.clone(),
                     parent: Some(speaks_as.clone()),
+                });
+            }
+            for declaration in &file.nested {
+                elements.push(AnalyzedElement {
+                    element: declaration.element.clone(),
+                    parent: Some(declaration.holder.clone()),
                 });
             }
 
@@ -173,17 +186,36 @@ fn witness_dependencies(
     let speaks_as = cataloged.id();
     let directory = catalog.directory_of(cataloged);
     let own_directory = directory.id();
+    // The containment chain within this file: a method sits in its type, a
+    // declaration in the element the file speaks as. An edge along that
+    // chain, in either direction, restates containment rather than
+    // witnessing a dependency. The file may speak as its own module, as its
+    // directory, or as the package a module root dissolves into, so the
+    // guard reads the element the file actually speaks as.
+    let holder_of = |id: &ElementId| -> Option<ElementId> {
+        if let Some(nested) = file.nested.iter().find(|n| &n.element.id == id) {
+            return Some(nested.holder.clone());
+        }
+        file.declarations
+            .iter()
+            .any(|d| &d.element.id == id)
+            .then(|| speaks_as.clone())
+    };
+    let holders = |id: &ElementId| -> Vec<ElementId> {
+        let mut chain = Vec::new();
+        let mut current = id.clone();
+        while let Some(above) = holder_of(&current) {
+            chain.push(above.clone());
+            current = above;
+        }
+        chain
+    };
     let mut depend = |from: &ElementId, to: &ElementId| {
-        // An edge into the element the file speaks as, into the directory
-        // holding it, or from that element onto a declaration of the file,
-        // restates containment rather than witnessing a dependency. The file
-        // may speak as its own module, as its directory, or as the package a
-        // module root dissolves into, so the guard reads the element the file
-        // actually speaks as.
         if from == to
             || to == &speaks_as
             || to == &own_directory
-            || (from == &speaks_as && file.declarations.iter().any(|d| &d.element.id == to))
+            || holders(from).contains(to)
+            || holders(to).contains(from)
         {
             return;
         }

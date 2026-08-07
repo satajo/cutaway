@@ -514,7 +514,7 @@ fn an_enum_variant_witnesses_the_type_it_carries() {
 }
 
 #[test]
-fn an_impl_block_speaks_as_the_type_it_implements() {
+fn a_public_methods_reference_speaks_from_the_method() {
     let structure = analyze(&[
         MANIFEST_A,
         (
@@ -524,7 +524,7 @@ fn an_impl_block_speaks_as_the_type_it_implements() {
         ("crates/a/src/store.rs", "pub fn fetch() {}\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "crates/a/src/lib.rs#type:Config".to_owned(),
+        "crates/a/src/lib.rs#function:Config::load".to_owned(),
         "crates/a/src/store.rs#function:fetch".to_owned()
     )));
 }
@@ -712,4 +712,106 @@ fn a_file_with_syntax_errors_is_rejected() {
         result,
         Err(SourceAnalysisError::Unparseable { .. })
     ));
+}
+
+#[test]
+fn a_public_method_is_an_element_inside_its_type() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        (
+            "crates/a/src/config.rs",
+            "pub struct Config;\n\nimpl Config {\n    pub fn new() -> Self {\n        Config\n    }\n}\n",
+        ),
+        ("crates/a/src/lib.rs", "pub mod config;\n"),
+    ]);
+    assert_eq!(
+        parent_of(&structure, "crates/a/src/config.rs#function:Config::new"),
+        Some("crates/a/src/config.rs#type:Config".to_owned())
+    );
+}
+
+#[test]
+fn a_path_continuing_past_a_type_lands_on_its_method() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        MANIFEST_B,
+        (
+            "crates/a/src/lib.rs",
+            "use b_lib::config::Config;\n\npub fn go() {\n    let _ = Config::fresh();\n}\n",
+        ),
+        ("crates/b/src/lib.rs", "pub mod config;\n"),
+        (
+            "crates/b/src/config.rs",
+            "pub struct Config;\n\nimpl Config {\n    pub fn fresh() -> Self {\n        Config\n    }\n}\n",
+        ),
+    ]);
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs#function:go".to_owned(),
+        "crates/b/src/config.rs#function:Config::fresh".to_owned()
+    )));
+}
+
+#[test]
+fn a_private_methods_writing_stays_the_types_own() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        (
+            "crates/a/src/lib.rs",
+            "pub mod store;\n\npub struct Config;\n\nimpl Config {\n    fn refresh() {\n        crate::store::read();\n    }\n}\n",
+        ),
+        ("crates/a/src/store.rs", "pub fn read() {}\n"),
+    ]);
+    assert!(
+        !structure
+            .elements
+            .iter()
+            .any(|e| e.element.id.as_str() == "crates/a/src/lib.rs#function:Config::refresh"),
+        "a private method is the type's internals, not an element"
+    );
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs#type:Config".to_owned(),
+        "crates/a/src/store.rs#function:read".to_owned()
+    )));
+}
+
+#[test]
+fn a_trait_impls_methods_stay_the_types_own() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        (
+            "crates/a/src/lib.rs",
+            "pub mod store;\n\npub trait Show {\n    fn show(&self);\n}\n\npub struct Config;\n\nimpl Show for Config {\n    fn show(&self) {\n        crate::store::read();\n    }\n}\n",
+        ),
+        ("crates/a/src/store.rs", "pub fn read() {}\n"),
+    ]);
+    assert!(
+        !structure
+            .elements
+            .iter()
+            .any(|e| e.element.id.as_str() == "crates/a/src/lib.rs#function:Config::show"),
+        "two traits may hand a type same-named methods, which one id per name cannot tell apart"
+    );
+    assert!(dependencies(&structure).contains(&(
+        "crates/a/src/lib.rs#type:Config".to_owned(),
+        "crates/a/src/store.rs#function:read".to_owned()
+    )));
+}
+
+#[test]
+fn a_method_naming_its_own_type_says_nothing() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        (
+            "crates/a/src/config.rs",
+            "pub struct Config;\n\nimpl Config {\n    pub fn new() -> Config {\n        Config\n    }\n}\n",
+        ),
+        ("crates/a/src/lib.rs", "pub mod config;\n"),
+    ]);
+    assert!(
+        !dependencies(&structure).contains(&(
+            "crates/a/src/config.rs#function:Config::new".to_owned(),
+            "crates/a/src/config.rs#type:Config".to_owned()
+        )),
+        "the edge onto the holding type restates containment"
+    );
 }

@@ -14,7 +14,10 @@ use crate::ports::source_tree::{SourceFile, SourcePath};
 /// - Element ids derive only from source paths, kinds, and names — never from
 ///   ambient state — so the graphs of two versions of a project align.
 ///   Established schemes: `project:<name>`, `package:<name>`, `<path>` for a
-///   file, `<path>#<kind>:<name>` for a declaration.
+///   file, `<path>#<kind>:<name>` for a declaration. A declaration nested in
+///   another extends the holder's name with the language's own separator
+///   (`<path>#function:Config::new`, `<path>#function:Config.load`), so the
+///   id stays deterministic however deep declarations nest.
 /// - `parent` expresses containment. A parentless element attaches to the
 ///   project root. Containment must form a tree.
 /// - Relations may reference only elements declared in the same

@@ -21,6 +21,17 @@ pub struct Declaration {
     pub span: Range<usize>,
 }
 
+/// One declaration living inside another: an exported method of an exported
+/// same-file type. It is an element of its own, contained by the type its
+/// receiver extends.
+#[derive(Debug, Clone)]
+pub struct NestedDeclaration {
+    pub element: Element,
+    /// The type element that holds this declaration.
+    pub holder: ElementId,
+    pub span: Range<usize>,
+}
+
 /// What the index answers about one declared name.
 #[derive(Debug)]
 pub struct IndexedDeclaration {
@@ -64,9 +75,10 @@ impl DeclarationIndex {
 /// The top-level functions and types a file declares.
 ///
 /// Methods carry a receiver and belong to the type they extend, not to the
-/// directory's namespace, so they are no items of their own. Constants and
-/// variables stay out for the same reason the Rust adapter keeps them out:
-/// the architecture speaks about behaviour and shape, not about values.
+/// directory's namespace; [`nested`] declares them inside their type.
+/// Constants and variables stay out for the same reason the Rust adapter
+/// keeps them out: the architecture speaks about behaviour and shape, not
+/// about values.
 pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> Vec<Declaration> {
     let mut cursor = root.walk();
     let mut declarations = Vec::new();
@@ -117,6 +129,43 @@ fn declared(
     })
 }
 
+/// The exported methods the file declares for its exported types. Each
+/// becomes an element of the type its receiver extends, named `Type.name`
+/// in its id so that same-named methods of different types stay distinct.
+/// Go forbids a type two same-named methods, so the id is collision-free.
+pub fn nested(
+    root: tree_sitter::Node<'_>,
+    text: &str,
+    path: &SourcePath,
+    declarations: &[Declaration],
+) -> Vec<NestedDeclaration> {
+    let mut found = Vec::new();
+    let mut cursor = root.walk();
+    for node in root.named_children(&mut cursor) {
+        let Some((method_name, extended)) = extended_type(node, text, declarations) else {
+            continue;
+        };
+        if !method_name.chars().next().is_some_and(char::is_uppercase) {
+            continue;
+        }
+        let holder_name = extended.element.name.as_str();
+        found.push(NestedDeclaration {
+            element: Element {
+                id: declaration_id(
+                    path,
+                    ElementKind::Function,
+                    &format!("{holder_name}.{method_name}"),
+                ),
+                name: ElementName::new(&method_name).expect("a parsed identifier is never empty"),
+                kind: ElementKind::Function,
+            },
+            holder: extended.element.id.clone(),
+            span: node.byte_range(),
+        });
+    }
+    found
+}
+
 /// Which element speaks for each part of the file, so a reference attributes
 /// to the declaration that writes it rather than to the whole module. Only
 /// exported declarations speak: an unexported one is no element, so what it
@@ -127,50 +176,80 @@ fn declared(
 pub struct Attributions(Vec<(Range<usize>, ElementId)>);
 
 impl Attributions {
+    /// The innermost declaration whose span covers the offset, should spans
+    /// ever nest; Go's top-level declarations stand apart, so the innermost
+    /// is normally the only one.
     pub fn speaker_at(&self, offset: usize) -> Option<&ElementId> {
         self.0
             .iter()
-            .find(|(span, _)| span.contains(&offset))
+            .filter(|(span, _)| span.contains(&offset))
+            .min_by_key(|(span, _)| span.end - span.start)
             .map(|(_, id)| id)
     }
 }
 
-/// Reads the file's speaking spans: every exported top-level declaration, and
-/// every method whose receiver is one of them. Go attaches behaviour to a
-/// type in declarations that stand apart from the type's own, so what a
-/// method writes is the receiver type's coupling. A method whose receiver is
-/// unexported, or is declared in another file of the directory, speaks for no
-/// declaration of this file, and its references stay the module's.
+/// Reads the file's speaking spans: every exported top-level declaration,
+/// every method element the file declares, and every remaining method whose
+/// receiver is an exported same-file type. Go attaches behaviour to a type
+/// in declarations that stand apart from the type's own, so what an
+/// unexported method writes is still the receiver type's coupling; an
+/// exported method is an element and speaks for itself. A method whose
+/// receiver is unexported, or is declared in another file of the directory,
+/// speaks for no declaration of this file, and its references stay the
+/// module's.
 pub fn attributions(
     root: tree_sitter::Node<'_>,
     text: &str,
     declarations: &[Declaration],
+    nested: &[NestedDeclaration],
 ) -> Attributions {
     let mut spans: Vec<(Range<usize>, ElementId)> = declarations
         .iter()
         .filter(|declaration| declaration.exported)
         .map(|declaration| (declaration.span.clone(), declaration.element.id.clone()))
         .collect();
+    for declaration in nested {
+        spans.push((declaration.span.clone(), declaration.element.id.clone()));
+    }
     let mut cursor = root.walk();
     for node in root.named_children(&mut cursor) {
-        if node.kind() != "method_declaration" {
+        if nested
+            .iter()
+            .any(|declaration| declaration.span == node.byte_range())
+        {
             continue;
         }
-        let Some(receiver) = receiver_type(node) else {
-            continue;
-        };
-        let name = receiver
-            .utf8_text(text.as_bytes())
-            .expect("node ranges lie within the parsed text");
-        let Some(extended) = declarations
-            .iter()
-            .find(|declaration| declaration.exported && declaration.element.name.as_str() == name)
-        else {
+        let Some((_, extended)) = extended_type(node, text, declarations) else {
             continue;
         };
         spans.push((node.byte_range(), extended.element.id.clone()));
     }
     Attributions(spans)
+}
+
+/// The method name and the exported same-file type a method declaration
+/// extends, when its receiver names one.
+fn extended_type<'a>(
+    node: tree_sitter::Node<'_>,
+    text: &str,
+    declarations: &'a [Declaration],
+) -> Option<(String, &'a Declaration)> {
+    if node.kind() != "method_declaration" {
+        return None;
+    }
+    let receiver = receiver_type(node)?;
+    let receiver_name = receiver
+        .utf8_text(text.as_bytes())
+        .expect("node ranges lie within the parsed text");
+    let extended = declarations.iter().find(|declaration| {
+        declaration.exported && declaration.element.name.as_str() == receiver_name
+    })?;
+    let method_name = node
+        .child_by_field_name("name")?
+        .utf8_text(text.as_bytes())
+        .expect("node ranges lie within the parsed text")
+        .to_owned();
+    Some((method_name, extended))
 }
 
 /// The type a method extends, as the identifier that names it. `func (c

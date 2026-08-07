@@ -18,10 +18,12 @@
 //!
 //! A dependency speaks from the declaration that writes it: a call in a
 //! function's body is the function's edge, a property's type the interface's,
-//! and a component rendered in a component's body the renderer's. An import
-//! statement, top-level code, and everything an unexported declaration writes
-//! speak from the module - an unexported declaration is no element, so its
-//! coupling is the module's own.
+//! and a component rendered in a component's body the renderer's. A public
+//! method of an exported class is an element of its own, contained by the
+//! class and speaking for itself; a private member keeps speaking as the
+//! class. An import statement, top-level code, and everything an unexported
+//! declaration writes speak from the module - an unexported declaration is no
+//! element, so its coupling is the module's own.
 //!
 //! Files are modules, and the directories that group at least two of them are
 //! directories: a specifier names a file, so the file is the unit of
@@ -62,7 +64,7 @@ use cutaway_inspection::ports::source_analyzer::{
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
-use crate::declarations::{Attributions, Declaration, DeclarationIndex};
+use crate::declarations::{Attributions, Declaration, DeclarationIndex, NestedDeclaration};
 use crate::imports::{Import, Reference};
 use crate::manifest::DiscoveredPackage;
 use crate::modules::{Module, ModuleCatalog, ModuleSurface, ResolvedSpecifier};
@@ -74,6 +76,8 @@ pub struct TypeScriptSourceAnalyzer;
 struct ParsedFile {
     path: SourcePath,
     declarations: Vec<Declaration>,
+    /// The public methods the file's exported classes declare.
+    nested: Vec<NestedDeclaration>,
     imports: Vec<Import>,
     /// The names the file writes outside its import statements.
     references: Vec<Reference>,
@@ -132,12 +136,14 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
             let root = tree.root_node();
             let surface = declarations::top_level(root, text, &file.path);
             declaration_index.add(&file.path, &surface);
+            let nested = declarations::nested(root, text, &file.path, &surface.declarations);
             let imports = imports::declared(root, text);
             reexports.add(&file.path, &imports);
             parsed.push(ParsedFile {
                 path: file.path.clone(),
-                attributions: Attributions::of(&surface.declarations),
+                attributions: Attributions::of(&surface.declarations, &nested),
                 declarations: surface.declarations,
+                nested,
                 imports,
                 references: imports::referenced(root, text),
             });
@@ -165,6 +171,15 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
                     parent: Some(module.id()),
                 });
             }
+            for declaration in &file.nested {
+                if !declared_ids.insert(declaration.element.id.clone()) {
+                    continue;
+                }
+                elements.push(AnalyzedElement {
+                    element: declaration.element.clone(),
+                    parent: Some(declaration.holder.clone()),
+                });
+            }
 
             witness_dependencies(&file, module, &catalog, &packages, surface, &mut relations);
         }
@@ -188,12 +203,32 @@ fn witness_dependencies(
     surface: ModuleSurface<'_>,
     relations: &mut BTreeSet<Relation>,
 ) {
+    // The containment chain within this file: a method sits in its class, a
+    // declaration in its module. An edge along that chain, in either
+    // direction, restates containment rather than witnessing a dependency.
+    let holder_of = |id: &ElementId| -> Option<ElementId> {
+        if let Some(nested) = file.nested.iter().find(|n| &n.element.id == id) {
+            return Some(nested.holder.clone());
+        }
+        file.declarations
+            .iter()
+            .any(|d| &d.element.id == id)
+            .then(|| module.id())
+    };
+    let holders = |id: &ElementId| -> Vec<ElementId> {
+        let mut chain = Vec::new();
+        let mut current = id.clone();
+        while let Some(above) = holder_of(&current) {
+            chain.push(above.clone());
+            current = above;
+        }
+        chain
+    };
     let mut depend = |from: &ElementId, to: &ElementId| {
-        // An edge into one's own module, or from a module onto a declaration it
-        // holds, restates containment rather than witnessing a dependency.
         if from == to
             || to == &module.id()
-            || (from == &module.id() && file.declarations.iter().any(|d| &d.element.id == to))
+            || holders(from).contains(to)
+            || holders(to).contains(from)
         {
             return;
         }
@@ -253,7 +288,9 @@ fn witness_dependencies(
 /// imports alone, because only a namespace import binds a qualifier that
 /// stands for a module. A bare name is the file's own declaration first - a
 /// declaration shadows anything an import brought in - and what an import
-/// bound for it otherwise.
+/// bound for it otherwise. A method is never a target: `obj.method()` reads
+/// against a value, and without type inference the value's class is unknown,
+/// so member access resolves no deeper than the class.
 fn resolve_reference(
     file: &ParsedFile,
     reference: &Reference,

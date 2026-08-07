@@ -368,7 +368,7 @@ fn the_files_of_the_module_root_share_the_packages_namespace() {
 }
 
 #[test]
-fn a_method_speaks_as_the_type_its_receiver_extends() {
+fn a_pointer_and_a_value_receiver_extend_the_same_plain_type() {
     let structure = analyze(&[
         ALPHA,
         STORE,
@@ -377,26 +377,30 @@ fn a_method_speaks_as_the_type_its_receiver_extends() {
             "package app\n\nimport \"example.com/alpha/store\"\n\ntype Config struct{}\n\nfunc (c *Config) Load() { store.Open() }\n\ntype Cache struct{}\n\nfunc (c Cache) Warm() { store.Close() }\n",
         ),
     ]);
-    assert!(
-        depends(
-            &structure,
-            "alpha/app/app.go#type:Config",
-            "alpha/store/store.go#function:Open"
-        ),
+    assert_eq!(
+        parent_of(&structure, "alpha/app/app.go#function:Config.Load"),
+        Some("alpha/app/app.go#type:Config".to_owned()),
         "a pointer receiver extends the plain type"
     );
-    assert!(
-        depends(
-            &structure,
-            "alpha/app/app.go#type:Cache",
-            "alpha/store/store.go#function:Close"
-        ),
+    assert_eq!(
+        parent_of(&structure, "alpha/app/app.go#function:Cache.Warm"),
+        Some("alpha/app/app.go#type:Cache".to_owned()),
         "a value receiver extends the same type"
     );
+    assert!(depends(
+        &structure,
+        "alpha/app/app.go#function:Config.Load",
+        "alpha/store/store.go#function:Open"
+    ));
+    assert!(depends(
+        &structure,
+        "alpha/app/app.go#function:Cache.Warm",
+        "alpha/store/store.go#function:Close"
+    ));
 }
 
 #[test]
-fn a_method_on_a_generic_type_speaks_as_that_type() {
+fn a_method_on_a_generic_type_extends_the_plain_type() {
     let structure = analyze(&[
         ALPHA,
         STORE,
@@ -405,9 +409,13 @@ fn a_method_on_a_generic_type_speaks_as_that_type() {
             "package app\n\nimport \"example.com/alpha/store\"\n\ntype Set[T any] struct{}\n\nfunc (s *Set[T]) Add(item T) { store.Open() }\n",
         ),
     ]);
+    assert_eq!(
+        parent_of(&structure, "alpha/app/app.go#function:Set.Add"),
+        Some("alpha/app/app.go#type:Set".to_owned())
+    );
     assert!(depends(
         &structure,
-        "alpha/app/app.go#type:Set",
+        "alpha/app/app.go#function:Set.Add",
         "alpha/store/store.go#function:Open"
     ));
 }
@@ -980,4 +988,60 @@ func run(ctx interface{ Done() <-chan struct{} }) {
         ],
         "build tags, type sets, and generics are ordinary Go, not a parse failure"
     );
+}
+
+#[test]
+fn an_exported_method_is_an_element_inside_its_type() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/config/config.go",
+            "package config\n\ntype Config struct{}\n\nfunc (c *Config) Load() {}\n",
+        ),
+    ]);
+    assert_eq!(
+        parent_of(&structure, "alpha/config/config.go#function:Config.Load"),
+        Some("alpha/config/config.go#type:Config".to_owned())
+    );
+}
+
+#[test]
+fn an_exported_methods_reference_speaks_from_the_method() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/config/config.go",
+            "package config\n\nimport \"example.com/alpha/store\"\n\ntype Config struct{}\n\nfunc (c *Config) Load() {\n\tstore.Open()\n}\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "alpha/config/config.go#function:Config.Load",
+        "alpha/store/store.go#function:Open"
+    ));
+}
+
+#[test]
+fn an_unexported_methods_writing_stays_the_types_own() {
+    let structure = analyze(&[
+        ALPHA,
+        STORE,
+        (
+            "alpha/config/config.go",
+            "package config\n\nimport \"example.com/alpha/store\"\n\ntype Config struct{}\n\nfunc (c *Config) refresh() {\n\tstore.Open()\n}\n",
+        ),
+    ]);
+    assert!(
+        !structure
+            .elements
+            .iter()
+            .any(|e| e.element.id.as_str() == "alpha/config/config.go#function:Config.refresh"),
+        "an unexported method is the type's internals, not an element"
+    );
+    assert!(depends(
+        &structure,
+        "alpha/config/config.go#type:Config",
+        "alpha/store/store.go#function:Open"
+    ));
 }

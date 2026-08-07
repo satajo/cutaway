@@ -393,6 +393,20 @@ impl ModuleCatalog {
             return Resolution::claimed(ResolvedTarget::Element(module.id()));
         };
         if let Some(item) = surface.declarations.declaration(&module.path, name) {
+            // A path may continue one segment past a type onto a method the
+            // type declares (`Config::new`). A name the type holds no method
+            // element for - a private method, a trait-given one, an
+            // associated const - lands on the type, the way a private item
+            // lands on the module.
+            if item.public
+                && let Some(method) = rest.get(consumed + 1).and_then(|next| {
+                    surface
+                        .declarations
+                        .nested_declaration(&module.path, name, next)
+                })
+            {
+                return Resolution::claimed(ResolvedTarget::Element(method.clone()));
+            }
             // A private item is the module's internals: what names it
             // depends on the module.
             let target = if item.public {

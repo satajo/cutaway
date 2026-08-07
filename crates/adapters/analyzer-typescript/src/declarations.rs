@@ -32,6 +32,128 @@ pub struct FileSurface {
     pub default_export: Option<String>,
 }
 
+/// One declaration living inside another: a public method of an exported
+/// class. It is an element of its own, contained by the class that declares
+/// it.
+#[derive(Debug, Clone)]
+pub struct NestedDeclaration {
+    pub element: Element,
+    /// The class element that holds this declaration.
+    pub holder: ElementId,
+    pub span: Range<usize>,
+}
+
+/// The public methods the file's exported classes declare. Each becomes an
+/// element of its class, named `Class.name` in its id so that same-named
+/// methods of different classes stay distinct; a static and an instance
+/// method sharing a name collapse to the first, as duplicate names do
+/// elsewhere. A `#name` or `private`-modifier member is the class's
+/// internals and declares nothing.
+pub fn nested(
+    root: tree_sitter::Node<'_>,
+    text: &str,
+    path: &SourcePath,
+    declarations: &[Declaration],
+) -> Vec<NestedDeclaration> {
+    let mut found = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for class in class_nodes(root) {
+        let Some(name_node) = class.child_by_field_name("name") else {
+            continue;
+        };
+        let class_name = text_of(name_node, text);
+        let Some(holder) = declarations.iter().find(|declaration| {
+            declaration.exported
+                && declaration.element.kind == ElementKind::Type
+                && declaration.element.name.as_str() == class_name
+        }) else {
+            continue;
+        };
+        let Some(body) = class.child_by_field_name("body") else {
+            continue;
+        };
+        let mut members = body.walk();
+        for member in body.named_children(&mut members) {
+            if !matches!(
+                member.kind(),
+                "method_definition" | "method_signature" | "abstract_method_signature"
+            ) || is_private_member(member, text)
+            {
+                continue;
+            }
+            let Some(name) = member
+                .child_by_field_name("name")
+                .filter(|name| name.kind() == "property_identifier")
+            else {
+                continue;
+            };
+            let name = text_of(name, text);
+            let id = declaration_id(path, ElementKind::Function, &format!("{class_name}.{name}"));
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            found.push(NestedDeclaration {
+                element: Element {
+                    id,
+                    name: ElementName::new(&name).expect("a parsed identifier is never empty"),
+                    kind: ElementKind::Function,
+                },
+                holder: holder.element.id.clone(),
+                span: member.byte_range(),
+            });
+        }
+    }
+    found
+}
+
+/// The class declarations of the file's top level, unwrapped from the export
+/// and `declare` statements around them.
+fn class_nodes(root: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
+    let mut classes = Vec::new();
+    let mut cursor = root.walk();
+    for node in root.named_children(&mut cursor) {
+        let candidate = match node.kind() {
+            "export_statement" | "ambient_declaration" => {
+                node.child_by_field_name("declaration").or_else(|| {
+                    let mut children = node.walk();
+                    node.named_children(&mut children).find(|child| {
+                        matches!(
+                            child.kind(),
+                            "class_declaration" | "abstract_class_declaration"
+                        )
+                    })
+                })
+            }
+            _ => Some(node),
+        };
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        if matches!(
+            candidate.kind(),
+            "class_declaration" | "abstract_class_declaration"
+        ) {
+            classes.push(candidate);
+        }
+    }
+    classes
+}
+
+/// Whether a class member keeps to itself: a `#name` never leaves the class,
+/// and a `private` modifier says the same in TypeScript's words.
+fn is_private_member(member: tree_sitter::Node<'_>, text: &str) -> bool {
+    if member
+        .child_by_field_name("name")
+        .is_some_and(|name| name.kind() == "private_property_identifier")
+    {
+        return true;
+    }
+    let mut cursor = member.walk();
+    member
+        .children(&mut cursor)
+        .any(|child| child.kind() == "accessibility_modifier" && text_of(child, text) == "private")
+}
+
 /// Which element speaks for each part of the file, so a reference attributes
 /// to the declaration that writes it rather than to the whole module. Only
 /// exported declarations speak: an unexported one is no element, so what it
@@ -42,25 +164,37 @@ pub struct FileSurface {
 /// A TypeScript declaration carries everything it owns inside its own node: a
 /// class holds its methods, an interface its members, a `const` its arrow
 /// function. Nothing attaches behaviour to a declaration from elsewhere in the
-/// file, so the declaration spans alone answer.
+/// file, so the declaration spans alone answer, and a method's span nests
+/// inside its class's.
 #[derive(Debug, Default)]
 pub struct Attributions(Vec<(Range<usize>, ElementId)>);
 
 impl Attributions {
-    pub fn of(declarations: &[Declaration]) -> Self {
+    pub fn of(declarations: &[Declaration], nested: &[NestedDeclaration]) -> Self {
         Self(
             declarations
                 .iter()
                 .filter(|declaration| declaration.exported)
                 .map(|declaration| (declaration.span.clone(), declaration.element.id.clone()))
+                .chain(
+                    nested.iter().map(|declaration| {
+                        (declaration.span.clone(), declaration.element.id.clone())
+                    }),
+                )
                 .collect(),
         )
     }
 
+    /// The innermost declaration whose span covers the offset: a public
+    /// method's span lies inside its class's, and the nearest enclosing
+    /// declaration is the one that writes the reference. What a private
+    /// member writes stays the class's own, since only public methods carry
+    /// spans of their own.
     pub fn speaker_at(&self, offset: usize) -> Option<&ElementId> {
         self.0
             .iter()
-            .find(|(span, _)| span.contains(&offset))
+            .filter(|(span, _)| span.contains(&offset))
+            .min_by_key(|(span, _)| span.end - span.start)
             .map(|(_, id)| id)
     }
 }

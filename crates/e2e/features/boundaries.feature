@@ -355,6 +355,36 @@ Feature: The boundary lens
     Then the boundary "app" contains "drive"
     And a connection goes from "drive" to "serve"
 
+  Scenario: Opening a type reveals its methods
+    Given a package "app" at "crates/app"
+    And a source file "crates/app/src/lib.rs" containing:
+      """
+      pub mod config;
+      pub mod store;
+      """
+    And a source file "crates/app/src/config.rs" containing:
+      """
+      pub struct Config;
+
+      impl Config {
+          pub fn load() {
+              crate::store::read();
+          }
+      }
+      """
+    And a source file "crates/app/src/store.rs" containing:
+      """
+      pub fn read() {}
+      """
+    When the project is inspected
+    And the boundaries are viewed
+    And every boundary is opened
+    Then the boundary "Config" contains "load"
+    And a connection goes from "load" to "read"
+    When "functions" are hidden from the picture
+    Then the boundaries do not include "load"
+    And a connection goes from "Config" to "store"
+
   Scenario: Hidden directories pool their modules in the package
     Given a source file "app/package.json" containing:
       """
