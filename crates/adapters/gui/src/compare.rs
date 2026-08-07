@@ -499,18 +499,24 @@ pub(crate) fn tools(ui: &mut egui::Ui, history: &History, session: &mut CompareS
     }
     ui.separator();
     ui.label("Show");
-    if let Some(kind) = vocabulary::chips(ui, &session.cut.kinds) {
+    // Presence comes from the union, so a kind either version holds counts.
+    let present = vocabulary::present_kinds(session.comparison.union());
+    if let Some(kind) = vocabulary::chips(ui, &session.cut.kinds, &present) {
         session.toggle_kind(kind);
     }
     if let Some(request) = vocabulary::layer_buttons(ui) {
         session.obey(request);
     }
     if ui
-        .button("Focus changes")
-        .on_hover_text(
-            "Open every boundary that hides a change, so each arrival \
-             and each departure shows at its own level.",
+        .add_enabled(
+            !session.comparison.delta().is_empty(),
+            egui::Button::new("Focus changes"),
         )
+        .on_hover_text(
+            "Open every boundary that hides a change, so each arrival, \
+             each departure, and each change inside shows at its own level.",
+        )
+        .on_disabled_hover_text("These versions hold no change to focus")
         .clicked()
     {
         session.focus_changes();
@@ -736,7 +742,9 @@ pub(crate) fn overlay(ctx: &egui::Context, session: &mut CompareSession) {
     if session.palette.is_open() {
         return;
     }
-    if let Some(request) = vocabulary::requested(ctx) {
+    if let Some(request) =
+        vocabulary::requested(ctx, &vocabulary::present_kinds(session.comparison.union()))
+    {
         session.obey(request);
     }
     if camera::refit_requested(ctx) {

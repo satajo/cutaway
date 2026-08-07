@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use cutaway_architecture::ElementKind;
+use cutaway_architecture::{ArchitectureGraph, ElementKind};
 use eframe::egui;
 
 /// The kinds the picture can speak about, with the label and the digit each
@@ -33,9 +33,22 @@ pub(crate) enum Request {
     CloseLayer,
 }
 
-/// The vocabulary of the whole picture, as one chip per kind. Answers with
+/// The kinds the architecture holds, over every element of the graph. A
+/// control over a kind outside this set would toggle an empty set and change
+/// nothing visible, so the chips and the digits gate themselves on it.
+pub(crate) fn present_kinds(graph: &ArchitectureGraph) -> BTreeSet<ElementKind> {
+    graph.elements().map(|element| element.kind).collect()
+}
+
+/// The vocabulary of the whole picture, as one chip per kind. A chip whose
+/// kind the architecture does not hold sits disabled, still showing its
+/// state: it keeps the row's shape and says why it cannot act. Answers with
 /// the kind the reader toggled, and with None every other frame.
-pub(crate) fn chips(ui: &mut egui::Ui, kinds: &BTreeSet<ElementKind>) -> Option<ElementKind> {
+pub(crate) fn chips(
+    ui: &mut egui::Ui,
+    kinds: &BTreeSet<ElementKind>,
+    present: &BTreeSet<ElementKind>,
+) -> Option<ElementKind> {
     let mut toggled = None;
     ui.scope(|ui| {
         // The chips sit against each other, so the row reads as one control
@@ -43,11 +56,22 @@ pub(crate) fn chips(ui: &mut egui::Ui, kinds: &BTreeSet<ElementKind>) -> Option<
         ui.spacing_mut().item_spacing.x = 1.0;
         for (position, (kind, label, _)) in KINDS.into_iter().enumerate() {
             let clicked = ui
-                .selectable_label(kinds.contains(&kind), label)
+                .add_enabled(
+                    present.contains(&kind),
+                    egui::Button::selectable(kinds.contains(&kind), label),
+                )
                 .on_hover_text(format!(
                     "Show {} in the picture ({})",
                     label.to_lowercase(),
                     position + 1
+                ))
+                // "The architecture" rather than "this project": a Rust
+                // repository plainly holds filesystem directories, yet its
+                // architecture holds no directory elements - the sentence
+                // must not read as false about the files on disk.
+                .on_disabled_hover_text(format!(
+                    "The architecture holds no {} to show or hide",
+                    label.to_lowercase()
                 ))
                 .clicked();
             if clicked {
@@ -87,13 +111,18 @@ pub(crate) fn layer_buttons(ui: &mut egui::Ui) -> Option<Request> {
 /// so the shell asks this only while no text field holds the keyboard and no
 /// palette is open. The palette takes its own keys before this runs and
 /// never asks for a digit, so the two never contend.
-pub(crate) fn requested(ctx: &egui::Context) -> Option<Request> {
+///
+/// A digit answering to a kind the architecture does not hold asks nothing,
+/// for the same reason its chip sits disabled: toggling an empty set changes
+/// nothing visible and would read as a fault.
+pub(crate) fn requested(ctx: &egui::Context, present: &BTreeSet<ElementKind>) -> Option<Request> {
     if ctx.text_edit_focused() {
         return None;
     }
     ctx.input_mut(|input| {
         KINDS
             .into_iter()
+            .filter(|(kind, _, _)| present.contains(kind))
             .find(|(_, _, key)| input.consume_key(egui::Modifiers::NONE, *key))
             .map(|(kind, _, _)| Request::Toggle(kind))
             .or_else(|| {
@@ -121,7 +150,43 @@ pub(crate) fn standing(open: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use cutaway_architecture::{Element, ElementId, ElementName};
+
     use super::*;
+
+    fn holding(kinds: &[ElementKind]) -> ArchitectureGraph {
+        let mut graph = ArchitectureGraph::new();
+        for (position, kind) in kinds.iter().enumerate() {
+            let name = format!("element-{position}");
+            graph
+                .add_element(Element {
+                    id: ElementId::new(&name).unwrap(),
+                    name: ElementName::new(&name).unwrap(),
+                    kind: *kind,
+                    fingerprint: None,
+                })
+                .unwrap();
+        }
+        graph
+    }
+
+    #[test]
+    fn an_empty_architecture_presents_no_kinds() {
+        assert_eq!(present_kinds(&holding(&[])), BTreeSet::new());
+    }
+
+    #[test]
+    fn an_architecture_presents_exactly_the_kinds_its_elements_carry() {
+        let graph = holding(&[
+            ElementKind::Package,
+            ElementKind::Module,
+            ElementKind::Module,
+        ]);
+        assert_eq!(
+            present_kinds(&graph),
+            BTreeSet::from([ElementKind::Package, ElementKind::Module])
+        );
+    }
 
     #[test]
     fn a_picture_of_closed_boxes_counts_nothing() {

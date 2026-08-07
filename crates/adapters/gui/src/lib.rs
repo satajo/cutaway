@@ -1542,7 +1542,7 @@ fn explore_overlay(ctx: &egui::Context, session: &mut Session) {
     if session.palette.is_open() {
         return;
     }
-    if let Some(request) = vocabulary::requested(ctx) {
+    if let Some(request) = vocabulary::requested(ctx, &vocabulary::present_kinds(&session.viewed)) {
         obey(session, request);
     }
     if camera::refit_requested(ctx) {
@@ -1645,7 +1645,10 @@ fn invitation(ui: &mut egui::Ui, picking: bool) -> bool {
 fn project_tools(ui: &mut egui::Ui, session: &mut Session) {
     ui.separator();
     ui.label("Show");
-    if let Some(kind) = vocabulary::chips(ui, &session.cut.kinds) {
+    // Presence comes from the viewed graph, so a kind a plan alone brings in
+    // counts, and one the project gains later frees its chip by itself.
+    let present = vocabulary::present_kinds(&session.viewed);
+    if let Some(kind) = vocabulary::chips(ui, &session.cut.kinds, &present) {
         session.toggle_kind(kind);
     }
     if let Some(request) = vocabulary::layer_buttons(ui) {
