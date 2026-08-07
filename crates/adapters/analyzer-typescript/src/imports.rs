@@ -1,11 +1,13 @@
 //! Specifier extraction: which modules a file names, which names it takes
-//! from each, and the qualified references a namespace import leaves behind.
+//! from each, and the names the rest of the file writes.
 //!
 //! Every specifier witnesses a dependency, whatever form it takes: a static
 //! import, a type-only import (type coupling is coupling), a re-export, a
 //! dynamic `import()`, and a `require()` all state that one module needs
 //! another. The names taken from a specifier state which part of it the code
 //! actually touches, which is a fact of its own.
+
+use std::ops::Range;
 
 use crate::text_of;
 
@@ -14,9 +16,8 @@ use crate::text_of;
 pub struct Import {
     /// The specifier as written, without its quotes.
     pub specifier: String,
-    /// The names the statement takes from the target, as the target offers
-    /// them. A default import takes `default`.
-    pub names: Vec<String>,
+    /// The names the statement takes from the target.
+    pub names: Vec<ImportedName>,
     /// The name an `import * as ns` binds for the rest of the file.
     pub namespace: Option<String>,
     /// What the statement puts on its own file's surface.
@@ -36,6 +37,17 @@ impl Import {
             wildcard_reexport: false,
         }
     }
+}
+
+/// One name a statement moves across a module boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedName {
+    /// The name as the target offers it. A default import takes `default`.
+    pub name: String,
+    /// The name the importing file writes for it, when the statement binds one
+    /// in the file's own scope: an alias renames what it binds, and a
+    /// re-export binds nothing locally at all.
+    pub local: Option<String>,
 }
 
 /// One name a file offers while the declaration behind it lives elsewhere.
@@ -79,8 +91,11 @@ fn imported(node: tree_sitter::Node<'_>, text: &str) -> Option<Import> {
     for child in clause.named_children(&mut cursor) {
         match child.kind() {
             // A default import binds whatever the target exports as its
-            // default.
-            "identifier" => import.names.push("default".to_owned()),
+            // default, under a name of the importing file's choosing.
+            "identifier" => import.names.push(ImportedName {
+                name: "default".to_owned(),
+                local: Some(text_of(child, text)),
+            }),
             "namespace_import" => {
                 let mut names = child.walk();
                 import.namespace = child
@@ -94,8 +109,18 @@ fn imported(node: tree_sitter::Node<'_>, text: &str) -> Option<Import> {
                     child
                         .named_children(&mut specifiers)
                         .filter(|specifier| specifier.kind() == "import_specifier")
-                        .filter_map(|specifier| specifier.child_by_field_name("name"))
-                        .map(|name| text_of(name, text)),
+                        .filter_map(|specifier| {
+                            let name = text_of(specifier.child_by_field_name("name")?, text);
+                            // `import { a as b }` takes `a` and binds `b`;
+                            // without an alias the two are the same name.
+                            let local = specifier
+                                .child_by_field_name("alias")
+                                .map_or_else(|| name.clone(), |alias| text_of(alias, text));
+                            Some(ImportedName {
+                                name,
+                                local: Some(local),
+                            })
+                        }),
                 );
             }
             _ => {}
@@ -128,7 +153,10 @@ fn reexported(node: tree_sitter::Node<'_>, text: &str) -> Option<Import> {
         let name = specifier
             .child_by_field_name("alias")
             .map_or_else(|| from.clone(), |alias| text_of(alias, text));
-        import.names.push(from.clone());
+        import.names.push(ImportedName {
+            name: from.clone(),
+            local: None,
+        });
         import.reexports.push(Reexport { name, from });
     }
     Some(import)
@@ -158,30 +186,63 @@ fn collect_calls(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Import>)
     }
 }
 
-/// Collects every qualified name the file mentions: the qualifier and the
-/// name behind the dot. A namespace import binds the qualifier, so
-/// `ns.Widget` states which part of the imported module the code touches.
+/// One name the file mentions outside its import statements, and where in the
+/// file it stands, so the mention attributes to the declaration that writes
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    /// The qualifier the name was written behind, when it was written behind
+    /// one. A namespace import binds such a qualifier.
+    pub qualifier: Option<String>,
+    pub name: String,
+    pub span: Range<usize>,
+}
+
+/// Collects every name the file mentions outside its import statements: the
+/// qualified ones as a qualifier and the name behind the dot, and the bare
+/// ones the code writes where a name can only mean a declaration.
 ///
 /// The ecosystem writes the qualification two ways. In an expression it is a
 /// member access whose object may be any value, so only a plain identifier
 /// can be a namespace qualifier and `x.field.method()` witnesses `x.field`
 /// and nothing deeper. In a type position it is a nested type name, whose
 /// qualifier is always a namespace.
-pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<(String, String)> {
+///
+/// A bare name is collected only where the grammar guarantees it names a
+/// declaration - a call's callee, a constructor, a heritage clause, a type
+/// position, a JSX element - never as a plain mention, so ordinary values
+/// stay out. A local binding or a type parameter that shadows an imported or
+/// top-level name in one of those positions is still read as that name:
+/// telling them apart needs scope tracking, and the imprecision is accepted
+/// the way qualifier shadowing is.
+pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<Reference> {
     let mut references = Vec::new();
     collect_referenced(root, text, &mut references);
     references
 }
 
-fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<(String, String)>) {
+fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Reference>) {
+    let bare = |name: tree_sitter::Node<'_>| Reference {
+        qualifier: None,
+        name: text_of(name, text),
+        span: name.byte_range(),
+    };
     match node.kind() {
+        // Import statements carry binding and re-export semantics; `declared`
+        // reads them, and they speak for the module rather than for any
+        // declaration.
+        "import_statement" => return,
         "member_expression" => {
             if let (Some(object), Some(property)) = (
                 node.child_by_field_name("object"),
                 node.child_by_field_name("property"),
             ) && object.kind() == "identifier"
             {
-                out.push((text_of(object, text), text_of(property, text)));
+                out.push(Reference {
+                    qualifier: Some(text_of(object, text)),
+                    name: text_of(property, text),
+                    span: node.byte_range(),
+                });
             }
         }
         "nested_type_identifier" => {
@@ -190,7 +251,72 @@ fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<(St
                 node.child_by_field_name("name"),
             ) && module.kind() == "identifier"
             {
-                out.push((text_of(module, text), text_of(name, text)));
+                out.push(Reference {
+                    qualifier: Some(text_of(module, text)),
+                    name: text_of(name, text),
+                    span: node.byte_range(),
+                });
+            }
+        }
+        // A callee and a constructor are references by position: `helper()`
+        // and `new Widget()` name a declaration wherever the name leads. Only
+        // the bare form needs collecting here; a qualified one is a member
+        // expression the arm above already read.
+        "call_expression" | "new_expression" => {
+            let field = if node.kind() == "call_expression" {
+                "function"
+            } else {
+                "constructor"
+            };
+            if let Some(callee) = node.child_by_field_name(field)
+                && callee.kind() == "identifier"
+            {
+                out.push(bare(callee));
+            }
+        }
+        // `extends Base` on a class names a value, so the grammar spells it as
+        // an identifier rather than a type. An `extends mixin(Base)` is a call
+        // like any other, and `implements` takes types the type arm reads.
+        "extends_clause" => {
+            if let Some(value) = node.child_by_field_name("value")
+                && value.kind() == "identifier"
+            {
+                out.push(bare(value));
+            }
+        }
+        // The grammar spells a type usage as its own node kind, so every bare
+        // `type_identifier` is a reference - except the name a declaration
+        // introduces, a type parameter, and the tail of a qualified type name
+        // the arm above already read whole.
+        "type_identifier" => {
+            let introduces = node.parent().is_some_and(|parent| {
+                matches!(parent.kind(), "type_parameter" | "nested_type_identifier")
+                    || (matches!(
+                        parent.kind(),
+                        "class"
+                            | "class_declaration"
+                            | "abstract_class_declaration"
+                            | "interface_declaration"
+                            | "type_alias_declaration"
+                    ) && parent.child_by_field_name("name") == Some(node))
+            });
+            if !introduces {
+                out.push(bare(node));
+            }
+        }
+        // A JSX element names the component it renders, which is the plainest
+        // dependency a component has. Only a capitalized name can name one: the
+        // ecosystem reserves the lowercase names for the markup tags of the
+        // host, which are no declaration of anybody's.
+        "jsx_opening_element" | "jsx_self_closing_element" => {
+            if let Some(name) = node.child_by_field_name("name")
+                && name.kind() == "identifier"
+                && text_of(name, text)
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_uppercase)
+            {
+                out.push(bare(name));
             }
         }
         _ => {}

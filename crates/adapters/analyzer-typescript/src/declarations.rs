@@ -6,6 +6,7 @@
 //! module's internals, and a name that resolves onto it lands on the module.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
 use cutaway_inspection::ports::source_tree::SourcePath;
@@ -17,6 +18,9 @@ use crate::text_of;
 pub struct Declaration {
     pub element: Element,
     pub exported: bool,
+    /// The byte range the declaration covers, so a reference found inside it
+    /// attributes to the declaration rather than to the whole module.
+    pub span: Range<usize>,
 }
 
 /// What one file declares and hands out.
@@ -26,6 +30,39 @@ pub struct FileSurface {
     /// The local name the file's `export default` names, when it names one.
     /// An anonymous default names nothing a consumer could land on.
     pub default_export: Option<String>,
+}
+
+/// Which element speaks for each part of the file, so a reference attributes
+/// to the declaration that writes it rather than to the whole module. Only
+/// exported declarations speak: an unexported one is no element, so what it
+/// references honestly belongs to the module. Anything outside every speaking
+/// span - import statements, top-level code, the bodies of unexported
+/// declarations - is the module's own.
+///
+/// A TypeScript declaration carries everything it owns inside its own node: a
+/// class holds its methods, an interface its members, a `const` its arrow
+/// function. Nothing attaches behaviour to a declaration from elsewhere in the
+/// file, so the declaration spans alone answer.
+#[derive(Debug, Default)]
+pub struct Attributions(Vec<(Range<usize>, ElementId)>);
+
+impl Attributions {
+    pub fn of(declarations: &[Declaration]) -> Self {
+        Self(
+            declarations
+                .iter()
+                .filter(|declaration| declaration.exported)
+                .map(|declaration| (declaration.span.clone(), declaration.element.id.clone()))
+                .collect(),
+        )
+    }
+
+    pub fn speaker_at(&self, offset: usize) -> Option<&ElementId> {
+        self.0
+            .iter()
+            .find(|(span, _)| span.contains(&offset))
+            .map(|(_, id)| id)
+    }
 }
 
 /// What the index answers about one declared name.
@@ -196,7 +233,13 @@ fn declared(
     let Some(name) = node.child_by_field_name("name") else {
         return Vec::new();
     };
-    vec![declaration(path, kind, &text_of(name, text), exported)]
+    vec![declaration(
+        path,
+        kind,
+        &text_of(name, text),
+        exported,
+        node.byte_range(),
+    )]
 }
 
 /// The functions a `const`, `let`, or `var` binds. Modern JavaScript writes
@@ -225,6 +268,7 @@ fn bound_functions(
                 ElementKind::Function,
                 &text_of(name, text),
                 exported,
+                declarator.byte_range(),
             ))
         })
         .collect()
@@ -276,7 +320,15 @@ fn commonjs(
     } else {
         return;
     };
-    declarations.push(declaration(path, kind, &text_of(property, text), true));
+    // The assigned value is the declaration: what it writes is the item's, and
+    // the name it is filed under sits outside it.
+    declarations.push(declaration(
+        path,
+        kind,
+        &text_of(property, text),
+        true,
+        right.byte_range(),
+    ));
 }
 
 /// The local names an exports object hands out: `{ a, b }` names `a` and `b`,
@@ -339,7 +391,13 @@ fn export_specifiers(node: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> 
         .collect()
 }
 
-fn declaration(path: &SourcePath, kind: ElementKind, name: &str, exported: bool) -> Declaration {
+fn declaration(
+    path: &SourcePath,
+    kind: ElementKind,
+    name: &str,
+    exported: bool,
+    span: Range<usize>,
+) -> Declaration {
     Declaration {
         element: Element {
             id: declaration_id(path, kind, name),
@@ -347,6 +405,7 @@ fn declaration(path: &SourcePath, kind: ElementKind, name: &str, exported: bool)
             kind,
         },
         exported,
+        span,
     }
 }
 

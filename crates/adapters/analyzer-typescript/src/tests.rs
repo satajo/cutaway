@@ -647,9 +647,265 @@ fn a_namespace_imports_qualified_reference_resolves_onto_the_item() {
     ]);
     assert!(depends(
         &structure,
-        "packages/app/src/a.ts",
+        "packages/app/src/a.ts#function:go",
         "packages/app/src/b.ts#function:build"
     ));
+}
+
+#[test]
+fn a_call_speaks_from_the_declaration_whose_body_writes_it() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import { build } from \"./b\";\nexport function go() {\n  build();\n}\n",
+        ),
+        ("packages/app/src/b.ts", "export function build() {}\n"),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/a.ts#function:go",
+        "packages/app/src/b.ts#function:build"
+    ));
+}
+
+#[test]
+fn the_functions_of_one_module_wire_to_each_other() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/api.ts",
+            "export function outer() {\n  inner();\n}\nexport function inner() {}\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/api.ts#function:outer",
+        "packages/app/src/api.ts#function:inner"
+    ));
+}
+
+#[test]
+fn a_declaration_naming_its_own_modules_internals_says_nothing() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/api.ts",
+            "export function run() {\n  helper();\n}\nfunction helper() {}\n",
+        ),
+    ]);
+    assert!(
+        dependencies(&structure).is_empty(),
+        "an unexported sibling is the module's internals, not a dependency"
+    );
+}
+
+#[test]
+fn a_constructed_class_is_the_constructing_declarations_dependency() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import { Widget } from \"./b\";\nexport const make = () => new Widget();\n",
+        ),
+        ("packages/app/src/b.ts", "export class Widget {}\n"),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/a.ts#function:make",
+        "packages/app/src/b.ts#type:Widget"
+    ));
+}
+
+#[test]
+fn a_class_depends_on_what_it_extends_and_implements() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import { Base, Contract } from \"./b\";\nexport class Panel extends Base implements Contract {}\n",
+        ),
+        (
+            "packages/app/src/b.ts",
+            "export class Base {}\nexport interface Contract {}\n",
+        ),
+    ]);
+    for target in ["type:Base", "type:Contract"] {
+        assert!(
+            depends(
+                &structure,
+                "packages/app/src/a.ts#type:Panel",
+                &format!("packages/app/src/b.ts#{target}")
+            ),
+            "a heritage clause couples the class to {target}"
+        );
+    }
+}
+
+#[test]
+fn a_type_annotation_witnesses_the_type_it_names() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import { Cfg, Out } from \"./b\";\nexport function convert(input: Cfg): Out {\n  return load(input);\n}\nexport interface Holder {\n  part: Cfg;\n}\n",
+        ),
+        (
+            "packages/app/src/b.ts",
+            "export interface Cfg {}\nexport interface Out {}\n",
+        ),
+    ]);
+    for target in ["type:Cfg", "type:Out"] {
+        assert!(
+            depends(
+                &structure,
+                "packages/app/src/a.ts#function:convert",
+                &format!("packages/app/src/b.ts#{target}")
+            ),
+            "the signature of convert speaks {target}"
+        );
+    }
+    assert!(depends(
+        &structure,
+        "packages/app/src/a.ts#type:Holder",
+        "packages/app/src/b.ts#type:Cfg"
+    ));
+}
+
+#[test]
+fn a_class_member_speaks_as_the_class_that_holds_it() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import { store } from \"./b\";\nexport class Config {\n  load() {\n    store();\n  }\n}\n",
+        ),
+        ("packages/app/src/b.ts", "export function store() {}\n"),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/a.ts#type:Config",
+        "packages/app/src/b.ts#function:store"
+    ));
+}
+
+#[test]
+fn a_rendered_component_is_the_rendering_components_dependency() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/panel.tsx",
+            "import { BookCover } from \"./cover\";\nexport const Panel = () => <div><BookCover /></div>;\n",
+        ),
+        (
+            "packages/app/src/cover.tsx",
+            "export const BookCover = () => <img />;\n",
+        ),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/panel.tsx#function:Panel",
+        "packages/app/src/cover.tsx#function:BookCover"
+    ));
+}
+
+#[test]
+fn a_lowercase_jsx_name_is_a_markup_tag_and_names_no_declaration() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/panel.tsx",
+            "export const div = () => 1;\nexport const Wrapper = () => <div />;\n",
+        ),
+    ]);
+    assert!(
+        dependencies(&structure).is_empty(),
+        "`<div />` is the host's markup, not the exported `div` of this module"
+    );
+}
+
+#[test]
+fn a_default_import_binds_its_local_name_to_the_targets_default_export() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import Widget from \"./b\";\nexport const make = () => new Widget();\n",
+        ),
+        ("packages/app/src/b.ts", "export default class Thing {}\n"),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/a.ts#function:make",
+        "packages/app/src/b.ts#type:Thing"
+    ));
+}
+
+#[test]
+fn a_renamed_import_binds_the_name_the_file_writes() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import { Widget as W } from \"./b\";\nexport const make = () => new W();\n",
+        ),
+        ("packages/app/src/b.ts", "export class Widget {}\n"),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/a.ts#function:make",
+        "packages/app/src/b.ts#type:Widget"
+    ));
+}
+
+#[test]
+fn a_reference_outside_every_declaration_stays_with_the_module() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import * as widgets from \"./b\";\nconst shared: widgets.Widget = init();\nexport function unrelated() {}\n",
+        ),
+        ("packages/app/src/b.ts", "export class Widget {}\n"),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/a.ts",
+        "packages/app/src/b.ts#type:Widget"
+    ));
+    assert!(
+        !depends(
+            &structure,
+            "packages/app/src/a.ts#function:unrelated",
+            "packages/app/src/b.ts#type:Widget"
+        ),
+        "a top-level reference belongs to no declaration"
+    );
+}
+
+#[test]
+fn an_unexported_declarations_references_stay_with_the_module() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/a.ts",
+            "import { serve } from \"./b\";\nfunction quietly() {\n  serve();\n}\nexport function shown() {}\n",
+        ),
+        ("packages/app/src/b.ts", "export function serve() {}\n"),
+    ]);
+    assert!(depends(
+        &structure,
+        "packages/app/src/a.ts",
+        "packages/app/src/b.ts#function:serve"
+    ));
+    assert!(
+        !depends(
+            &structure,
+            "packages/app/src/a.ts#function:shown",
+            "packages/app/src/b.ts#function:serve"
+        ),
+        "an unexported declaration is no element, so what it writes is the module's"
+    );
 }
 
 #[test]

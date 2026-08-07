@@ -8,10 +8,20 @@
 //! project that mixes `.ts` and `.js` files has one architecture, not two.
 //!
 //! package.json manifests locate the packages; the source text alone
-//! witnesses what depends on what, through every specifier a file names and
-//! every name it takes across that boundary. A dependency the manifest
-//! declares but nothing names produces no relation: the sources are the one
-//! truth about coupling.
+//! witnesses what depends on what, through every specifier a file names, every
+//! name it takes across that boundary, and every name the rest of the file
+//! writes where a name can only mean a declaration: a call, a constructor, a
+//! heritage clause, a type position, a JSX element. Such a name resolves
+//! against the file's own declarations first, then through what its imports
+//! bound. A dependency the manifest declares but nothing names produces no
+//! relation: the sources are the one truth about coupling.
+//!
+//! A dependency speaks from the declaration that writes it: a call in a
+//! function's body is the function's edge, a property's type the interface's,
+//! and a component rendered in a component's body the renderer's. An import
+//! statement, top-level code, and everything an unexported declaration writes
+//! speak from the module - an unexported declaration is no element, so its
+//! coupling is the module's own.
 //!
 //! Files are modules, and the directories that group at least two of them are
 //! directories: a specifier names a file, so the file is the unit of
@@ -52,10 +62,10 @@ use cutaway_inspection::ports::source_analyzer::{
 };
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
-use crate::declarations::{Declaration, DeclarationIndex};
-use crate::imports::Import;
+use crate::declarations::{Attributions, Declaration, DeclarationIndex};
+use crate::imports::{Import, Reference};
 use crate::manifest::DiscoveredPackage;
-use crate::modules::{ModuleCatalog, ModuleSurface, ResolvedSpecifier};
+use crate::modules::{Module, ModuleCatalog, ModuleSurface, ResolvedSpecifier};
 use crate::reexports::ReexportTable;
 
 pub struct TypeScriptSourceAnalyzer;
@@ -65,8 +75,10 @@ struct ParsedFile {
     path: SourcePath,
     declarations: Vec<Declaration>,
     imports: Vec<Import>,
-    /// Qualified names the file mentions, as (qualifier, name) pairs.
-    references: Vec<(String, String)>,
+    /// The names the file writes outside its import statements.
+    references: Vec<Reference>,
+    /// Which declaration speaks for each part of the file.
+    attributions: Attributions,
 }
 
 impl SourceAnalyzer for TypeScriptSourceAnalyzer {
@@ -124,6 +136,7 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
             reexports.add(&file.path, &imports);
             parsed.push(ParsedFile {
                 path: file.path.clone(),
+                attributions: Attributions::of(&surface.declarations),
                 declarations: surface.declarations,
                 imports,
                 references: imports::referenced(root, text),
@@ -139,7 +152,7 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
             let module = catalog
                 .module_of(&file.path)
                 .expect("the first pass kept only cataloged files");
-            for declaration in file.declarations {
+            for declaration in &file.declarations {
                 // Only the module's surface joins the architecture;
                 // unexported declarations are its internals. One file may
                 // bind the same name twice; the first binding in source order
@@ -148,39 +161,12 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
                     continue;
                 }
                 elements.push(AnalyzedElement {
-                    element: declaration.element,
+                    element: declaration.element.clone(),
                     parent: Some(module.id()),
                 });
             }
 
-            let mut qualifiers: BTreeMap<String, ResolvedSpecifier> = BTreeMap::new();
-            for import in &file.imports {
-                let Some(target) =
-                    catalog.resolve_specifier(&file.path, &import.specifier, &packages)
-                else {
-                    continue;
-                };
-                depend(&mut relations, &module.id(), &target.id);
-                for name in &import.names {
-                    let to = catalog.resolve_name(&target, name, &packages, surface);
-                    depend(&mut relations, &module.id(), &to);
-                }
-                if let Some(namespace) = &import.namespace {
-                    qualifiers.insert(namespace.clone(), target);
-                }
-            }
-
-            // Shadowed qualifiers are accepted as imprecision: a local
-            // variable named like a namespace import makes this crate see a
-            // dependency the code does not have, which is the same class of
-            // imprecision the other language adapters accept.
-            for (qualifier, name) in &file.references {
-                let Some(target) = qualifiers.get(qualifier) else {
-                    continue;
-                };
-                let to = catalog.resolve_name(target, name, &packages, surface);
-                depend(&mut relations, &module.id(), &to);
-            }
+            witness_dependencies(&file, module, &catalog, &packages, surface, &mut relations);
         }
 
         Ok(SourceStructure {
@@ -190,17 +176,113 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
     }
 }
 
-/// Records a dependency unless it points at the element it starts from: a
-/// module needing itself says nothing.
-fn depend(relations: &mut BTreeSet<Relation>, from: &ElementId, to: &ElementId) {
-    if from == to {
-        return;
+/// Turns one file's imports and references into dependency relations. An
+/// import statement is the module's plumbing whatever wrote it, so its edge
+/// speaks from the module; a reference speaks from the declaration enclosing
+/// it.
+fn witness_dependencies(
+    file: &ParsedFile,
+    module: &Module,
+    catalog: &ModuleCatalog,
+    packages: &[DiscoveredPackage],
+    surface: ModuleSurface<'_>,
+    relations: &mut BTreeSet<Relation>,
+) {
+    let mut depend = |from: &ElementId, to: &ElementId| {
+        // An edge into one's own module, or from a module onto a declaration it
+        // holds, restates containment rather than witnessing a dependency.
+        if from == to
+            || to == &module.id()
+            || (from == &module.id() && file.declarations.iter().any(|d| &d.element.id == to))
+        {
+            return;
+        }
+        relations.insert(Relation {
+            from: from.clone(),
+            to: to.clone(),
+            kind: RelationKind::DependsOn,
+        });
+    };
+
+    // What the file's imports leave behind for the rest of it: a namespace
+    // under its qualifier, and every other imported name bound to the element
+    // that answers for it. The first binding of a name in source order
+    // answers, as everywhere else.
+    let mut qualifiers: BTreeMap<&str, ResolvedSpecifier> = BTreeMap::new();
+    let mut bindings: BTreeMap<&str, ElementId> = BTreeMap::new();
+    for import in &file.imports {
+        let Some(target) = catalog.resolve_specifier(&file.path, &import.specifier, packages)
+        else {
+            continue;
+        };
+        depend(&module.id(), &target.id);
+        for imported in &import.names {
+            let to = catalog.resolve_name(&target, &imported.name, packages, surface);
+            depend(&module.id(), &to);
+            if let Some(local) = &imported.local {
+                bindings.entry(local).or_insert(to);
+            }
+        }
+        if let Some(namespace) = &import.namespace {
+            qualifiers.entry(namespace).or_insert(target);
+        }
     }
-    relations.insert(Relation {
-        from: from.clone(),
-        to: to.clone(),
-        kind: RelationKind::DependsOn,
-    });
+
+    for reference in &file.references {
+        let Some(to) = resolve_reference(
+            file,
+            reference,
+            catalog,
+            packages,
+            surface,
+            &qualifiers,
+            &bindings,
+        ) else {
+            continue;
+        };
+        let from = file
+            .attributions
+            .speaker_at(reference.span.start)
+            .cloned()
+            .unwrap_or_else(|| module.id());
+        depend(&from, &to);
+    }
+}
+
+/// Where one written name leads. A qualified name reads against the namespace
+/// imports alone, because only a namespace import binds a qualifier that
+/// stands for a module. A bare name is the file's own declaration first - a
+/// declaration shadows anything an import brought in - and what an import
+/// bound for it otherwise.
+fn resolve_reference(
+    file: &ParsedFile,
+    reference: &Reference,
+    catalog: &ModuleCatalog,
+    packages: &[DiscoveredPackage],
+    surface: ModuleSurface<'_>,
+    qualifiers: &BTreeMap<&str, ResolvedSpecifier>,
+    bindings: &BTreeMap<&str, ElementId>,
+) -> Option<ElementId> {
+    if let Some(qualifier) = &reference.qualifier {
+        let target = qualifiers.get(qualifier.as_str())?;
+        return Some(catalog.resolve_name(target, &reference.name, packages, surface));
+    }
+    if let Some(own) = surface
+        .declarations
+        .declaration(&file.path, &reference.name)
+    {
+        // An unexported declaration is the module's internals: what names it
+        // says nothing beyond the module it already sits in.
+        return Some(if own.exported {
+            own.id.clone()
+        } else {
+            catalog
+                .module_of(&file.path)
+                .expect("the first pass kept only cataloged files")
+                .id()
+        });
+    }
+    bindings.get(reference.name.as_str()).cloned()
 }
 
 fn parse(text: &str, path: &SourcePath) -> Result<tree_sitter::Tree, SourceAnalysisError> {
