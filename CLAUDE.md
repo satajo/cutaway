@@ -33,10 +33,22 @@ concept it serves (screaming architecture):
 crates/
   architecture/        Domain: the architecture model (elements, relations, graph).
                        Containment hierarchy: project ⊃ package ⊃ directory* ⊃
-                       module ⊃ item. Directories nest; they are organization
-                       alone, so only a language whose directories carry no
-                       semantics of their own (TypeScript) produces them.
+                       module ⊃ item, with files beside modules. Directories
+                       nest; they are organization alone, so they come from a
+                       language whose directories carry no semantics of their
+                       own (TypeScript) and from the unclaimed-file tree. A
+                       file is a leaf no language read declarations out of. An
+                       element may carry a fingerprint - its contents condensed
+                       to a digest - so a comparison can read a content change.
   inspection/          Application core: builds the model from sources.
+                       Inspection is total: every file of the tree stands in
+                       the graph. An analyzer claims the files its elements
+                       represent and states the directory each package
+                       occupies; an unclaimed file becomes a file element,
+                       fingerprinted, grouped into the directories that earn a
+                       boundary (two things or more; single-child chains
+                       dissolve) and anchored inside the package whose
+                       territory holds it.
     src/ports/         SourceTree, SourceAnalyzer, ProjectHistory. One file
                        per port.
   lenses/              Domain: boundary views - rollups of the graph along a
@@ -51,11 +63,13 @@ crates/
                        code or the frame as a whole, and what passes between a
                        boundary and its own contents stays inside it.
   comparison/          Domain: two architecture versions held together - the
-                       delta (what appeared, what disappeared), the union graph
-                       a comparison picture lays out, and readings that
-                       attribute every change to the nearest rendered boundary:
-                       what arrives reads as added, what goes as removed, and a
-                       surviving boundary hiding churn as modified.
+                       delta (what appeared, what disappeared, what changed:
+                       a surviving id whose name, kind, or fingerprint
+                       differs), the union graph a comparison picture lays
+                       out, and readings that attribute every change to the
+                       nearest rendered boundary: what arrives reads as added,
+                       what goes as removed, and a surviving boundary hiding
+                       churn or a content change as modified.
   planning/            Planning core: plans, change sets, notes, annotations.
     src/ports/         PlanStore.
   adapters/            Named role-first (<port concept>-<technology>), so the
