@@ -1,26 +1,13 @@
 //! Exercises the adapter against real repositories created with the git CLI.
 
+mod support;
+
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use cutaway_inspection::ports::source_tree::SourceTree;
 use cutaway_source_git::GitSourceTree;
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-        .status()
-        .expect("the git CLI is available");
-    assert!(status.success(), "git {args:?} failed");
-}
+use support::git;
 
 fn committed_repository(dir: &Path) {
     git(dir, &["-c", "init.defaultBranch=main", "init"]);

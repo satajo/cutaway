@@ -5,5 +5,6 @@
 //! implement these traits; the core never learns which technology sits
 //! behind them.
 
+pub mod project_history;
 pub mod source_analyzer;
 pub mod source_tree;
