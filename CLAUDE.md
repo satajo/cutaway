@@ -37,7 +37,8 @@ crates/
                        alone, so only a language whose directories carry no
                        semantics of their own (TypeScript) produces them.
   inspection/          Application core: builds the model from sources.
-    src/ports/         SourceTree, SourceAnalyzer. One file per port.
+    src/ports/         SourceTree, SourceAnalyzer, ProjectHistory. One file
+                       per port.
   lenses/              Domain: boundary views - rollups of the graph along a
                        Cut, with provenance per rolled-up edge. A Cut holds two
                        independent decisions: the frontier (the set of open
@@ -49,7 +50,12 @@ crates/
                        edge ending at a frame speaks about the frame's own
                        code or the frame as a whole, and what passes between a
                        boundary and its own contents stays inside it.
-  comparison/          Domain: deltas between two architecture versions.
+  comparison/          Domain: two architecture versions held together - the
+                       delta (what appeared, what disappeared), the union graph
+                       a comparison picture lays out, and readings that
+                       attribute every change to the nearest rendered boundary:
+                       what arrives reads as added, what goes as removed, and a
+                       surviving boundary hiding churn as modified.
   planning/            Planning core: plans, change sets, notes, annotations.
     src/ports/         PlanStore.
   adapters/            Named role-first (<port concept>-<technology>), so the
@@ -63,8 +69,12 @@ crates/
                        tree-sitter).
     plan-file/         Driven adapter: PlanStore as cutaway.json in the root of
                        the planned repository. The format is the agent contract.
-    source-git/        Driven adapter: git repository as a SourceTree (gix).
-    gui/               Driving adapter: eframe/egui shell with the boundary canvas.
+    source-git/        Driven adapter: git repository as a SourceTree and as a
+                       ProjectHistory (gix); a version is a commit.
+    gui/               Driving adapter: eframe/egui shell with the boundary
+                       canvas. Two modes on a left rail: Explore (read and
+                       annotate one architecture) and Compare (two versions
+                       against each other, the plan staying out).
   cutaway/             Composition root: wires adapters to the cores, starts the GUI.
   e2e/                 Cucumber suite + the ApplicationDriver port it drives.
 ```
