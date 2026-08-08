@@ -235,7 +235,7 @@ impl InProcessDriver {
         self.view()
             .graph
             .elements()
-            .find(|element| element.name.as_str() == name)
+            .find(|element| element.primary_name().as_str() == name)
             .map(|element| element.id.clone())
             .ok_or_else(|| format!("no boundary named {name}"))
     }
@@ -305,9 +305,10 @@ impl InProcessDriver {
 
     /// The name a scenario knows one element by.
     fn display_name(&self, id: &ElementId) -> String {
-        self.viewed()
-            .element(id)
-            .map_or_else(|| id.to_string(), |element| element.name.to_string())
+        self.viewed().element(id).map_or_else(
+            || id.to_string(),
+            |element| element.primary_name().to_string(),
+        )
     }
 }
 
@@ -478,16 +479,17 @@ impl ApplicationDriver for InProcessDriver {
         self.view()
             .graph
             .elements()
-            .map(|element| element.name.to_string())
+            .map(|element| element.primary_name().to_string())
             .collect()
     }
 
     fn connections(&self) -> Vec<(String, String)> {
         let view = self.view();
         let name = |id: &ElementId| {
-            view.graph
-                .element(id)
-                .map_or_else(|| id.to_string(), |element| element.name.to_string())
+            view.graph.element(id).map_or_else(
+                || id.to_string(),
+                |element| element.primary_name().to_string(),
+            )
         };
         view.provenance
             .keys()
@@ -583,7 +585,7 @@ impl ApplicationDriver for InProcessDriver {
             .as_ref()
             .ok_or("no project inspected yet")?
             .elements()
-            .find(|element| element.kind == ElementKind::Project)
+            .find(|element| element.primary_kind() == ElementKind::Project)
             .map(|element| element.id.clone());
         self.plan_addition(root.as_ref(), ElementKind::Package, name)
     }
@@ -673,7 +675,7 @@ impl ApplicationDriver for InProcessDriver {
             .relations()
             .filter(|relation| relation.kind == RelationKind::Contains && relation.from == id)
             .filter_map(|relation| view.graph.element(&relation.to))
-            .map(|element| element.name.to_string())
+            .map(|element| element.primary_name().to_string())
             .collect()
     }
 

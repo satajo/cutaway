@@ -147,12 +147,11 @@ mod tests {
 
     fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: ElementKind) {
         graph
-            .add_element(Element {
-                id: id(id_text),
-                name: ElementName::new(id_text).unwrap(),
+            .add_element(Element::of_kind(
+                id(id_text),
                 kind,
-                fingerprint: None,
-            })
+                ElementName::new(id_text).unwrap(),
+            ))
             .unwrap();
     }
 

@@ -694,12 +694,11 @@ mod tests {
     fn add_package(graph: &mut ArchitectureGraph, name: &str) -> ElementId {
         let id = ElementId::new(format!("package:{name}")).unwrap();
         graph
-            .add_element(Element {
-                id: id.clone(),
-                name: ElementName::new(name).unwrap(),
-                kind: ElementKind::Package,
-                fingerprint: None,
-            })
+            .add_element(Element::of_kind(
+                id.clone(),
+                ElementKind::Package,
+                ElementName::new(name).unwrap(),
+            ))
             .unwrap();
         id
     }
@@ -716,12 +715,11 @@ mod tests {
     ) -> ElementId {
         let id = ElementId::new(path).unwrap();
         graph
-            .add_element(Element {
-                id: id.clone(),
-                name: ElementName::new(name).unwrap(),
-                kind: ElementKind::Module,
-                fingerprint: None,
-            })
+            .add_element(Element::of_kind(
+                id.clone(),
+                ElementKind::Module,
+                ElementName::new(name).unwrap(),
+            ))
             .unwrap();
         graph
             .add_relation(Relation {

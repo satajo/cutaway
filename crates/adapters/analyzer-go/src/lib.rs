@@ -52,7 +52,7 @@ mod packages;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, Relation, RelationKind};
+use cutaway_architecture::{Element, ElementId, ElementName, Relation, RelationKind, SemanticKind};
 use cutaway_inspection::ports::source_analyzer::{
     AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
@@ -379,12 +379,11 @@ fn parse(text: &str, path: &SourcePath) -> Result<tree_sitter::Tree, SourceAnaly
 }
 
 fn module_element(module: &DiscoveredModule) -> Element {
-    Element {
-        id: module_id(module),
-        name: ElementName::new(&module.path).expect("a module path is never empty"),
-        kind: ElementKind::Package,
-        fingerprint: None,
-    }
+    Element::semantic(
+        module_id(module),
+        SemanticKind::Package,
+        ElementName::new(&module.path).expect("a module path is never empty"),
+    )
 }
 
 pub(crate) fn module_id(module: &DiscoveredModule) -> ElementId {

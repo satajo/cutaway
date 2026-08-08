@@ -38,7 +38,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
+use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind, SubstrateKind};
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
 use crate::declarations::DeclarationIndex;
@@ -90,12 +90,11 @@ impl Module {
         if self.entry {
             return None;
         }
-        Some(Element {
-            id: self.id(),
-            name: ElementName::new(&self.name).expect("a module name is never empty"),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        })
+        Some(Element::semantic(
+            self.id(),
+            SemanticKind::Module,
+            ElementName::new(&self.name).expect("a module name is never empty"),
+        ))
     }
 }
 
@@ -123,12 +122,12 @@ impl Directory {
     }
 
     pub fn element(&self) -> Element {
-        Element {
-            id: self.id.clone(),
-            name: ElementName::new(&self.name).expect("a directory name is never empty"),
-            kind: ElementKind::Directory,
-            fingerprint: None,
-        }
+        Element::substrate(
+            self.id.clone(),
+            SubstrateKind::Directory,
+            ElementName::new(&self.name).expect("a directory name is never empty"),
+            None,
+        )
     }
 }
 

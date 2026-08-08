@@ -752,9 +752,13 @@ fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
     let labels = Labels::renaming(&view.graph, &session.renames);
     let element = session.element_of(id)?;
     Some(NodePanel {
-        heading: format!("{} {}", kind_symbol(element.kind), labels.qualified(id)),
-        kind: kind_name(element.kind),
-        element_kind: element.kind,
+        heading: format!(
+            "{} {}",
+            kind_symbol(element.primary_kind()),
+            labels.qualified(id)
+        ),
+        kind: kind_name(element.primary_kind()),
+        element_kind: element.primary_kind(),
         contents: contents_rows(&view.graph, &labels, id),
         connections: connection_rows(view, &labels, id),
     })
@@ -988,12 +992,11 @@ mod tests {
 
     fn add_named(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: ElementKind) {
         graph
-            .add_element(Element {
-                id: id(id_text),
-                name: ElementName::new(name).unwrap(),
+            .add_element(Element::of_kind(
+                id(id_text),
                 kind,
-                fingerprint: None,
-            })
+                ElementName::new(name).unwrap(),
+            ))
             .unwrap();
     }
 

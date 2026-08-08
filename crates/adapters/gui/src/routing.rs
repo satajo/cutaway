@@ -854,12 +854,11 @@ mod tests {
     fn an_edge_ending_at_a_frame_with_painted_children_lands_on_its_border() {
         let mut view = ArchitectureGraph::new();
         for element in ["neighbor", "frame", "inside", "beside"] {
-            view.add_element(Element {
-                id: id(element),
-                name: ElementName::new(element).unwrap(),
-                kind: ElementKind::Module,
-                fingerprint: None,
-            })
+            view.add_element(Element::of_kind(
+                id(element),
+                ElementKind::Module,
+                ElementName::new(element).unwrap(),
+            ))
             .unwrap();
         }
         for inner in ["inside", "beside"] {
@@ -1122,12 +1121,11 @@ mod tests {
             ("a/one", ElementKind::Module),
             ("b/one", ElementKind::Module),
         ] {
-            view.add_element(Element {
-                id: id(element),
-                name: ElementName::new(element).unwrap(),
+            view.add_element(Element::of_kind(
+                id(element),
                 kind,
-                fingerprint: None,
-            })
+                ElementName::new(element).unwrap(),
+            ))
             .unwrap();
         }
         for (frame, inner) in [("package:a", "a/one"), ("package:b", "b/one")] {
@@ -1181,12 +1179,11 @@ mod tests {
         // run straight.
         let mut view = ArchitectureGraph::new();
         for element in ["package:a", "a/one", "a/two", "package:z"] {
-            view.add_element(Element {
-                id: id(element),
-                name: ElementName::new(element).unwrap(),
-                kind: ElementKind::Module,
-                fingerprint: None,
-            })
+            view.add_element(Element::of_kind(
+                id(element),
+                ElementKind::Module,
+                ElementName::new(element).unwrap(),
+            ))
             .unwrap();
         }
         for inner in ["a/one", "a/two"] {
@@ -1261,12 +1258,11 @@ mod tests {
             ("a/two", ElementKind::Module),
             ("b/one", ElementKind::Module),
         ] {
-            view.add_element(Element {
-                id: id(element),
-                name: ElementName::new(element).unwrap(),
+            view.add_element(Element::of_kind(
+                id(element),
                 kind,
-                fingerprint: None,
-            })
+                ElementName::new(element).unwrap(),
+            ))
             .unwrap();
         }
         for (frame, inner) in [

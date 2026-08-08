@@ -57,7 +57,7 @@ fn packages_are_discovered_from_their_manifests() {
     let packages: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| e.element.kind == ElementKind::Package)
+        .filter(|e| e.element.primary_kind() == ElementKind::Package)
         .map(|e| e.element.id.as_str())
         .collect();
     assert_eq!(packages, ["package:a", "package:b-lib"]);
@@ -632,7 +632,12 @@ fn top_level_declarations_belong_to_their_module() {
                 .map(cutaway_architecture::ElementId::as_str)
                 == Some("crates/b/src/api.rs")
         })
-        .map(|e| (e.element.name.as_str().to_owned(), e.element.kind))
+        .map(|e| {
+            (
+                e.element.primary_name().as_str().to_owned(),
+                e.element.primary_kind(),
+            )
+        })
         .collect();
     assert_eq!(
         declared,
@@ -656,8 +661,8 @@ fn declarations_without_a_visibility_modifier_stay_out_of_the_architecture() {
     let items: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| e.element.kind != ElementKind::Package)
-        .map(|e| e.element.name.as_str().to_owned())
+        .filter(|e| e.element.primary_kind() != ElementKind::Package)
+        .map(|e| e.element.primary_name().as_str().to_owned())
         .collect();
     assert_eq!(items, ["run"]);
 }
@@ -685,7 +690,10 @@ fn a_file_module_declaration_adds_no_element_beside_the_file_module() {
     let utils: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| e.element.kind == ElementKind::Module && e.element.name.as_str() == "util")
+        .filter(|e| {
+            e.element.primary_kind() == ElementKind::Module
+                && e.element.primary_name().as_str() == "util"
+        })
         .map(|e| e.element.id.as_str())
         .collect();
     assert_eq!(utils, ["crates/b/src/util.rs"]);

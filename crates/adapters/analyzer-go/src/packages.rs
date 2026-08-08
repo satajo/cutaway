@@ -26,7 +26,7 @@
 
 use std::collections::BTreeMap;
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
+use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind};
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
 use crate::manifest::DiscoveredModule;
@@ -68,12 +68,11 @@ impl Directory {
         if self.name.is_empty() {
             return None;
         }
-        Some(Element {
-            id: self.id(),
-            name: ElementName::new(&self.name).expect("a non-root directory has a name"),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        })
+        Some(Element::semantic(
+            self.id(),
+            SemanticKind::Module,
+            ElementName::new(&self.name).expect("a non-root directory has a name"),
+        ))
     }
 }
 
@@ -99,12 +98,11 @@ impl GoFile {
     /// already show.
     pub fn element(&self) -> Option<Element> {
         let name = self.name.as_ref()?;
-        Some(Element {
-            id: self.id(),
-            name: ElementName::new(name).expect("a go file name has a non-empty stem"),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        })
+        Some(Element::semantic(
+            self.id(),
+            SemanticKind::Module,
+            ElementName::new(name).expect("a go file name has a non-empty stem"),
+        ))
     }
 }
 

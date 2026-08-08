@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{
-    ArchitectureGraph, Element, ElementId, ElementKind, ElementName, GraphError, Relation,
-    RelationKind,
+    ArchitectureGraph, Element, ElementId, ElementName, GraphError, Relation, RelationKind,
+    SemanticKind,
 };
 
 use crate::ports::source_analyzer::{AnalyzedElement, SourceAnalysisError, SourceAnalyzer};
@@ -85,12 +85,11 @@ pub fn inspect(
 }
 
 fn project_element(name: &ProjectName) -> Element {
-    Element {
-        id: ElementId::new(format!("project:{name}")).expect("a project name is never empty"),
-        name: ElementName::new(name.as_str()).expect("a project name is never empty"),
-        kind: ElementKind::Project,
-        fingerprint: None,
-    }
+    Element::semantic(
+        ElementId::new(format!("project:{name}")).expect("a project name is never empty"),
+        SemanticKind::Project,
+        ElementName::new(name.as_str()).expect("a project name is never empty"),
+    )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +110,8 @@ pub enum InspectionError {
 
 #[cfg(test)]
 mod tests {
+    use cutaway_architecture::ElementKind;
+
     use super::*;
     use crate::ports::source_analyzer::SourceStructure;
     use crate::ports::source_tree::{SourceFile, SourcePath};
@@ -153,12 +154,11 @@ mod tests {
     }
 
     fn element(id: &str, kind: ElementKind) -> Element {
-        Element {
-            id: ElementId::new(id).unwrap(),
-            name: ElementName::new(id).unwrap(),
+        Element::of_kind(
+            ElementId::new(id).unwrap(),
             kind,
-            fingerprint: None,
-        }
+            ElementName::new(id).unwrap(),
+        )
     }
 
     fn analyzed(id: &str, kind: ElementKind, parent: Option<&str>) -> AnalyzedElement {
@@ -271,7 +271,10 @@ mod tests {
     fn an_empty_project_is_just_its_root() {
         let graph = inspect(&FakeTree::default(), &[]).unwrap();
         assert_eq!(graph.elements().count(), 1);
-        assert_eq!(graph.elements().next().unwrap().kind, ElementKind::Project);
+        assert_eq!(
+            graph.elements().next().unwrap().primary_kind(),
+            ElementKind::Project
+        );
     }
 
     #[test]
@@ -282,7 +285,7 @@ mod tests {
         let readme = graph
             .element(&ElementId::new("README.md").unwrap())
             .expect("the unclaimed file stands in the graph");
-        assert_eq!(readme.kind, ElementKind::File);
+        assert_eq!(readme.primary_kind(), ElementKind::File);
         assert!(graph.relations().any(|r| {
             r.from == ElementId::new("project:fixture").unwrap()
                 && r.to == ElementId::new("README.md").unwrap()
@@ -303,7 +306,7 @@ mod tests {
         let claimed = graph
             .element(&ElementId::new("src/lib.rs").unwrap())
             .expect("the claimed file is the analyzer's element");
-        assert_eq!(claimed.kind, ElementKind::Module);
+        assert_eq!(claimed.primary_kind(), ElementKind::Module);
     }
 
     #[test]

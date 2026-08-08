@@ -78,12 +78,11 @@ pub fn addition_of_element(
     name: &ElementName,
 ) -> Result<Vec<ProposedChange>, ProvisionalIdError> {
     let id = provisional_id(parent, kind, name)?;
-    let mut changes = vec![ProposedChange::AddElement(Element {
-        id: id.clone(),
-        name: name.clone(),
+    let mut changes = vec![ProposedChange::AddElement(Element::of_kind(
+        id.clone(),
         kind,
-        fingerprint: None,
-    })];
+        name.clone(),
+    ))];
     if let Some(parent) = parent {
         changes.push(ProposedChange::AddRelation(Relation {
             from: parent.clone(),
@@ -271,12 +270,7 @@ mod tests {
             ("b/lib", ElementKind::Module),
         ] {
             graph
-                .add_element(Element {
-                    id: id(element),
-                    name: name(element),
-                    kind,
-                    fingerprint: None,
-                })
+                .add_element(Element::of_kind(id(element), kind, name(element)))
                 .unwrap();
         }
         for (from, to) in [
@@ -359,12 +353,11 @@ mod tests {
         assert_eq!(
             changes,
             vec![
-                ProposedChange::AddElement(Element {
-                    id: id("package:a/wiring"),
-                    name: name("wiring"),
-                    kind: ElementKind::Module,
-                    fingerprint: None,
-                }),
+                ProposedChange::AddElement(Element::of_kind(
+                    id("package:a/wiring"),
+                    ElementKind::Module,
+                    name("wiring"),
+                )),
                 ProposedChange::AddRelation(contains("package:a", "package:a/wiring")),
             ]
         );

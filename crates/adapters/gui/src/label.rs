@@ -155,7 +155,7 @@ impl<'a> Labels<'a> {
             let project = self
                 .view
                 .element(frame)
-                .is_some_and(|element| element.kind == ElementKind::Project);
+                .is_some_and(|element| element.primary_kind() == ElementKind::Project);
             if !project {
                 names.push(self.full_name(frame));
             }
@@ -172,7 +172,7 @@ impl<'a> Labels<'a> {
         }
         self.view
             .element(id)
-            .map(|element| kind_symbol(element.kind))
+            .map(|element| kind_symbol(element.primary_kind()))
     }
 
     fn name(&self, id: &ElementId) -> String {
@@ -198,9 +198,10 @@ impl<'a> Labels<'a> {
 
     /// The name the sources give a boundary, whatever the plan says of it.
     fn source_name(&self, id: &ElementId) -> String {
-        self.view
-            .element(id)
-            .map_or_else(|| id.to_string(), |element| element.name.to_string())
+        self.view.element(id).map_or_else(
+            || id.to_string(),
+            |element| element.primary_name().to_string(),
+        )
     }
 }
 
@@ -344,12 +345,11 @@ mod tests {
 
     fn add(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: ElementKind) {
         graph
-            .add_element(Element {
-                id: id(id_text),
-                name: ElementName::new(name).unwrap(),
+            .add_element(Element::of_kind(
+                id(id_text),
                 kind,
-                fingerprint: None,
-            })
+                ElementName::new(name).unwrap(),
+            ))
             .unwrap();
     }
 

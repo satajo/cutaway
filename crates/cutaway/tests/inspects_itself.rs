@@ -38,7 +38,7 @@ fn the_boundary_lens_shows_cutaways_own_packages() {
     let packages: Vec<&str> = view
         .graph
         .elements()
-        .map(|element| element.name.as_str())
+        .map(|element| element.primary_name().as_str())
         .collect();
     assert!(
         packages.contains(&"cutaway-architecture"),

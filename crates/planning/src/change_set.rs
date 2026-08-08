@@ -73,12 +73,11 @@ mod tests {
     use super::*;
 
     fn element(id: &str) -> Element {
-        Element {
-            id: ElementId::new(id).unwrap(),
-            name: ElementName::new(id).unwrap(),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        }
+        Element::of_kind(
+            ElementId::new(id).unwrap(),
+            ElementKind::Module,
+            ElementName::new(id).unwrap(),
+        )
     }
 
     fn relation(from: &str, to: &str) -> Relation {

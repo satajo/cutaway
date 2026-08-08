@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
+use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, SemanticKind};
 use cutaway_inspection::ports::source_tree::SourcePath;
 
 use crate::text_of;
@@ -64,8 +64,8 @@ pub fn nested(
         let class_name = text_of(name_node, text);
         let Some(holder) = declarations.iter().find(|declaration| {
             declaration.exported
-                && declaration.element.kind == ElementKind::Type
-                && declaration.element.name.as_str() == class_name
+                && declaration.element.primary_kind() == ElementKind::Type
+                && declaration.element.primary_name().as_str() == class_name
         }) else {
             continue;
         };
@@ -88,17 +88,20 @@ pub fn nested(
                 continue;
             };
             let name = text_of(name, text);
-            let id = declaration_id(path, ElementKind::Function, &format!("{class_name}.{name}"));
+            let id = declaration_id(
+                path,
+                SemanticKind::Function,
+                &format!("{class_name}.{name}"),
+            );
             if !seen.insert(id.clone()) {
                 continue;
             }
             found.push(NestedDeclaration {
-                element: Element {
+                element: Element::semantic(
                     id,
-                    name: ElementName::new(&name).expect("a parsed identifier is never empty"),
-                    kind: ElementKind::Function,
-                    fingerprint: None,
-                },
+                    SemanticKind::Function,
+                    ElementName::new(&name).expect("a parsed identifier is never empty"),
+                ),
                 holder: holder.element.id.clone(),
                 span: member.byte_range(),
             });
@@ -222,7 +225,10 @@ impl DeclarationIndex {
     pub fn add(&mut self, path: &SourcePath, surface: &FileSurface) {
         for declaration in &surface.declarations {
             self.by_name
-                .entry((path.clone(), declaration.element.name.as_str().to_owned()))
+                .entry((
+                    path.clone(),
+                    declaration.element.primary_name().as_str().to_owned(),
+                ))
                 .or_insert_with(|| IndexedDeclaration {
                     id: declaration.element.id.clone(),
                     exported: declaration.exported,
@@ -276,7 +282,7 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
         if let Some(declaration) = surface
             .declarations
             .iter_mut()
-            .find(|declaration| declaration.element.name.as_str() == name)
+            .find(|declaration| declaration.element.primary_name().as_str() == name)
         {
             declaration.exported = true;
         }
@@ -296,7 +302,7 @@ fn statement(
         if exports_default(node)
             && let Some(first) = declared.first()
         {
-            surface.default_export = Some(first.element.name.as_str().to_owned());
+            surface.default_export = Some(first.element.primary_name().as_str().to_owned());
         }
         surface.declarations.extend(declared);
         return;
@@ -345,12 +351,12 @@ fn declared(
         "function_declaration"
         | "generator_function_declaration"
         | "function_signature"
-        | "generator_function_signature" => ElementKind::Function,
+        | "generator_function_signature" => SemanticKind::Function,
         "class_declaration"
         | "abstract_class_declaration"
         | "interface_declaration"
         | "type_alias_declaration"
-        | "enum_declaration" => ElementKind::Type,
+        | "enum_declaration" => SemanticKind::Type,
         // `declare` only states that the declaration inside it exists
         // elsewhere; the item it names is the same item.
         "ambient_declaration" => {
@@ -400,7 +406,7 @@ fn bound_functions(
             }
             Some(declaration(
                 path,
-                ElementKind::Function,
+                SemanticKind::Function,
                 &text_of(name, text),
                 exported,
                 declarator.byte_range(),
@@ -449,9 +455,9 @@ fn commonjs(
         return;
     }
     let kind = if is_function(right) {
-        ElementKind::Function
+        SemanticKind::Function
     } else if matches!(right.kind(), "class" | "class_declaration") {
-        ElementKind::Type
+        SemanticKind::Type
     } else {
         return;
     };
@@ -528,18 +534,17 @@ fn export_specifiers(node: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> 
 
 fn declaration(
     path: &SourcePath,
-    kind: ElementKind,
+    kind: SemanticKind,
     name: &str,
     exported: bool,
     span: Range<usize>,
 ) -> Declaration {
     Declaration {
-        element: Element {
-            id: declaration_id(path, kind, name),
-            name: ElementName::new(name).expect("a parsed identifier is never empty"),
+        element: Element::semantic(
+            declaration_id(path, kind, name),
             kind,
-            fingerprint: None,
-        },
+            ElementName::new(name).expect("a parsed identifier is never empty"),
+        ),
         exported,
         span,
     }
@@ -548,15 +553,13 @@ fn declaration(
 /// Declaration ids embed the path and the kind so that same-named
 /// declarations in different files, or in different namespaces of the same
 /// file, stay distinct.
-fn declaration_id(path: &SourcePath, kind: ElementKind, name: &str) -> ElementId {
+fn declaration_id(path: &SourcePath, kind: SemanticKind, name: &str) -> ElementId {
     let tag = match kind {
-        ElementKind::Project => "project",
-        ElementKind::Package => "package",
-        ElementKind::Directory => "directory",
-        ElementKind::Module => "module",
-        ElementKind::File => "file",
-        ElementKind::Function => "function",
-        ElementKind::Type => "type",
+        SemanticKind::Project => "project",
+        SemanticKind::Package => "package",
+        SemanticKind::Module => "module",
+        SemanticKind::Function => "function",
+        SemanticKind::Type => "type",
     };
     ElementId::new(format!("{path}#{tag}:{name}")).expect("the id embeds a non-empty path")
 }

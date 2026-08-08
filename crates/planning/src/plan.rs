@@ -311,12 +311,11 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for id in elements {
             graph
-                .add_element(Element {
-                    id: ElementId::new(*id).unwrap(),
-                    name: ElementName::new(*id).unwrap(),
-                    kind: ElementKind::Module,
-                    fingerprint: None,
-                })
+                .add_element(Element::of_kind(
+                    ElementId::new(*id).unwrap(),
+                    ElementKind::Module,
+                    ElementName::new(*id).unwrap(),
+                ))
                 .unwrap();
         }
         for (from, to) in relations {
@@ -345,12 +344,11 @@ mod tests {
         use cutaway_architecture::{Element, ElementKind, ElementName};
         let base = graph_of(&["a"], &[]);
         let mut plan = Plan::new();
-        plan.propose(ProposedChange::AddElement(Element {
-            id: ElementId::new("a/new").unwrap(),
-            name: ElementName::new("new").unwrap(),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        }))
+        plan.propose(ProposedChange::AddElement(Element::of_kind(
+            ElementId::new("a/new").unwrap(),
+            ElementKind::Module,
+            ElementName::new("new").unwrap(),
+        )))
         .unwrap();
         plan.propose(ProposedChange::AddRelation(Relation {
             from: ElementId::new("a").unwrap(),

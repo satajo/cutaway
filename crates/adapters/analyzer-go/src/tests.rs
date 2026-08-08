@@ -59,7 +59,12 @@ fn children_of(structure: &SourceStructure, parent: &str) -> Vec<(String, Elemen
         .elements
         .iter()
         .filter(|e| e.parent.as_ref().map(ElementId::as_str) == Some(parent))
-        .map(|e| (e.element.name.as_str().to_owned(), e.element.kind))
+        .map(|e| {
+            (
+                e.element.primary_name().as_str().to_owned(),
+                e.element.primary_kind(),
+            )
+        })
         .collect()
 }
 
@@ -79,7 +84,7 @@ fn modules_are_discovered_from_their_manifests() {
     let packages: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| e.element.kind == ElementKind::Package)
+        .filter(|e| e.element.primary_kind() == ElementKind::Package)
         .map(|e| e.element.id.as_str())
         .collect();
     assert_eq!(
@@ -108,8 +113,8 @@ fn a_directory_of_go_files_is_a_module_within_its_package() {
         .iter()
         .find(|e| e.element.id.as_str() == "alpha/internal/server")
         .expect("the directory is an element");
-    assert_eq!(directory.element.kind, ElementKind::Module);
-    assert_eq!(directory.element.name.as_str(), "internal/server");
+    assert_eq!(directory.element.primary_kind(), ElementKind::Module);
+    assert_eq!(directory.element.primary_name().as_str(), "internal/server");
     assert_eq!(
         directory.parent.as_ref().map(ElementId::as_str),
         Some("package:example.com/alpha")
@@ -649,8 +654,8 @@ fn a_test_file_is_a_module_among_the_files_of_its_directory() {
         ("alpha/server/server_test.go", "package server\n"),
     ]);
     let test_file = element(&structure, "alpha/server/server_test.go");
-    assert_eq!(test_file.element.kind, ElementKind::Module);
-    assert_eq!(test_file.element.name.as_str(), "server_test");
+    assert_eq!(test_file.element.primary_kind(), ElementKind::Module);
+    assert_eq!(test_file.element.primary_name().as_str(), "server_test");
     assert_eq!(
         test_file.parent.as_ref().map(ElementId::as_str),
         Some("alpha/server"),
@@ -670,8 +675,8 @@ fn every_file_of_a_directory_of_several_is_a_module_within_it() {
         ("alpha/internal/server/routes.go", "routes"),
     ] {
         let file = element(&structure, id);
-        assert_eq!(file.element.kind, ElementKind::Module);
-        assert_eq!(file.element.name.as_str(), name);
+        assert_eq!(file.element.primary_kind(), ElementKind::Module);
+        assert_eq!(file.element.primary_name().as_str(), name);
         assert_eq!(
             file.parent.as_ref().map(ElementId::as_str),
             Some("alpha/internal/server")
@@ -811,7 +816,7 @@ fn directories_the_go_tool_excludes_stay_outside_the_architecture() {
     let directories: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| e.element.kind == ElementKind::Module)
+        .filter(|e| e.element.primary_kind() == ElementKind::Module)
         .map(|e| e.element.id.as_str())
         .collect();
     assert!(directories.is_empty(), "found {directories:?}");

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
+use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind};
 use cutaway_inspection::ports::source_tree::SourcePath;
 
 /// One top-level declaration and how far it reaches.
@@ -58,7 +58,7 @@ impl DeclarationIndex {
             self.0
                 .entry((
                     directory.to_owned(),
-                    declaration.element.name.as_str().to_owned(),
+                    declaration.element.primary_name().as_str().to_owned(),
                 ))
                 .or_insert_with(|| IndexedDeclaration {
                     id: declaration.element.id.clone(),
@@ -85,7 +85,7 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
     for node in root.named_children(&mut cursor) {
         match node.kind() {
             "function_declaration" => {
-                if let Some(declared) = declared(node, text, path, ElementKind::Function) {
+                if let Some(declared) = declared(node, text, path, SemanticKind::Function) {
                     declarations.push(declared);
                 }
             }
@@ -97,7 +97,7 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
                     if !matches!(spec.kind(), "type_spec" | "type_alias") {
                         continue;
                     }
-                    if let Some(declared) = declared(spec, text, path, ElementKind::Type) {
+                    if let Some(declared) = declared(spec, text, path, SemanticKind::Type) {
                         declarations.push(declared);
                     }
                 }
@@ -112,19 +112,18 @@ fn declared(
     node: tree_sitter::Node<'_>,
     text: &str,
     path: &SourcePath,
-    kind: ElementKind,
+    kind: SemanticKind,
 ) -> Option<Declaration> {
     let name = node
         .child_by_field_name("name")?
         .utf8_text(text.as_bytes())
         .expect("node ranges lie within the parsed text");
     Some(Declaration {
-        element: Element {
-            id: declaration_id(path, kind, name),
-            name: ElementName::new(name).expect("a parsed identifier is never empty"),
+        element: Element::semantic(
+            declaration_id(path, kind, name),
             kind,
-            fingerprint: None,
-        },
+            ElementName::new(name).expect("a parsed identifier is never empty"),
+        ),
         exported: name.chars().next().is_some_and(char::is_uppercase),
         span: node.byte_range(),
     })
@@ -149,18 +148,17 @@ pub fn nested(
         if !method_name.chars().next().is_some_and(char::is_uppercase) {
             continue;
         }
-        let holder_name = extended.element.name.as_str();
+        let holder_name = extended.element.primary_name().as_str();
         found.push(NestedDeclaration {
-            element: Element {
-                id: declaration_id(
+            element: Element::semantic(
+                declaration_id(
                     path,
-                    ElementKind::Function,
+                    SemanticKind::Function,
                     &format!("{holder_name}.{method_name}"),
                 ),
-                name: ElementName::new(&method_name).expect("a parsed identifier is never empty"),
-                kind: ElementKind::Function,
-                fingerprint: None,
-            },
+                SemanticKind::Function,
+                ElementName::new(&method_name).expect("a parsed identifier is never empty"),
+            ),
             holder: extended.element.id.clone(),
             span: node.byte_range(),
         });
@@ -244,7 +242,7 @@ fn extended_type<'a>(
         .utf8_text(text.as_bytes())
         .expect("node ranges lie within the parsed text");
     let extended = declarations.iter().find(|declaration| {
-        declaration.exported && declaration.element.name.as_str() == receiver_name
+        declaration.exported && declaration.element.primary_name().as_str() == receiver_name
     })?;
     let method_name = node
         .child_by_field_name("name")?
@@ -277,15 +275,13 @@ fn receiver_type(method: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>>
 /// Declaration ids embed the path and the kind so that same-named
 /// declarations in different files, or in different namespaces of the same
 /// file, stay distinct.
-fn declaration_id(path: &SourcePath, kind: ElementKind, name: &str) -> ElementId {
+fn declaration_id(path: &SourcePath, kind: SemanticKind, name: &str) -> ElementId {
     let tag = match kind {
-        ElementKind::Project => "project",
-        ElementKind::Package => "package",
-        ElementKind::Directory => "directory",
-        ElementKind::Module => "module",
-        ElementKind::File => "file",
-        ElementKind::Function => "function",
-        ElementKind::Type => "type",
+        SemanticKind::Project => "project",
+        SemanticKind::Package => "package",
+        SemanticKind::Module => "module",
+        SemanticKind::Function => "function",
+        SemanticKind::Type => "type",
     };
     ElementId::new(format!("{path}#{tag}:{name}")).expect("the id embeds a non-empty path")
 }

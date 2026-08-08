@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
+use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind};
 use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
@@ -56,12 +56,11 @@ impl Module {
         if self.is_crate_root() {
             return None;
         }
-        Some(Element {
-            id: self.id(),
-            name: ElementName::new(&self.name).expect("a module name is never empty"),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        })
+        Some(Element::semantic(
+            self.id(),
+            SemanticKind::Module,
+            ElementName::new(&self.name).expect("a module name is never empty"),
+        ))
     }
 
     /// Whether this file is the root of its package's `src/` module tree.

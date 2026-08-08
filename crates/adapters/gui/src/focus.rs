@@ -297,12 +297,11 @@ mod tests {
             ("b/one", ElementKind::Module),
         ] {
             graph
-                .add_element(Element {
-                    id: id(element),
-                    name: ElementName::new(element).unwrap(),
+                .add_element(Element::of_kind(
+                    id(element),
                     kind,
-                    fingerprint: None,
-                })
+                    ElementName::new(element).unwrap(),
+                ))
                 .unwrap();
         }
         for (from, to) in [
@@ -452,12 +451,11 @@ mod tests {
     fn graph() -> ArchitectureGraph {
         let mut graph = view();
         graph
-            .add_element(Element {
-                id: id("a/one#type:X"),
-                name: ElementName::new("X").unwrap(),
-                kind: ElementKind::Type,
-                fingerprint: None,
-            })
+            .add_element(Element::of_kind(
+                id("a/one#type:X"),
+                ElementKind::Type,
+                ElementName::new("X").unwrap(),
+            ))
             .unwrap();
         graph
             .add_relation(Relation {
@@ -474,12 +472,11 @@ mod tests {
         let mut packages = ArchitectureGraph::new();
         for package in ["package:a", "package:b", "package:c", "package:d"] {
             packages
-                .add_element(Element {
-                    id: id(package),
-                    name: ElementName::new(package).unwrap(),
-                    kind: ElementKind::Package,
-                    fingerprint: None,
-                })
+                .add_element(Element::of_kind(
+                    id(package),
+                    ElementKind::Package,
+                    ElementName::new(package).unwrap(),
+                ))
                 .unwrap();
         }
         packages
@@ -507,12 +504,11 @@ mod tests {
     fn an_element_no_boundary_holds_maps_nowhere() {
         let mut graph = graph();
         graph
-            .add_element(Element {
-                id: id("stray"),
-                name: ElementName::new("stray").unwrap(),
-                kind: ElementKind::Module,
-                fingerprint: None,
-            })
+            .add_element(Element::of_kind(
+                id("stray"),
+                ElementKind::Module,
+                ElementName::new("stray").unwrap(),
+            ))
             .unwrap();
         assert_eq!(boundary_in_view(&packages(), &graph, &id("stray")), None);
     }

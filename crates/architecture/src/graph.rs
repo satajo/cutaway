@@ -99,16 +99,15 @@ pub enum GraphError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::{ElementKind, ElementName};
+    use crate::element::{ElementName, SemanticKind};
     use crate::relation::RelationKind;
 
     fn element(id: &str) -> Element {
-        Element {
-            id: ElementId::new(id).unwrap(),
-            name: ElementName::new(id).unwrap(),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        }
+        Element::semantic(
+            ElementId::new(id).unwrap(),
+            SemanticKind::Module,
+            ElementName::new(id).unwrap(),
+        )
     }
 
     fn relation(from: &str, to: &str) -> Relation {

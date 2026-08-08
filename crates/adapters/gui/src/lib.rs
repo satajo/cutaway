@@ -623,8 +623,14 @@ impl Session {
                 // the later question, and the later question wins.
                 self.cut.open.insert(boundary);
             }
-            if let Some(element) = self.graph.element(target) {
-                self.cut.kinds.insert(element.kind);
+            // Only an element no reading of which the vocabulary renders
+            // needs a kind switched on: one the picture already speaks for
+            // is reachable as it stands, and turning a further kind on
+            // would change what every other element draws as.
+            if let Some(element) = self.graph.element(target)
+                && element.speaks_as(&self.cut.kinds).is_none()
+            {
+                self.cut.kinds.insert(element.primary_kind());
             }
             self.rebuild_view();
         }
@@ -1010,7 +1016,7 @@ impl Session {
     fn project_root(&self) -> Option<ElementId> {
         self.graph
             .elements()
-            .find(|element| element.kind == ElementKind::Project)
+            .find(|element| element.primary_kind() == ElementKind::Project)
             .map(|element| element.id.clone())
     }
 
@@ -1837,12 +1843,11 @@ mod tests {
 
     fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: cutaway_architecture::ElementKind) {
         graph
-            .add_element(Element {
-                id: id(id_text),
-                name: cutaway_architecture::ElementName::new(id_text).unwrap(),
+            .add_element(Element::of_kind(
+                id(id_text),
                 kind,
-                fingerprint: None,
-            })
+                cutaway_architecture::ElementName::new(id_text).unwrap(),
+            ))
             .unwrap();
     }
 

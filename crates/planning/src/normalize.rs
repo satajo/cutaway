@@ -236,12 +236,11 @@ mod tests {
             ("b/lib#function:go", ElementKind::Function),
         ] {
             graph
-                .add_element(Element {
-                    id: id(element),
-                    name: ElementName::new(element).unwrap(),
+                .add_element(Element::of_kind(
+                    id(element),
                     kind,
-                    fingerprint: None,
-                })
+                    ElementName::new(element).unwrap(),
+                ))
                 .unwrap();
         }
         for (from, to) in [
@@ -561,12 +560,11 @@ mod tests {
 
     #[test]
     fn a_planned_element_can_be_planned_away_again() {
-        let planned = Element {
-            id: id("package:a/new"),
-            name: ElementName::new("new").unwrap(),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        };
+        let planned = Element::of_kind(
+            id("package:a/new"),
+            ElementKind::Module,
+            ElementName::new("new").unwrap(),
+        );
         let mut plan = Plan::new();
         plan.propose(ProposedChange::AddElement(planned)).unwrap();
         plan.propose(ProposedChange::RemoveElement(id("package:a/new")))

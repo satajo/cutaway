@@ -129,12 +129,11 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for element in ["package:a", "package:b"] {
             graph
-                .add_element(Element {
-                    id: id(element),
-                    name: name(element),
-                    kind: ElementKind::Package,
-                    fingerprint: None,
-                })
+                .add_element(Element::of_kind(
+                    id(element),
+                    ElementKind::Package,
+                    name(element),
+                ))
                 .unwrap();
         }
         graph

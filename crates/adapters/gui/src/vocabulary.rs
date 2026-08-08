@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use cutaway_architecture::{ArchitectureGraph, ElementKind};
+use cutaway_architecture::{ArchitectureGraph, Element, ElementKind};
 use eframe::egui;
 
 /// The kinds the picture can speak about, with the label and the digit each
@@ -33,11 +33,13 @@ pub(crate) enum Request {
     CloseLayer,
 }
 
-/// The kinds the architecture holds, over every element of the graph. A
-/// control over a kind outside this set would toggle an empty set and change
-/// nothing visible, so the chips and the digits gate themselves on it.
+/// The kinds the architecture holds, over every reading of every element of
+/// the graph: a module read out of a file answers to both, and either chip
+/// acts on it. A control over a kind outside this set would toggle an empty
+/// set and change nothing visible, so the chips and the digits gate
+/// themselves on it.
 pub(crate) fn present_kinds(graph: &ArchitectureGraph) -> BTreeSet<ElementKind> {
-    graph.elements().map(|element| element.kind).collect()
+    graph.elements().flat_map(Element::kinds).collect()
 }
 
 /// The vocabulary of the whole picture, as one chip per kind. A chip whose
@@ -159,12 +161,11 @@ mod tests {
         for (position, kind) in kinds.iter().enumerate() {
             let name = format!("element-{position}");
             graph
-                .add_element(Element {
-                    id: ElementId::new(&name).unwrap(),
-                    name: ElementName::new(&name).unwrap(),
-                    kind: *kind,
-                    fingerprint: None,
-                })
+                .add_element(Element::of_kind(
+                    ElementId::new(&name).unwrap(),
+                    *kind,
+                    ElementName::new(&name).unwrap(),
+                ))
                 .unwrap();
         }
         graph

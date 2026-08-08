@@ -54,12 +54,11 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for element in ["package:a", "package:b", "a/lib", "a/lib#type:X"] {
             graph
-                .add_element(Element {
-                    id: id(element),
-                    name: ElementName::new(element).unwrap(),
-                    kind: ElementKind::Module,
-                    fingerprint: None,
-                })
+                .add_element(Element::of_kind(
+                    id(element),
+                    ElementKind::Module,
+                    ElementName::new(element).unwrap(),
+                ))
                 .unwrap();
         }
         for (from, to) in [("package:a", "a/lib"), ("a/lib", "a/lib#type:X")] {

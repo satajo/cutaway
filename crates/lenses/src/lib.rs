@@ -8,12 +8,13 @@
 //!   a boundary reveals exactly one layer: its children arrive closed, and
 //!   opening each of them is a step of its own.
 //! - The vocabulary - `kinds` - is the set of element kinds the picture
-//!   renders at all. A kind outside the vocabulary is transparent: its
-//!   elements never draw, and what they contain hoists to the nearest
-//!   rendered ancestor, so hiding modules pools their declarations directly
-//!   in the package that holds them. The project root is transparent in the
-//!   default vocabulary: the picture starts at the packages, with no box
-//!   around the whole.
+//!   renders at all. An element draws while the vocabulary holds any of the
+//!   kinds it answers to, and speaks as that reading; an element the
+//!   vocabulary reaches by no kind is transparent, so what it contains
+//!   hoists to the nearest rendered ancestor and hiding modules pools their
+//!   declarations directly in the package that holds them. The project root
+//!   is transparent in the default vocabulary: the picture starts at the
+//!   packages, with no box around the whole.
 //!
 //! Every dependency between elements rolls up to a dependency between the
 //! boxes the picture draws. A rolled-up edge remembers the concrete
@@ -90,9 +91,9 @@ pub struct Cut {
     /// stands as a single closed box. A flag under a closed boundary stays
     /// latent, and a flag naming no element is ignored.
     pub open: BTreeSet<ElementId>,
-    /// The vocabulary: the element kinds the picture renders. A kind
-    /// outside it is transparent - its elements never draw, and their
-    /// contents hoist to the nearest rendered ancestor.
+    /// The vocabulary: the element kinds the picture renders. An element
+    /// none of whose kinds stands here is transparent - it never draws, and
+    /// its contents hoist to the nearest rendered ancestor.
     pub kinds: BTreeSet<ElementKind>,
     /// The boundary the picture is about, and None for the whole project.
     /// A scope says where the reader stands rather than what the sources
@@ -279,7 +280,7 @@ pub fn boundary_view(graph: &ArchitectureGraph, cut: &Cut) -> Result<BoundaryVie
     let mut contents_memo = BTreeMap::new();
     let mut visible = BTreeSet::new();
     for element in graph.elements() {
-        let shown = cut.kinds.contains(&element.kind)
+        let shown = element.speaks_as(&cut.kinds).is_some()
             && parents.get(&element.id).is_none_or(|parent| {
                 shows_contents(
                     graph,
@@ -409,7 +410,7 @@ fn shows_contents(
             .is_none_or(|parent| shows_contents(graph, parents, cut, root, memo, parent));
         let rendered = graph
             .element(id)
-            .is_some_and(|element| cut.kinds.contains(&element.kind));
+            .is_some_and(|element| element.speaks_as(&cut.kinds).is_some());
         if rendered {
             above && cut.open.contains(id)
         } else {
@@ -433,7 +434,7 @@ fn reveals(
     children.get(id).into_iter().flatten().any(|child| {
         let rendered = graph
             .element(child)
-            .is_some_and(|element| kinds.contains(&element.kind));
+            .is_some_and(|element| element.speaks_as(kinds).is_some());
         rendered || reveals(graph, children, kinds, child)
     })
 }
@@ -682,12 +683,11 @@ mod tests {
     use super::*;
 
     fn element(id: &str, kind: ElementKind) -> Element {
-        Element {
-            id: ElementId::new(id).unwrap(),
-            name: ElementName::new(id).unwrap(),
+        Element::of_kind(
+            ElementId::new(id).unwrap(),
             kind,
-            fingerprint: None,
-        }
+            ElementName::new(id).unwrap(),
+        )
     }
 
     fn id(text: &str) -> ElementId {

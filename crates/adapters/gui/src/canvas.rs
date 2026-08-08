@@ -1373,12 +1373,11 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for element in ["package:a", "a/one", "a/two"] {
             graph
-                .add_element(Element {
-                    id: id(element),
-                    name: ElementName::new(element).unwrap(),
-                    kind: ElementKind::Module,
-                    fingerprint: None,
-                })
+                .add_element(Element::of_kind(
+                    id(element),
+                    ElementKind::Module,
+                    ElementName::new(element).unwrap(),
+                ))
                 .unwrap();
         }
         for inner in ["a/one", "a/two"] {
@@ -1597,12 +1596,11 @@ mod tests {
     fn wired() -> (ArchitectureGraph, Vec<Relation>) {
         let (mut graph, _) = frame_of_leaves();
         graph
-            .add_element(Element {
-                id: id("package:b"),
-                name: ElementName::new("package:b").unwrap(),
-                kind: ElementKind::Package,
-                fingerprint: None,
-            })
+            .add_element(Element::of_kind(
+                id("package:b"),
+                ElementKind::Package,
+                ElementName::new("package:b").unwrap(),
+            ))
             .unwrap();
         let edges = vec![
             depends("a/one", "package:b"),

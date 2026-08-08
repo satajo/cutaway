@@ -39,7 +39,7 @@ fn name_of(structure: &SourceStructure, id: &str) -> String {
         .find(|e| e.element.id.as_str() == id)
         .expect("the element exists")
         .element
-        .name
+        .primary_name()
         .as_str()
         .to_owned()
 }
@@ -83,7 +83,7 @@ fn packages_are_discovered_from_their_manifests() {
     let packages: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| e.element.kind == ElementKind::Package)
+        .filter(|e| e.element.primary_kind() == ElementKind::Package)
         .map(|e| e.element.id.as_str())
         .collect();
     assert_eq!(packages, ["package:app", "package:core"]);
@@ -111,8 +111,8 @@ fn source_files_are_modules_within_their_package_named_without_their_extension()
     let names: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| e.element.kind == ElementKind::Module)
-        .map(|e| e.element.name.as_str().to_owned())
+        .filter(|e| e.element.primary_kind() == ElementKind::Module)
+        .map(|e| e.element.primary_name().as_str().to_owned())
         .collect();
     assert_eq!(names, ["src/utils/date"]);
 }
@@ -130,12 +130,12 @@ fn a_directory_holding_two_files_is_a_boundary_within_its_package() {
         .find(|e| e.element.id.as_str() == "packages/app/src")
         .expect("the directory is an element");
     assert_eq!(
-        directory.element.kind,
+        directory.element.primary_kind(),
         ElementKind::Directory,
         "a TypeScript directory is organization the author chose, and the \
          language reads nothing into it"
     );
-    assert_eq!(directory.element.name.as_str(), "src");
+    assert_eq!(directory.element.primary_name().as_str(), "src");
     assert_eq!(
         parent_of(&structure, "packages/app/src"),
         Some("package:app".to_owned())
@@ -928,7 +928,12 @@ fn exported_functions_classes_interfaces_aliases_and_enums_become_items() {
                 .map(cutaway_architecture::ElementId::as_str)
                 == Some("packages/app/src/api.ts")
         })
-        .map(|e| (e.element.name.as_str().to_owned(), e.element.kind))
+        .map(|e| {
+            (
+                e.element.primary_name().as_str().to_owned(),
+                e.element.primary_kind(),
+            )
+        })
         .collect();
     assert_eq!(
         items,
@@ -954,8 +959,8 @@ fn an_exported_const_is_an_item_only_when_it_holds_a_function() {
     let items: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| e.element.kind == ElementKind::Function)
-        .map(|e| e.element.name.as_str().to_owned())
+        .filter(|e| e.element.primary_kind() == ElementKind::Function)
+        .map(|e| e.element.primary_name().as_str().to_owned())
         .collect();
     assert_eq!(items, ["render", "build"]);
 }
@@ -972,8 +977,13 @@ fn an_export_list_marks_local_declarations_as_exported() {
     let items: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| matches!(e.element.kind, ElementKind::Function | ElementKind::Type))
-        .map(|e| e.element.name.as_str().to_owned())
+        .filter(|e| {
+            matches!(
+                e.element.primary_kind(),
+                ElementKind::Function | ElementKind::Type
+            )
+        })
+        .map(|e| e.element.primary_name().as_str().to_owned())
         .collect();
     assert_eq!(items, ["connect", "Session"]);
 }
@@ -1003,7 +1013,7 @@ fn a_default_export_of_a_named_function_is_an_item_and_an_anonymous_one_is_none(
         anonymous
             .elements
             .iter()
-            .all(|e| e.element.kind != ElementKind::Function),
+            .all(|e| e.element.primary_kind() != ElementKind::Function),
         "an anonymous default declares no item"
     );
     assert!(depends(
@@ -1063,7 +1073,12 @@ fn commonjs_exports_assignments_declare_the_modules_items() {
     let items: Vec<_> = structure
         .elements
         .iter()
-        .filter(|e| matches!(e.element.kind, ElementKind::Function | ElementKind::Type))
+        .filter(|e| {
+            matches!(
+                e.element.primary_kind(),
+                ElementKind::Function | ElementKind::Type
+            )
+        })
         .map(|e| e.element.id.as_str().to_owned())
         .collect();
     assert_eq!(

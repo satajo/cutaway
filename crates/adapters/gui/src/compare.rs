@@ -321,8 +321,14 @@ impl CompareSession {
             for boundary in palette::boundaries_revealing(self.comparison.union(), target) {
                 self.cut.open.insert(boundary);
             }
-            if let Some(element) = self.comparison.union().element(target) {
-                self.cut.kinds.insert(element.kind);
+            // A kind joins the vocabulary only for an element no reading of
+            // which the picture renders: one it already speaks for needs no
+            // widening, and widening would change what everything else
+            // draws as.
+            if let Some(element) = self.comparison.union().element(target)
+                && element.speaks_as(&self.cut.kinds).is_none()
+            {
+                self.cut.kinds.insert(element.primary_kind());
             }
             self.repaint();
         }
@@ -634,7 +640,7 @@ fn boundary(ui: &mut egui::Ui, session: &CompareSession, id: &ElementId) {
     let labels = Labels::over(&scene.view.graph, &scene.containment, &session.renames);
     ui.label(labels.qualified(id));
     if let Some(element) = scene.view.graph.element(id) {
-        ui.label(egui::RichText::new(kind_name(element.kind)).weak());
+        ui.label(egui::RichText::new(kind_name(element.primary_kind())).weak());
     }
     ui.separator();
     ui.label(told(scene.nodes.get(id).copied()));
@@ -766,12 +772,11 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for id in ids {
             graph
-                .add_element(Element {
-                    id: ElementId::new(*id).unwrap(),
-                    name: ElementName::new(*id).unwrap(),
-                    kind: ElementKind::Module,
-                    fingerprint: None,
-                })
+                .add_element(Element::of_kind(
+                    ElementId::new(*id).unwrap(),
+                    ElementKind::Module,
+                    ElementName::new(*id).unwrap(),
+                ))
                 .unwrap();
         }
         let relation = |from: &str, to: &str, kind| Relation {

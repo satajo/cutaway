@@ -203,13 +203,18 @@ pub(crate) struct Hit {
 pub(crate) fn hits(graph: &ArchitectureGraph, query: &str) -> Vec<Hit> {
     let mut ranked: Vec<_> = graph
         .elements()
-        .filter(|element| element.kind != ElementKind::Project)
-        .filter_map(|element| Some((quality(element.name.as_str(), query)?, element)))
+        .filter(|element| element.primary_kind() != ElementKind::Project)
+        .filter_map(|element| Some((quality(element.primary_name().as_str(), query)?, element)))
         .collect();
     ranked.sort_by(|(left_quality, left), (right_quality, right)| {
         right_quality
             .cmp(left_quality)
-            .then_with(|| left.name.as_str().len().cmp(&right.name.as_str().len()))
+            .then_with(|| {
+                left.primary_name()
+                    .as_str()
+                    .len()
+                    .cmp(&right.primary_name().as_str().len())
+            })
             .then_with(|| left.id.cmp(&right.id))
     });
     let containment = Containment::of(graph);
@@ -218,8 +223,8 @@ pub(crate) fn hits(graph: &ArchitectureGraph, query: &str) -> Vec<Hit> {
         .take(RESULT_LIMIT)
         .map(|(_, element)| Hit {
             id: element.id.clone(),
-            name: element.name.to_string(),
-            kind: element.kind,
+            name: element.primary_name().to_string(),
+            kind: element.primary_kind(),
             container: container_of(graph, &containment, &element.id),
         })
         .collect()
@@ -237,9 +242,9 @@ fn container_of(graph: &ArchitectureGraph, containment: &Containment, id: &Eleme
             break;
         }
         if let Some(element) = graph.element(frame)
-            && element.kind != ElementKind::Project
+            && element.primary_kind() != ElementKind::Project
         {
-            names.push(element.name.to_string());
+            names.push(element.primary_name().to_string());
         }
         current = containment.parent(frame);
     }
@@ -471,12 +476,11 @@ mod tests {
 
     fn add(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: ElementKind) {
         graph
-            .add_element(Element {
-                id: id(id_text),
-                name: ElementName::new(name).unwrap(),
+            .add_element(Element::of_kind(
+                id(id_text),
                 kind,
-                fingerprint: None,
-            })
+                ElementName::new(name).unwrap(),
+            ))
             .unwrap();
     }
 

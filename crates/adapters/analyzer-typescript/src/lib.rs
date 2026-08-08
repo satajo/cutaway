@@ -58,7 +58,7 @@ mod reexports;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, Relation, RelationKind};
+use cutaway_architecture::{Element, ElementId, ElementName, Relation, RelationKind, SemanticKind};
 use cutaway_inspection::ports::source_analyzer::{
     AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
@@ -392,12 +392,11 @@ fn grammar(extension: Option<&str>) -> tree_sitter::Language {
 }
 
 fn package_element(package: &DiscoveredPackage) -> Element {
-    Element {
-        id: package_id(package),
-        name: ElementName::new(&package.name).expect("a package name is never empty"),
-        kind: ElementKind::Package,
-        fingerprint: None,
-    }
+    Element::semantic(
+        package_id(package),
+        SemanticKind::Package,
+        ElementName::new(&package.name).expect("a package name is never empty"),
+    )
 }
 
 pub(crate) fn package_id(package: &DiscoveredPackage) -> ElementId {

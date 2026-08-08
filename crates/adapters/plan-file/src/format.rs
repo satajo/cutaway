@@ -237,8 +237,8 @@ impl StoredAction {
             ProposedChange::AddElement(element) => Self::AddElement {
                 element: StoredElement {
                     id: element.id.as_str().to_owned(),
-                    name: element.name.as_str().to_owned(),
-                    kind: StoredKind::from_kind(element.kind),
+                    name: element.primary_name().as_str().to_owned(),
+                    kind: StoredKind::from_kind(element.primary_kind()),
                 },
             },
             ProposedChange::RemoveElement(id) => Self::RemoveElement {
@@ -255,12 +255,11 @@ impl StoredAction {
 
     fn into_change(self) -> Result<ProposedChange, PlanStoreError> {
         Ok(match self {
-            Self::AddElement { element } => ProposedChange::AddElement(Element {
-                id: element_id(element.id)?,
-                name: ElementName::new(element.name).map_err(corrupt)?,
-                kind: element.kind.into_kind(),
-                fingerprint: None,
-            }),
+            Self::AddElement { element } => ProposedChange::AddElement(Element::of_kind(
+                element_id(element.id)?,
+                element.kind.into_kind(),
+                ElementName::new(element.name).map_err(corrupt)?,
+            )),
             Self::RemoveElement { element } => ProposedChange::RemoveElement(element_id(element)?),
             Self::AddRelation { relation } => {
                 ProposedChange::AddRelation(relation.into_relation()?)

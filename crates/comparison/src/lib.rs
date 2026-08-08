@@ -25,9 +25,9 @@ pub struct ArchitectureDelta {
     pub added_elements: Vec<Element>,
     pub removed_elements: Vec<Element>,
     /// Elements present in both versions whose id survived but which
-    /// differ: in name, in kind, or in fingerprint where both versions
-    /// carry one - a `None` on either side is absence of evidence, not a
-    /// change. The list holds the after shape.
+    /// differ: in either reading - name or kind - or in fingerprint where
+    /// both versions carry one; a `None` on either side is absence of
+    /// evidence, not a change. The list holds the after shape.
     pub changed_elements: Vec<Element>,
     pub added_relations: Vec<Relation>,
     pub removed_relations: Vec<Relation>,
@@ -80,11 +80,13 @@ impl ArchitectureDelta {
 }
 
 /// Whether an element whose id survived differs between the versions: in
-/// name, in kind, or in fingerprint where both versions carry one. A
-/// fingerprint on one side alone is absence of evidence, not a change.
+/// either of its readings - a name or a kind a language or the tree changed
+/// its mind about, an aspect gained or lost - or in fingerprint where both
+/// versions carry one. A fingerprint on one side alone is absence of
+/// evidence, not a change.
 fn differs(before: &Element, after: &Element) -> bool {
-    before.name != after.name
-        || before.kind != after.kind
+    before.semantic_aspect() != after.semantic_aspect()
+        || before.substrate_aspect() != after.substrate_aspect()
         || matches!(
             (before.fingerprint, after.fingerprint),
             (Some(earlier), Some(later)) if earlier != later
@@ -370,24 +372,24 @@ fn containment_parents(graph: &ArchitectureGraph) -> BTreeMap<ElementId, BTreeSe
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{ElementKind, ElementName, Fingerprint};
+    use cutaway_architecture::{
+        ElementKind, ElementName, Fingerprint, SemanticKind, SubstrateKind,
+    };
 
     use super::*;
 
     fn element(id: &str) -> Element {
-        Element {
-            id: ElementId::new(id).unwrap(),
-            name: ElementName::new(id).unwrap(),
-            kind: ElementKind::Module,
-            fingerprint: None,
-        }
+        Element::semantic(
+            ElementId::new(id).unwrap(),
+            SemanticKind::Module,
+            ElementName::new(id).unwrap(),
+        )
     }
 
     fn fingerprinted(id: &str, contents: &[u8]) -> Element {
-        Element {
-            fingerprint: Some(Fingerprint::of(contents)),
-            ..element(id)
-        }
+        let mut element = element(id);
+        element.fingerprint = Some(Fingerprint::of(contents));
+        element
     }
 
     fn graph_of(ids: &[&str]) -> ArchitectureGraph {
@@ -499,19 +501,18 @@ mod tests {
         let before = graph_of(&["a"]);
         let mut after = ArchitectureGraph::new();
         after
-            .add_element(Element {
-                id: id("a"),
-                name: ElementName::new("renamed").unwrap(),
-                kind: ElementKind::Type,
-                fingerprint: None,
-            })
+            .add_element(Element::semantic(
+                id("a"),
+                SemanticKind::Type,
+                ElementName::new("renamed").unwrap(),
+            ))
             .unwrap();
 
         let comparison = Comparison::between(&before, &after);
 
         let survivor = comparison.union().element(&id("a")).unwrap();
-        assert_eq!(survivor.name.as_str(), "renamed");
-        assert_eq!(survivor.kind, ElementKind::Type);
+        assert_eq!(survivor.primary_name().as_str(), "renamed");
+        assert_eq!(survivor.primary_kind(), ElementKind::Type);
     }
 
     #[test]
@@ -690,10 +691,11 @@ mod tests {
 
     #[test]
     fn a_name_change_with_a_surviving_id_reads_as_modified() {
-        let renamed = Element {
-            name: ElementName::new("renamed").unwrap(),
-            ..element("a")
-        };
+        let renamed = Element::semantic(
+            id("a"),
+            SemanticKind::Module,
+            ElementName::new("renamed").unwrap(),
+        );
         let before = graph_of(&["a"]);
         let after = version_of(vec![renamed], &[]);
 
@@ -733,10 +735,12 @@ mod tests {
 
     #[test]
     fn a_module_becoming_a_file_reads_as_modified() {
-        let file = Element {
-            kind: ElementKind::File,
-            ..element("a")
-        };
+        let file = Element::substrate(
+            id("a"),
+            SubstrateKind::File,
+            ElementName::new("a").unwrap(),
+            None,
+        );
         let before = graph_of(&["a"]);
         let after = version_of(vec![file], &[]);
 

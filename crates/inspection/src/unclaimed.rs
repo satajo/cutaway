@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{
-    ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Fingerprint,
+    ArchitectureGraph, Element, ElementId, ElementName, Fingerprint, SubstrateKind,
 };
 
 use crate::ports::source_analyzer::AnalyzedElement;
@@ -101,14 +101,13 @@ fn group(
         let holder = holder(dir, base, &surviving);
         let read_against = holder.map_or(base, String::as_str);
         elements.push(AnalyzedElement {
-            element: Element {
-                id: ElementId::new(dir.as_str())
-                    .expect("a directory below the anchor is never empty"),
-                name: ElementName::new(strip_dir(dir, read_against))
+            element: Element::substrate(
+                ElementId::new(dir.as_str()).expect("a directory below the anchor is never empty"),
+                SubstrateKind::Directory,
+                ElementName::new(strip_dir(dir, read_against))
                     .expect("a directory name below its holder is never empty"),
-                kind: ElementKind::Directory,
-                fingerprint: None,
-            },
+                None,
+            ),
             parent: parent_element(holder, anchor),
         });
     }
@@ -116,13 +115,13 @@ fn group(
         let holder = holder(file.path.as_str(), base, &surviving);
         let read_against = holder.map_or(base, String::as_str);
         elements.push(AnalyzedElement {
-            element: Element {
-                id: ElementId::new(file.path.as_str()).expect("a source path is never empty"),
-                name: ElementName::new(strip_dir(file.path.as_str(), read_against))
+            element: Element::substrate(
+                ElementId::new(file.path.as_str()).expect("a source path is never empty"),
+                SubstrateKind::File,
+                ElementName::new(strip_dir(file.path.as_str(), read_against))
                     .expect("a file path below its holder is never empty"),
-                kind: ElementKind::File,
-                fingerprint: Some(Fingerprint::of(&file.contents)),
-            },
+                Some(Fingerprint::of(&file.contents)),
+            ),
             parent: parent_element(holder, anchor),
         });
     }
@@ -220,6 +219,8 @@ fn strip_dir<'a>(path: &'a str, dir: &str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
+    use cutaway_architecture::{ElementKind, SemanticKind};
+
     use super::*;
 
     fn file(path: &str, contents: &str) -> SourceFile {
@@ -259,8 +260,8 @@ mod tests {
             &ArchitectureGraph::new(),
         );
         let readme = find(&elements, "README.md");
-        assert_eq!(readme.element.kind, ElementKind::File);
-        assert_eq!(readme.element.name.as_str(), "README.md");
+        assert_eq!(readme.element.primary_kind(), ElementKind::File);
+        assert_eq!(readme.element.primary_name().as_str(), "README.md");
         assert_eq!(readme.parent, None);
         assert_eq!(elements.len(), 1, "no directory groups a single file");
     }
@@ -273,7 +274,7 @@ mod tests {
             &ArchitectureGraph::new(),
         );
         let docs = find(&elements, "docs");
-        assert_eq!(docs.element.kind, ElementKind::Directory);
+        assert_eq!(docs.element.primary_kind(), ElementKind::Directory);
         assert_eq!(docs.element.fingerprint, None);
         assert_eq!(docs.parent, None);
         let docs_id = ElementId::new("docs").unwrap();
@@ -301,7 +302,7 @@ mod tests {
             "a directory holding one thing groups nothing"
         );
         let guide = find(&elements, "docs/guide");
-        assert_eq!(guide.element.name.as_str(), "docs/guide");
+        assert_eq!(guide.element.primary_name().as_str(), "docs/guide");
         assert_eq!(guide.parent, None);
     }
 
@@ -317,10 +318,13 @@ mod tests {
         );
         let docs = ElementId::new("docs").unwrap();
         let hoisted = find(&elements, "docs/build/one.css");
-        assert_eq!(hoisted.element.name.as_str(), "build/one.css");
+        assert_eq!(hoisted.element.primary_name().as_str(), "build/one.css");
         assert_eq!(hoisted.parent, Some(docs.clone()));
         assert_eq!(
-            find(&elements, "docs/other/one.css").element.name.as_str(),
+            find(&elements, "docs/other/one.css")
+                .element
+                .primary_name()
+                .as_str(),
             "other/one.css",
             "the dissolved segments keep two namesake files apart"
         );
@@ -334,7 +338,7 @@ mod tests {
             &ArchitectureGraph::new(),
         );
         let intro = find(&elements, "docs/guide/intro.md");
-        assert_eq!(intro.element.name.as_str(), "docs/guide/intro.md");
+        assert_eq!(intro.element.primary_name().as_str(), "docs/guide/intro.md");
         assert_eq!(intro.parent, None);
     }
 
@@ -393,12 +397,11 @@ mod tests {
     fn a_directory_already_standing_in_the_graph_holds_its_unclaimed_files_itself() {
         let mut graph = ArchitectureGraph::new();
         graph
-            .add_element(Element {
-                id: ElementId::new("mymod/util").unwrap(),
-                name: ElementName::new("util").unwrap(),
-                kind: ElementKind::Module,
-                fingerprint: None,
-            })
+            .add_element(Element::semantic(
+                ElementId::new("mymod/util").unwrap(),
+                SemanticKind::Module,
+                ElementName::new("util").unwrap(),
+            ))
             .unwrap();
         let territories = BTreeMap::from([territory("", "package:mymod")]);
         let elements = tree(

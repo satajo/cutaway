@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName};
+use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind};
 use cutaway_inspection::ports::source_tree::SourcePath;
 
 /// One top-level declaration and how far it reaches.
@@ -61,7 +61,10 @@ impl DeclarationIndex {
     pub fn add(&mut self, path: &SourcePath, declarations: &[Declaration]) {
         for declaration in declarations {
             self.by_name
-                .entry((path.clone(), declaration.element.name.as_str().to_owned()))
+                .entry((
+                    path.clone(),
+                    declaration.element.primary_name().as_str().to_owned(),
+                ))
                 .or_insert_with(|| IndexedDeclaration {
                     id: declaration.element.id.clone(),
                     public: declaration.public,
@@ -75,7 +78,7 @@ impl DeclarationIndex {
                 .entry((
                     path.clone(),
                     declaration.holder_name.clone(),
-                    declaration.element.name.as_str().to_owned(),
+                    declaration.element.primary_name().as_str().to_owned(),
                 ))
                 .or_insert_with(|| declaration.element.id.clone());
         }
@@ -103,14 +106,14 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
     let mut declarations = Vec::new();
     for node in root.named_children(&mut cursor) {
         let kind = match node.kind() {
-            "function_item" => ElementKind::Function,
+            "function_item" => SemanticKind::Function,
             "struct_item" | "enum_item" | "trait_item" | "union_item" | "type_item" => {
-                ElementKind::Type
+                SemanticKind::Type
             }
             // A bodyless `mod foo;` only points at a file; that file is
             // already a module element of its own, so declaring it again
             // here would duplicate it.
-            "mod_item" if node.child_by_field_name("body").is_some() => ElementKind::Module,
+            "mod_item" if node.child_by_field_name("body").is_some() => SemanticKind::Module,
             _ => continue,
         };
         let Some(name_node) = node.child_by_field_name("name") else {
@@ -124,12 +127,11 @@ pub fn top_level(root: tree_sitter::Node<'_>, text: &str, path: &SourcePath) -> 
             .named_children(&mut children)
             .any(|child| child.kind() == "visibility_modifier");
         declarations.push(Declaration {
-            element: Element {
-                id: declaration_id(path, kind, name),
-                name: ElementName::new(name).expect("a parsed identifier is never empty"),
+            element: Element::semantic(
+                declaration_id(path, kind, name),
                 kind,
-                fingerprint: None,
-            },
+                ElementName::new(name).expect("a parsed identifier is never empty"),
+            ),
             public,
             span: node.byte_range(),
         });
@@ -183,22 +185,21 @@ pub fn nested(
             let name = name_node
                 .utf8_text(text.as_bytes())
                 .expect("node ranges lie within the parsed text");
-            let holder_name = implemented.element.name.as_str().to_owned();
+            let holder_name = implemented.element.primary_name().as_str().to_owned();
             let id = declaration_id(
                 path,
-                ElementKind::Function,
+                SemanticKind::Function,
                 &format!("{holder_name}::{name}"),
             );
             if !seen.insert(id.clone()) {
                 continue;
             }
             found.push(NestedDeclaration {
-                element: Element {
+                element: Element::semantic(
                     id,
-                    name: ElementName::new(name).expect("a parsed identifier is never empty"),
-                    kind: ElementKind::Function,
-                    fingerprint: None,
-                },
+                    SemanticKind::Function,
+                    ElementName::new(name).expect("a parsed identifier is never empty"),
+                ),
                 holder: implemented.element.id.clone(),
                 holder_name,
                 span: item.byte_range(),
@@ -288,23 +289,21 @@ fn implemented_type<'a>(
     let name = self_type
         .utf8_text(text.as_bytes())
         .expect("node ranges lie within the parsed text");
-    declarations
-        .iter()
-        .find(|declaration| declaration.public && declaration.element.name.as_str() == name)
+    declarations.iter().find(|declaration| {
+        declaration.public && declaration.element.primary_name().as_str() == name
+    })
 }
 
 /// Declaration ids embed the path and the kind so that same-named
 /// declarations in different files, or in different namespaces of the same
 /// file, stay distinct.
-fn declaration_id(path: &SourcePath, kind: ElementKind, name: &str) -> ElementId {
+fn declaration_id(path: &SourcePath, kind: SemanticKind, name: &str) -> ElementId {
     let tag = match kind {
-        ElementKind::Project => "project",
-        ElementKind::Package => "package",
-        ElementKind::Directory => "directory",
-        ElementKind::Module => "module",
-        ElementKind::File => "file",
-        ElementKind::Function => "function",
-        ElementKind::Type => "type",
+        SemanticKind::Project => "project",
+        SemanticKind::Package => "package",
+        SemanticKind::Module => "module",
+        SemanticKind::Function => "function",
+        SemanticKind::Type => "type",
     };
     ElementId::new(format!("{path}#{tag}:{name}")).expect("the id embeds a non-empty path")
 }
