@@ -170,6 +170,15 @@ fn the_file_tree_is_hidden(world: &mut CutawayWorld) {
     }
 }
 
+/// What the languages read is packages, modules, and the declarations in
+/// them. Dropping all of it leaves the directories and files a listing shows.
+#[when("only the file tree is shown")]
+fn only_the_file_tree_is_shown(world: &mut CutawayWorld) {
+    for kind in ["packages", "modules", "types", "functions"] {
+        world.driver.hide_kind(kind).expect("the kind hides");
+    }
+}
+
 #[when(expr = "{string} are hidden from the picture")]
 fn a_kind_is_hidden(world: &mut CutawayWorld, kind: String) {
     world.driver.hide_kind(&kind).expect("the kind hides");
@@ -378,6 +387,15 @@ fn the_boundary_contains(world: &mut CutawayWorld, frame: String, inside: String
     assert!(
         contents.contains(&inside),
         "expected {frame} to contain {inside}, it holds {contents:?}"
+    );
+}
+
+#[then(expr = "the boundary {string} holds nothing")]
+fn the_boundary_holds_nothing(world: &mut CutawayWorld, frame: String) {
+    let contents = world.driver.contents_of(&frame);
+    assert!(
+        contents.is_empty(),
+        "expected {frame} to hold nothing, it holds {contents:?}"
     );
 }
 

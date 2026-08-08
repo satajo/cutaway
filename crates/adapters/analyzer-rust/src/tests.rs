@@ -1007,6 +1007,37 @@ fn every_file_of_a_rust_project_stands_in_the_picture() {
 }
 
 #[test]
+fn a_module_written_beside_its_directory_is_one_entry_of_the_listing() {
+    let graph = inspected(&[
+        MANIFEST_A,
+        ("crates/a/src/lib.rs", "mod foo;\n"),
+        ("crates/a/src/foo.rs", "pub mod bar;\n"),
+        ("crates/a/src/foo/bar.rs", "pub struct Baz;\n"),
+    ]);
+
+    let foo = graph
+        .element(&ElementId::new("crates/a/src/foo.rs").unwrap())
+        .expect("the module spanning the file and the directory stands");
+    assert_eq!(
+        foo.substrate_aspect()
+            .map(|aspect| aspect.name.as_str().to_owned()),
+        Some("foo".to_owned()),
+        "one box for both pieces, named by the name they share"
+    );
+    assert_eq!(
+        foo.fingerprint,
+        Some(cutaway_architecture::Fingerprint::of(b"pub mod bar;\n")),
+        "the file the module is written in states what the box holds"
+    );
+    assert!(
+        graph
+            .element(&ElementId::new("crates/a/src/foo").unwrap())
+            .is_none(),
+        "the directory leaves no second entry beside the module"
+    );
+}
+
+#[test]
 fn the_default_picture_shows_the_tree_a_listing_would() {
     let graph = inspected(&[
         MANIFEST_A,

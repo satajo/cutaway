@@ -7,6 +7,10 @@ Feature: Comparing two versions
   changes out of sight inside it reads as modified. A boundary the change
   never touches reads as nothing at all.
 
+  Every file speaks through its contents, so an edit that leaves every
+  declaration standing still reads as modified at the boundary that file
+  became - a module, a manifest, or a file no language reads.
+
   Every reading sits at the nearest boundary the picture draws, so opening a
   modified boundary moves the reading onto the change itself. A connection
   reads from the dependencies behind it: it arrives when they all arrive, it
@@ -119,6 +123,61 @@ Feature: Comparing two versions
     And the boundary "src" contains "lib.rs"
     And the boundary "src" contains "physics"
     And the boundary "physics" reads as "added"
+
+  Scenario: A module whose code changes while its declarations stand reads as modified
+    Given in version "before" a package "engine" at "crates/engine"
+    And in version "before" a source file "crates/engine/src/lib.rs" containing:
+      """
+      mod physics;
+      """
+    And in version "before" a source file "crates/engine/src/physics.rs" containing:
+      """
+      pub fn step() {
+          apply(1);
+      }
+      """
+    And in version "after" a package "engine" at "crates/engine"
+    And in version "after" a source file "crates/engine/src/lib.rs" containing:
+      """
+      mod physics;
+      """
+    And in version "after" a source file "crates/engine/src/physics.rs" containing:
+      """
+      pub fn step() {
+          apply(2);
+      }
+      """
+    When the change from version "before" to version "after" is viewed
+    And every boundary is opened
+    Then the boundary "physics" reads as "modified"
+    And the boundary "step" reads as unchanged
+    And the boundary "lib.rs" reads as unchanged
+
+  Scenario: A manifest whose contents change reads as modified
+    Given in version "before" a source file "crates/engine/Cargo.toml" containing:
+      """
+      [package]
+      name = "engine"
+      version = "0.1.0"
+      """
+    And in version "before" a source file "crates/engine/src/lib.rs" containing:
+      """
+      pub fn run() {}
+      """
+    And in version "after" a source file "crates/engine/Cargo.toml" containing:
+      """
+      [package]
+      name = "engine"
+      version = "0.2.0"
+      """
+    And in version "after" a source file "crates/engine/src/lib.rs" containing:
+      """
+      pub fn run() {}
+      """
+    When the change from version "before" to version "after" is viewed
+    And every boundary is opened
+    Then the boundary "Cargo.toml" reads as "modified"
+    And the boundary "engine" reads as unchanged
 
   Scenario: A dependency the newer version adds reads as an added connection
     Given in version "before" a package "app" at "crates/app"

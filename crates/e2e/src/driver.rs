@@ -237,11 +237,16 @@ impl InProcessDriver {
     /// `element.rs` - and a scenario may say either: which one the picture
     /// currently speaks depends on the vocabulary, while the boundary a
     /// scenario means does not.
+    ///
+    /// A name two boundaries answer to names neither of them, so the scenario
+    /// stops on it: picking the first would let the scenario pass while
+    /// speaking about something else than it says.
     fn boundary_id(&self, name: &str) -> Result<ElementId, String> {
-        self.view()
+        let answering: Vec<&Element> = self
+            .view()
             .graph
             .elements()
-            .find(|element| {
+            .filter(|element| {
                 element
                     .semantic_aspect()
                     .is_some_and(|aspect| aspect.name.as_str() == name)
@@ -249,8 +254,28 @@ impl InProcessDriver {
                         .substrate_aspect()
                         .is_some_and(|aspect| aspect.name.as_str() == name)
             })
-            .map(|element| element.id.clone())
-            .ok_or_else(|| format!("no boundary named {name}"))
+            .collect();
+        match answering.as_slice() {
+            [] => Err(format!("no boundary named {name}")),
+            [only] => Ok(only.id.clone()),
+            several => panic!(
+                "the name {name} answers for several boundaries: {:?}",
+                several
+                    .iter()
+                    .map(|element| element.id.as_str())
+                    .collect::<Vec<&str>>()
+            ),
+        }
+    }
+
+    /// One boundary a question is asked about. A question answers about the
+    /// boundary a scenario names or about nothing at all, so a name the
+    /// picture holds no boundary under stops the scenario: an answer of
+    /// "nothing planned, nothing changed" about a boundary that is not there
+    /// would read as agreement.
+    fn boundary(&self, name: &str) -> ElementId {
+        self.boundary_id(name)
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// The name the picture draws on one boundary: the aspect the vocabulary
@@ -287,20 +312,21 @@ impl InProcessDriver {
         self.save()
     }
 
-    fn connection(&self, from: &str, to: &str) -> Result<Relation, String> {
-        Ok(Relation {
-            from: self.boundary_id(from)?,
-            to: self.boundary_id(to)?,
+    fn connection(&self, from: &str, to: &str) -> Relation {
+        Relation {
+            from: self.boundary(from),
+            to: self.boundary(to),
             kind: RelationKind::DependsOn,
-        })
+        }
     }
 
     /// Every concrete dependency behind the connection between two named
     /// boundaries. The plan anchors to these, never to the boundary pair,
-    /// so a markup holds at whatever cut the dependencies reattach.
-    fn concrete_behind(&self, from: &str, to: &str) -> Result<BTreeSet<Relation>, String> {
-        let pair = self.connection(from, to)?;
-        Ok(self.view().concrete_behind(&pair))
+    /// so a markup holds at whatever cut the dependencies reattach. An empty
+    /// answer says the picture draws no such connection, and nothing else:
+    /// a name no boundary answers to stopped the scenario already.
+    fn concrete_behind(&self, from: &str, to: &str) -> BTreeSet<Relation> {
+        self.view().concrete_behind(&self.connection(from, to))
     }
 
     fn save(&mut self) -> Result<(), String> {
@@ -381,7 +407,7 @@ impl ApplicationDriver for InProcessDriver {
 
     fn change_reading_of(&self, name: &str) -> Option<String> {
         let comparison = self.comparing.as_ref()?;
-        let id = self.boundary_id(name).ok()?;
+        let id = self.boundary(name);
         let reading = *comparison.readings_at(&self.rendered()).get(&id)?;
         Some(
             match reading {
@@ -397,7 +423,7 @@ impl ApplicationDriver for InProcessDriver {
         let comparison = self.comparing.as_ref()?;
         // The rendered connection stands for every dependency behind it, so
         // it reads as one only while all of them read alike.
-        let behind = self.concrete_behind(from, to).ok()?;
+        let behind = self.concrete_behind(from, to);
         let presences: Vec<Presence> = behind
             .iter()
             .map(|relation| comparison.presence_of_relation(relation))
@@ -522,7 +548,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn sever_connection(&mut self, from: &str, to: &str) -> Result<(), String> {
-        let concrete = self.concrete_behind(from, to)?;
+        let concrete = self.concrete_behind(from, to);
         if concrete.is_empty() {
             return Err(format!("no connection goes from {from} to {to}"));
         }
@@ -535,7 +561,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn draw_connection(&mut self, from: &str, to: &str) -> Result<(), String> {
-        let relation = self.connection(from, to)?;
+        let relation = self.connection(from, to);
         self.plan
             .propose(ProposedChange::AddRelation(relation))
             .map_err(|error| error.to_string())?;
@@ -545,7 +571,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn annotate_connection(&mut self, from: &str, to: &str, note: &str) -> Result<(), String> {
-        let concrete = self.concrete_behind(from, to)?;
+        let concrete = self.concrete_behind(from, to);
         if concrete.is_empty() {
             return Err(format!("no connection goes from {from} to {to}"));
         }
@@ -647,7 +673,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn modification_of(&self, name: &str) -> Option<String> {
-        let subject = self.boundary_id(name).ok()?;
+        let subject = self.boundary(name);
         let modification = self.plan.modification_of(&subject)?;
         Some(match &modification.kind {
             ModificationKind::Rename { to } => format!("rename to {to}"),
@@ -682,7 +708,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn note_on_element(&self, name: &str) -> Option<String> {
-        let subject = self.boundary_id(name).ok()?;
+        let subject = self.boundary(name);
         match self.plan.modification_of(&subject) {
             Some(modification) => modification.note.as_ref(),
             None => self.plan.annotation_of(&Subject::Element(subject.clone())),
@@ -691,9 +717,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn contents_of(&self, name: &str) -> Vec<String> {
-        let Ok(id) = self.boundary_id(name) else {
-            return Vec::new();
-        };
+        let id = self.boundary(name);
         let view = self.view();
         view.graph
             .relations()
@@ -704,28 +728,27 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn element_removal_is_planned(&self, name: &str) -> bool {
-        self.boundary_id(name)
-            .is_ok_and(|id| self.plan.removal_root_of(&id, self.viewed()).is_some())
+        self.plan
+            .removal_root_of(&self.boundary(name), self.viewed())
+            .is_some()
     }
 
     fn element_addition_is_planned(&self, name: &str) -> bool {
-        self.boundary_id(name)
-            .is_ok_and(|id| self.plan.plans_addition_of_element(&id))
+        self.plan.plans_addition_of_element(&self.boundary(name))
     }
 
     fn removal_is_planned(&self, from: &str, to: &str) -> bool {
-        self.concrete_behind(from, to).is_ok_and(|concrete| {
-            matches!(self.plan.standing_of(&concrete), GroupStanding::Removed)
-        })
+        let concrete = self.concrete_behind(from, to);
+        matches!(self.plan.standing_of(&concrete), GroupStanding::Removed)
     }
 
     fn addition_is_planned(&self, from: &str, to: &str) -> bool {
-        self.concrete_behind(from, to)
-            .is_ok_and(|concrete| matches!(self.plan.standing_of(&concrete), GroupStanding::Added))
+        let concrete = self.concrete_behind(from, to);
+        matches!(self.plan.standing_of(&concrete), GroupStanding::Added)
     }
 
     fn note_on_connection(&self, from: &str, to: &str) -> Option<String> {
-        let concrete = self.concrete_behind(from, to).ok()?;
+        let concrete = self.concrete_behind(from, to);
         let standing = self.plan.standing_of(&concrete);
         concrete
             .iter()
@@ -749,5 +772,47 @@ impl ApplicationDriver for InProcessDriver {
 
     fn working_plan(&self) -> Plan {
         self.plan.clone()
+    }
+}
+
+/// The driver answers about the boundary a scenario names, and about nothing
+/// else. These pin the two ways a name can fail to name one, both of which
+/// would otherwise let a scenario pass while speaking about something it did
+/// not say.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn driven(files: &[(&str, &str)]) -> InProcessDriver {
+        let mut driver = InProcessDriver::default();
+        for (path, contents) in files {
+            driver.add_source_file(path, contents);
+        }
+        driver.inspect_project().expect("the sources inspect");
+        driver.view_boundaries().expect("the boundary view builds");
+        driver.open_all_boundaries().expect("the boundaries open");
+        driver
+    }
+
+    #[test]
+    #[should_panic(expected = "answers for several boundaries")]
+    fn a_name_several_boundaries_answer_to_stops_the_scenario() {
+        // Two TypeScript modules are named after their file stem, so both
+        // read as "index" while the picture speaks modules.
+        let driver = driven(&[
+            ("package.json", "{\"name\":\"app\"}"),
+            ("src/a/index.ts", "export const a = 1;\n"),
+            ("src/b/index.ts", "export const b = 1;\n"),
+        ]);
+
+        let _ = driver.contents_of("index");
+    }
+
+    #[test]
+    #[should_panic(expected = "no boundary named")]
+    fn a_name_no_boundary_answers_to_stops_the_scenario() {
+        let driver = driven(&[("README.md", "about")]);
+
+        let _ = driver.modification_of("engine");
     }
 }

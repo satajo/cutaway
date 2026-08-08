@@ -46,6 +46,14 @@ fn inspected(files: &[(&str, &str)]) -> ArchitectureGraph {
     inspect(&Fixture(sources(files)), &[&GoSourceAnalyzer]).expect("the sources inspect")
 }
 
+/// The containment parent one element stands under in the whole picture.
+fn holder(graph: &ArchitectureGraph, id: &str) -> Option<String> {
+    graph
+        .relations()
+        .find(|relation| relation.kind == RelationKind::Contains && relation.to.as_str() == id)
+        .map(|relation| relation.from.as_str().to_owned())
+}
+
 /// The boundary a picture speaking no directories and no files draws around
 /// an element: the nearest holder a language read anything into. This is the
 /// shape the model drew before the file tree became its skeleton, so it is
@@ -817,6 +825,36 @@ fn an_exported_declaration_belongs_to_the_file_that_declares_it() {
     assert_eq!(
         declared_in(&structure, "alpha/server/routes.go"),
         [("Router".to_owned(), ElementKind::Type)]
+    );
+}
+
+#[test]
+fn the_default_picture_stands_an_exported_declaration_inside_its_own_file() {
+    let graph = inspected(&[
+        ALPHA,
+        (
+            "alpha/server/serve.go",
+            "package server\n\nfunc Serve() {}\n",
+        ),
+        (
+            "alpha/server/routes.go",
+            "package server\n\ntype Router struct{}\n",
+        ),
+    ]);
+
+    assert_eq!(
+        holder(&graph, "alpha/server/serve.go#function:Serve"),
+        Some("alpha/server/serve.go".to_owned()),
+        "a declaration hangs where it is written, and Go writes it in a file"
+    );
+    assert_eq!(
+        holder(&graph, "alpha/server/routes.go#type:Router"),
+        Some("alpha/server/routes.go".to_owned())
+    );
+    assert_eq!(
+        holder(&graph, "alpha/server/serve.go"),
+        Some("alpha/server".to_owned()),
+        "the file itself stands in the directory the language read the package out of"
     );
 }
 

@@ -391,7 +391,7 @@ fn containment_parents<'a>(
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{
-        ElementKind, ElementName, Fingerprint, SemanticKind, SubstrateKind,
+        ElementKind, ElementName, Fingerprint, SemanticKind, Substrate, SubstrateKind,
     };
 
     use super::*;
@@ -404,10 +404,19 @@ mod tests {
         )
     }
 
+    /// The file aspect of a node the tree wrote, so a fingerprint arrives the
+    /// way inspection hands one over: with the substrate it condenses.
+    fn file_aspect(name: &str) -> Substrate {
+        Substrate {
+            kind: SubstrateKind::File,
+            name: ElementName::new(name).unwrap(),
+        }
+    }
+
+    /// A module fused with the file that writes it - the shape every
+    /// fingerprint-carrying node has once the file tree is the skeleton.
     fn fingerprinted(id: &str, contents: &[u8]) -> Element {
-        let mut element = element(id);
-        element.fingerprint = Some(Fingerprint::of(contents));
-        element
+        element(id).with_substrate(file_aspect(id), Some(Fingerprint::of(contents)))
     }
 
     fn graph_of(ids: &[&str]) -> ArchitectureGraph {
@@ -700,7 +709,12 @@ mod tests {
 
     #[test]
     fn a_fingerprint_appearing_or_disappearing_is_not_a_change() {
-        let bare = version_of(vec![element("a")], &[]);
+        // The one node, read once with its contents stated and once without:
+        // the fingerprint is the whole difference between the two versions.
+        let bare = version_of(
+            vec![element("a").with_substrate(file_aspect("a"), None)],
+            &[],
+        );
         let carrying = version_of(vec![fingerprinted("a", b"contents")], &[]);
 
         assert!(ArchitectureDelta::between(&bare, &carrying).is_empty());
