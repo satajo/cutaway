@@ -41,7 +41,7 @@ pub(crate) fn lies_within(element: &ElementId, boundary: &ElementId, parents: &P
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementKind, ElementName, Relation};
+    use cutaway_architecture::{Element, ElementName, Relation, SemanticKind};
 
     use super::*;
 
@@ -54,9 +54,9 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for element in ["package:a", "package:b", "a/lib", "a/lib#type:X"] {
             graph
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     id(element),
-                    ElementKind::Module,
+                    SemanticKind::Module,
                     ElementName::new(element).unwrap(),
                 ))
                 .unwrap();

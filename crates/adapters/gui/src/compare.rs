@@ -780,7 +780,7 @@ pub(crate) fn overlay(ctx: &egui::Context, session: &mut CompareSession) {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementName};
+    use cutaway_architecture::{Element, ElementName, SemanticKind};
 
     use super::*;
 
@@ -792,9 +792,9 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for id in ids {
             graph
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     ElementId::new(*id).unwrap(),
-                    ElementKind::Module,
+                    SemanticKind::Module,
                     ElementName::new(*id).unwrap(),
                 ))
                 .unwrap();

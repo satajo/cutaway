@@ -11,10 +11,11 @@
 //!   renders at all. An element draws while the vocabulary holds any of the
 //!   kinds it answers to, and speaks as that reading; an element the
 //!   vocabulary reaches by no kind is transparent, so what it contains
-//!   hoists to the nearest rendered ancestor and hiding modules pools their
-//!   declarations directly in the package that holds them. The project root
-//!   is transparent in the default vocabulary: the picture starts at the
-//!   packages, with no box around the whole.
+//!   hoists to the nearest rendered ancestor, and hiding every kind between
+//!   a package and its declarations pools them directly in the package. An
+//!   element of two readings needs both of them hidden to go transparent.
+//!   The project root is transparent in the default vocabulary: the picture
+//!   starts at what the project holds, with no box around the whole.
 //!
 //! Every dependency between elements rolls up to a dependency between the
 //! boxes the picture draws. A rolled-up edge remembers the concrete
@@ -678,15 +679,25 @@ pub enum LensError {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementName};
+    use cutaway_architecture::{Element, ElementName, SemanticKind, SubstrateKind};
 
     use super::*;
 
-    fn element(id: &str, kind: ElementKind) -> Element {
-        Element::of_kind(
+    fn element(id: &str, kind: SemanticKind) -> Element {
+        Element::semantic(
             ElementId::new(id).unwrap(),
             kind,
             ElementName::new(id).unwrap(),
+        )
+    }
+
+    /// A place in the tree no language read a boundary out of.
+    fn directory(id: &str) -> Element {
+        Element::substrate(
+            ElementId::new(id).unwrap(),
+            SubstrateKind::Directory,
+            ElementName::new(id).unwrap(),
+            None,
         )
     }
 
@@ -735,28 +746,28 @@ mod tests {
     fn fixture() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         graph
-            .add_element(element("project", ElementKind::Project))
+            .add_element(element("project", SemanticKind::Project))
             .unwrap();
         graph
-            .add_element(element("package:a", ElementKind::Package))
+            .add_element(element("package:a", SemanticKind::Package))
             .unwrap();
         graph
-            .add_element(element("package:b", ElementKind::Package))
+            .add_element(element("package:b", SemanticKind::Package))
             .unwrap();
         graph
-            .add_element(element("a/lib", ElementKind::Module))
+            .add_element(element("a/lib", SemanticKind::Module))
             .unwrap();
         graph
-            .add_element(element("a/util", ElementKind::Module))
+            .add_element(element("a/util", SemanticKind::Module))
             .unwrap();
         graph
-            .add_element(element("a/beside", ElementKind::Module))
+            .add_element(element("a/beside", SemanticKind::Module))
             .unwrap();
         graph
-            .add_element(element("b/lib", ElementKind::Module))
+            .add_element(element("b/lib", SemanticKind::Module))
             .unwrap();
         graph
-            .add_element(element("b/beside", ElementKind::Module))
+            .add_element(element("b/beside", SemanticKind::Module))
             .unwrap();
         for (from, to) in [
             ("project", "package:a"),
@@ -910,10 +921,10 @@ mod tests {
     fn a_dependency_into_a_closed_frames_content_attaches_to_the_frame() {
         let mut graph = fixture();
         graph
-            .add_element(element("b/util", ElementKind::Module))
+            .add_element(element("b/util", SemanticKind::Module))
             .unwrap();
         graph
-            .add_element(element("b/lib#function:go", ElementKind::Function))
+            .add_element(element("b/lib#function:go", SemanticKind::Function))
             .unwrap();
         for (from, to) in [("b/lib", "b/util"), ("b/lib", "b/lib#function:go")] {
             graph
@@ -946,7 +957,7 @@ mod tests {
     fn opening_a_module_shows_the_items_it_declares() {
         let mut graph = fixture();
         graph
-            .add_element(element("b/lib#type:Thing", ElementKind::Type))
+            .add_element(element("b/lib#type:Thing", SemanticKind::Type))
             .unwrap();
         graph
             .add_relation(relation(
@@ -981,7 +992,7 @@ mod tests {
     fn a_dependency_outside_every_rendered_boundary_is_reported_as_unscoped() {
         let mut graph = fixture();
         graph
-            .add_element(element("stray", ElementKind::Module))
+            .add_element(element("stray", SemanticKind::Module))
             .unwrap();
         graph
             .add_relation(relation("project", "stray", RelationKind::Contains))
@@ -1010,7 +1021,7 @@ mod tests {
             ("a/util", "a/util#function:go"),
         ] {
             graph
-                .add_element(element(item, ElementKind::Function))
+                .add_element(element(item, SemanticKind::Function))
                 .unwrap();
             graph
                 .add_relation(relation(module, item, RelationKind::Contains))
@@ -1099,10 +1110,10 @@ mod tests {
     fn edges_reattach_to_the_boundaries_the_reader_opens() {
         let mut graph = fixture();
         graph
-            .add_element(element("package:c", ElementKind::Package))
+            .add_element(element("package:c", SemanticKind::Package))
             .unwrap();
         graph
-            .add_element(element("c/util", ElementKind::Module))
+            .add_element(element("c/util", SemanticKind::Module))
             .unwrap();
         for (from, to) in [("project", "package:c"), ("package:c", "c/util")] {
             graph
@@ -1154,7 +1165,7 @@ mod tests {
     fn hiding_functions_reattaches_their_connections_to_the_module() {
         let mut graph = fixture();
         graph
-            .add_element(element("b/lib#function:go", ElementKind::Function))
+            .add_element(element("b/lib#function:go", SemanticKind::Function))
             .unwrap();
         graph
             .add_relation(relation(
@@ -1190,10 +1201,10 @@ mod tests {
     fn hiding_modules_pools_their_types_in_the_package() {
         let mut graph = fixture();
         graph
-            .add_element(element("a/lib#type:One", ElementKind::Type))
+            .add_element(element("a/lib#type:One", SemanticKind::Type))
             .unwrap();
         graph
-            .add_element(element("a/beside#type:Two", ElementKind::Type))
+            .add_element(element("a/beside#type:Two", SemanticKind::Type))
             .unwrap();
         for (module, item) in [
             ("a/lib", "a/lib#type:One"),
@@ -1237,12 +1248,10 @@ mod tests {
     /// package:a ⊃ a/dir ⊃ {a/dir/one, a/dir/two}.
     fn fixture_with_a_directory() -> ArchitectureGraph {
         let mut graph = fixture();
-        graph
-            .add_element(element("a/dir", ElementKind::Directory))
-            .unwrap();
+        graph.add_element(directory("a/dir")).unwrap();
         for module in ["a/dir/one", "a/dir/two"] {
             graph
-                .add_element(element(module, ElementKind::Module))
+                .add_element(element(module, SemanticKind::Module))
                 .unwrap();
         }
         for (from, to) in [
@@ -1297,12 +1306,12 @@ mod tests {
     fn fixture_with_a_method() -> ArchitectureGraph {
         let mut graph = fixture();
         graph
-            .add_element(element("a/lib#type:Config", ElementKind::Type))
+            .add_element(element("a/lib#type:Config", SemanticKind::Type))
             .unwrap();
         graph
             .add_element(element(
                 "a/lib#function:Config::load",
-                ElementKind::Function,
+                SemanticKind::Function,
             ))
             .unwrap();
         for (from, to, kind) in [
@@ -1479,7 +1488,7 @@ mod tests {
     fn an_edge_into_a_frame_answers_for_its_own_code_and_the_frame_as_a_whole() {
         let mut graph = fixture();
         graph
-            .add_element(element("b/util", ElementKind::Module))
+            .add_element(element("b/util", SemanticKind::Module))
             .unwrap();
         graph
             .add_relation(relation("b/lib", "b/util", RelationKind::Contains))
@@ -1487,7 +1496,7 @@ mod tests {
         // a/util reaches b/lib as a whole (the fixture dependency) and an
         // item of b/lib's own content.
         graph
-            .add_element(element("b/lib#function:go", ElementKind::Function))
+            .add_element(element("b/lib#function:go", SemanticKind::Function))
             .unwrap();
         graph
             .add_relation(relation(
@@ -1538,11 +1547,11 @@ mod tests {
     fn neighbourhood() -> ArchitectureGraph {
         let mut graph = fixture();
         graph
-            .add_element(element("package:c", ElementKind::Package))
+            .add_element(element("package:c", SemanticKind::Package))
             .unwrap();
         for module in ["a/other", "a/other/deep", "b/deep", "c/lib"] {
             graph
-                .add_element(element(module, ElementKind::Module))
+                .add_element(element(module, SemanticKind::Module))
                 .unwrap();
         }
         for (from, to) in [
@@ -1717,7 +1726,7 @@ mod tests {
     fn a_scope_on_a_single_item_shows_that_item_among_its_partners() {
         let mut graph = neighbourhood();
         graph
-            .add_element(element("a/util#function:go", ElementKind::Function))
+            .add_element(element("a/util#function:go", SemanticKind::Function))
             .unwrap();
         graph
             .add_relation(relation(

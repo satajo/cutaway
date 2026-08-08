@@ -112,7 +112,7 @@ impl Plan {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{ArchitectureGraph, Element, ElementKind, Relation, RelationKind};
+    use cutaway_architecture::{ArchitectureGraph, Element, Relation, RelationKind, SemanticKind};
 
     use super::*;
 
@@ -129,9 +129,9 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for element in ["package:a", "package:b"] {
             graph
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     id(element),
-                    ElementKind::Package,
+                    SemanticKind::Package,
                     name(element),
                 ))
                 .unwrap();

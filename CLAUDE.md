@@ -32,44 +32,57 @@ concept it serves (screaming architecture):
 ```
 crates/
   architecture/        Domain: the architecture model (elements, relations, graph).
-                       Containment hierarchy: project ⊃ package ⊃ directory* ⊃
-                       module ⊃ item, with files beside modules. Directories
-                       nest; they are organization alone, so they come from a
-                       language whose directories carry no semantics of their
-                       own (TypeScript) and from the unclaimed-file tree. A
-                       file is a leaf no language read declarations out of. An
-                       element may carry a fingerprint - its contents condensed
-                       to a digest - so a comparison can read a content change.
+                       The source tree is the containment skeleton: directories
+                       hold what lies in them, files hold the declarations
+                       written in them. One node carries up to two readings of
+                       the same boundary, each under its own name - what a
+                       language read (project, package, module, type, function)
+                       and what the tree shows (directory, file) - because the
+                       module `element` and the file `element.rs` are one
+                       boundary a reader addresses, not two. Every file-backed
+                       node carries a fingerprint - its contents condensed to a
+                       digest - so a comparison can read a content change in any
+                       file at all.
   inspection/          Application core: builds the model from sources.
-                       Inspection is total: every file of the tree stands in
-                       the graph. An analyzer claims the files its elements
-                       represent and states the directory each package
-                       occupies; an unclaimed file becomes a file element,
-                       fingerprinted, grouped into the directories that earn a
-                       boundary (two things or more; single-child chains
-                       dissolve) and anchored inside the package whose
-                       territory holds it.
+                       Inspection is total: every file and directory of the
+                       tree stands in the graph. An analyzer never states where
+                       an element sits; it states what it read and the extent it
+                       read it over - a whole file, a whole directory, a file
+                       together with its expansion directory, the repository
+                       root, or a span inside a file. The core builds the tree
+                       and fuses an element onto the piece it interprets whole
+                       and alone; two interpretations of one piece are
+                       contested, so neither fuses and both stand inside it. A
+                       plain directory earns a boundary only where it groups two
+                       things or more - a single-child chain dissolves and hands
+                       its segments to the substrate name below it - while a
+                       directory an extent names always survives.
     src/ports/         SourceTree, SourceAnalyzer, ProjectHistory. One file
                        per port.
   lenses/              Domain: boundary views - rollups of the graph along a
                        Cut, with provenance per rolled-up edge. A Cut holds two
                        independent decisions: the frontier (the set of open
                        boundaries; opening one reveals exactly one layer) and
-                       the vocabulary (the element kinds the picture renders;
-                       a hidden kind is transparent, so its contents hoist to
-                       the nearest rendered ancestor). Edges attach to the
+                       the vocabulary (the element kinds the picture renders; a
+                       node draws while the vocabulary holds any of its readings
+                       and speaks as that one, and a node no rendered kind
+                       reaches is transparent, so its contents hoist to the
+                       nearest rendered ancestor). Edges attach to the
                        nearest rendered boundary, leaves and frames alike: an
                        edge ending at a frame speaks about the frame's own
                        code or the frame as a whole, and what passes between a
                        boundary and its own contents stays inside it.
   comparison/          Domain: two architecture versions held together - the
                        delta (what appeared, what disappeared, what changed:
-                       a surviving id whose name, kind, or fingerprint
-                       differs), the union graph a comparison picture lays
-                       out, and readings that attribute every change to the
-                       nearest rendered boundary: what arrives reads as added,
-                       what goes as removed, and a surviving boundary hiding
-                       churn or a content change as modified.
+                       a surviving id whose readings or fingerprint differ),
+                       the union graph a comparison picture lays out, and
+                       readings that attribute every change to the nearest
+                       rendered boundary: what arrives reads as added, what
+                       goes as removed, and a surviving boundary hiding churn
+                       or a content change as modified. The union draws a
+                       survivor where it arrives, because a picture nests as a
+                       tree; a moved element's readings still climb from both
+                       places it stood.
   planning/            Planning core: plans, change sets, notes, annotations.
     src/ports/         PlanStore.
   adapters/            Named role-first (<port concept>-<technology>), so the

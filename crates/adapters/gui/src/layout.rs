@@ -690,14 +690,14 @@ fn label_width(name: &str) -> f32 {
 mod tests {
     use super::*;
     use crate::glyph;
-    use cutaway_architecture::{Element, ElementKind, ElementName, Relation};
+    use cutaway_architecture::{Element, ElementName, Relation, SemanticKind};
 
     fn add_package(graph: &mut ArchitectureGraph, name: &str) -> ElementId {
         let id = ElementId::new(format!("package:{name}")).unwrap();
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id.clone(),
-                ElementKind::Package,
+                SemanticKind::Package,
                 ElementName::new(name).unwrap(),
             ))
             .unwrap();
@@ -716,9 +716,9 @@ mod tests {
     ) -> ElementId {
         let id = ElementId::new(path).unwrap();
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id.clone(),
-                ElementKind::Module,
+                SemanticKind::Module,
                 ElementName::new(name).unwrap(),
             ))
             .unwrap();

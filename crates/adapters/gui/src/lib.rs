@@ -1855,9 +1855,9 @@ mod tests {
         );
     }
 
-    fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: cutaway_architecture::ElementKind) {
+    fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: cutaway_architecture::SemanticKind) {
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id(id_text),
                 kind,
                 cutaway_architecture::ElementName::new(id_text).unwrap(),
@@ -1868,13 +1868,13 @@ mod tests {
     /// package:a ⊃ {a/one, a/two}, package:b ⊃ {b/one}, with both of a's
     /// modules depending on b/one.
     fn two_packages() -> ArchitectureGraph {
-        use cutaway_architecture::ElementKind;
+        use cutaway_architecture::SemanticKind;
         let mut graph = ArchitectureGraph::new();
-        add(&mut graph, "package:a", ElementKind::Package);
-        add(&mut graph, "package:b", ElementKind::Package);
-        add(&mut graph, "a/one", ElementKind::Module);
-        add(&mut graph, "a/two", ElementKind::Module);
-        add(&mut graph, "b/one", ElementKind::Module);
+        add(&mut graph, "package:a", SemanticKind::Package);
+        add(&mut graph, "package:b", SemanticKind::Package);
+        add(&mut graph, "a/one", SemanticKind::Module);
+        add(&mut graph, "a/two", SemanticKind::Module);
+        add(&mut graph, "b/one", SemanticKind::Module);
         for (from, to) in [
             ("package:a", "a/one"),
             ("package:a", "a/two"),

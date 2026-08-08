@@ -25,13 +25,12 @@
 //! declaration writes speak from the module - an unexported declaration is no
 //! element, so its coupling is the module's own.
 //!
-//! Files are modules, and the directories that group at least two of them are
-//! directories: a specifier names a file, so the file is the unit of
-//! dependency, while a directory only groups and the language reads nothing
-//! into it. A directory grouping fewer than two things groups nothing and
-//! dissolves, handing its contents to the nearest directory above it that
-//! survived, else to the package. The entry file of a
-//! package dissolves the same way: to every consumer, importing the package by
+//! Files are modules: a specifier names a file, so the file is the unit of
+//! dependency, and a module is read out of a whole file. The language reads
+//! nothing into a directory, so this analyzer states nothing about
+//! directories at all: the inspection core builds the tree of them and
+//! decides which of them earn a boundary. The entry file of a
+//! package dissolves instead: to every consumer, importing the package by
 //! name and the surface of its entry file are one boundary, so that file is no
 //! element, its declarations are the package's items, and a specifier that
 //! resolves to it lands on the package.

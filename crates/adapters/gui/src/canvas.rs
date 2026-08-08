@@ -1366,7 +1366,7 @@ pub(crate) fn world_bounds(layout: &Layout) -> Rect {
 mod tests {
     use std::collections::BTreeMap;
 
-    use cutaway_architecture::{Element, ElementKind, ElementName, RelationKind};
+    use cutaway_architecture::{Element, ElementName, RelationKind, SemanticKind};
 
     use super::*;
     use crate::layout::Frame;
@@ -1381,9 +1381,9 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         for element in ["package:a", "a/one", "a/two"] {
             graph
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     id(element),
-                    ElementKind::Module,
+                    SemanticKind::Module,
                     ElementName::new(element).unwrap(),
                 ))
                 .unwrap();
@@ -1604,9 +1604,9 @@ mod tests {
     fn wired() -> (ArchitectureGraph, Vec<Relation>) {
         let (mut graph, _) = frame_of_leaves();
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id("package:b"),
-                ElementKind::Package,
+                SemanticKind::Package,
                 ElementName::new("package:b").unwrap(),
             ))
             .unwrap();

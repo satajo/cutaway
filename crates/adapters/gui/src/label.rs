@@ -534,12 +534,24 @@ mod tests {
         &EVERYTHING
     }
 
-    fn add(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: ElementKind) {
+    fn add(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: SemanticKind) {
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id(id_text),
                 kind,
                 ElementName::new(name).unwrap(),
+            ))
+            .unwrap();
+    }
+
+    /// A place in the tree no language read a boundary out of.
+    fn add_directory(graph: &mut ArchitectureGraph, id_text: &str, name: &str) {
+        graph
+            .add_element(Element::substrate(
+                id(id_text),
+                SubstrateKind::Directory,
+                ElementName::new(name).unwrap(),
+                None,
             ))
             .unwrap();
     }
@@ -558,19 +570,19 @@ mod tests {
     /// `ports::source_analyzer` and a function of its own.
     fn view() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
-        add(&mut graph, "package:core", "core", ElementKind::Package);
-        add(&mut graph, "core/ports.rs", "ports", ElementKind::Module);
+        add(&mut graph, "package:core", "core", SemanticKind::Package);
+        add(&mut graph, "core/ports.rs", "ports", SemanticKind::Module);
         add(
             &mut graph,
             "core/ports/source_analyzer.rs",
             "ports::source_analyzer",
-            ElementKind::Module,
+            SemanticKind::Module,
         );
         add(
             &mut graph,
             "core/ports/source_analyzer.rs#function:analyze",
             "ports::source_analyzer::analyze",
-            ElementKind::Function,
+            SemanticKind::Function,
         );
         contain(&mut graph, "package:core", "core/ports.rs");
         contain(&mut graph, "core/ports.rs", "core/ports/source_analyzer.rs");
@@ -602,12 +614,12 @@ mod tests {
     #[test]
     fn a_name_that_merely_starts_like_its_frame_stays_whole() {
         let mut view = ArchitectureGraph::new();
-        add(&mut view, "package:source", "source", ElementKind::Package);
+        add(&mut view, "package:source", "source", SemanticKind::Package);
         add(
             &mut view,
             "source/git.rs",
             "source_git",
-            ElementKind::Module,
+            SemanticKind::Module,
         );
         contain(&mut view, "package:source", "source/git.rs");
 
@@ -693,11 +705,11 @@ mod tests {
             ("cutaway-lenses", "lenses/lib.rs"),
         ] {
             let package_id = format!("package:{package}");
-            add(&mut graph, &package_id, package, ElementKind::Package);
-            add(&mut graph, root, "crate", ElementKind::Module);
+            add(&mut graph, &package_id, package, SemanticKind::Package);
+            add(&mut graph, root, "crate", SemanticKind::Module);
             contain(&mut graph, &package_id, root);
         }
-        add(&mut graph, "gui/label.rs", "label", ElementKind::Module);
+        add(&mut graph, "gui/label.rs", "label", SemanticKind::Module);
         contain(&mut graph, "package:cutaway-gui", "gui/label.rs");
         graph
     }
@@ -836,7 +848,12 @@ mod tests {
 
     #[test]
     fn a_boundary_of_one_reading_names_that_one() {
-        let file = Element::of_kind(id("README.md"), ElementKind::File, name("README.md"));
+        let file = Element::substrate(
+            id("README.md"),
+            SubstrateKind::File,
+            name("README.md"),
+            None,
+        );
         assert_eq!(readings(&file, "README.md"), "File");
     }
 
@@ -856,7 +873,7 @@ mod tests {
     /// dissolved into their names.
     fn namesakes() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
-        add(&mut graph, "app/src", "src", ElementKind::Directory);
+        add_directory(&mut graph, "app/src", "src");
         for place in ["a", "b"] {
             let path = format!("app/src/{place}/index.ts");
             fuse(
@@ -886,7 +903,7 @@ mod tests {
     #[test]
     fn a_name_no_boundary_beside_it_repeats_stays_the_one_the_vocabulary_speaks() {
         let mut view = namesakes();
-        add(&mut view, "app/src/only", "only", ElementKind::Directory);
+        add_directory(&mut view, "app/src/only", "only");
         fuse(
             &mut view,
             "app/src/only/index.ts",
@@ -907,9 +924,9 @@ mod tests {
     #[test]
     fn namesakes_with_no_place_stay_namesakes_on_a_box_and_read_apart_beside_it() {
         let mut view = ArchitectureGraph::new();
-        add(&mut view, "package:app", "app", ElementKind::Package);
+        add(&mut view, "package:app", "app", SemanticKind::Package);
         for path in ["app/one.ts#type:Entry", "app/two.ts#type:Entry"] {
-            add(&mut view, path, "Entry", ElementKind::Type);
+            add(&mut view, path, "Entry", SemanticKind::Type);
             contain(&mut view, "package:app", path);
         }
 

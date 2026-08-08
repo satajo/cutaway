@@ -137,7 +137,7 @@ fn blurs(frame: &ElementId, containment: &Containment, layout: &Layout, zoom: f3
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{
-        ArchitectureGraph, Element, ElementKind, ElementName, Relation, RelationKind,
+        ArchitectureGraph, Element, ElementName, Relation, RelationKind, SemanticKind,
     };
     use eframe::egui::{Rect, Vec2, pos2, vec2};
 
@@ -150,9 +150,9 @@ mod tests {
 
     fn add(graph: &mut ArchitectureGraph, id_text: &str) {
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id(id_text),
-                ElementKind::Module,
+                SemanticKind::Module,
                 ElementName::new(id_text).unwrap(),
             ))
             .unwrap();

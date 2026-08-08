@@ -200,7 +200,7 @@ fn stripped_relation(relation: &Relation) -> Relation {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementKind, ElementName};
+    use cutaway_architecture::{Element, ElementName, SemanticKind};
 
     use crate::Note;
 
@@ -228,15 +228,15 @@ mod tests {
     fn base() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         for (element, kind) in [
-            ("package:a", ElementKind::Package),
-            ("package:b", ElementKind::Package),
-            ("a/one", ElementKind::Module),
-            ("a/two", ElementKind::Module),
-            ("b/lib", ElementKind::Module),
-            ("b/lib#function:go", ElementKind::Function),
+            ("package:a", SemanticKind::Package),
+            ("package:b", SemanticKind::Package),
+            ("a/one", SemanticKind::Module),
+            ("a/two", SemanticKind::Module),
+            ("b/lib", SemanticKind::Module),
+            ("b/lib#function:go", SemanticKind::Function),
         ] {
             graph
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     id(element),
                     kind,
                     ElementName::new(element).unwrap(),
@@ -560,9 +560,9 @@ mod tests {
 
     #[test]
     fn a_planned_element_can_be_planned_away_again() {
-        let planned = Element::of_kind(
+        let planned = Element::semantic(
             id("package:a/new"),
-            ElementKind::Module,
+            SemanticKind::Module,
             ElementName::new("new").unwrap(),
         );
         let mut plan = Plan::new();

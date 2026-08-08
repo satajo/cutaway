@@ -153,16 +153,16 @@ pub(crate) fn standing(open: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementId, ElementName};
+    use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind};
 
     use super::*;
 
-    fn holding(kinds: &[ElementKind]) -> ArchitectureGraph {
+    fn holding(kinds: &[SemanticKind]) -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         for (position, kind) in kinds.iter().enumerate() {
             let name = format!("element-{position}");
             graph
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     ElementId::new(&name).unwrap(),
                     *kind,
                     ElementName::new(&name).unwrap(),
@@ -180,9 +180,9 @@ mod tests {
     #[test]
     fn an_architecture_presents_exactly_the_kinds_its_elements_carry() {
         let graph = holding(&[
-            ElementKind::Package,
-            ElementKind::Module,
-            ElementKind::Module,
+            SemanticKind::Package,
+            SemanticKind::Module,
+            SemanticKind::Module,
         ]);
         assert_eq!(
             present_kinds(&graph),
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn a_boundary_of_two_readings_presents_both_of_them() {
-        use cutaway_architecture::{Semantic, SemanticKind, Substrate, SubstrateKind};
+        use cutaway_architecture::{Semantic, Substrate, SubstrateKind};
 
         let mut graph = ArchitectureGraph::new();
         graph

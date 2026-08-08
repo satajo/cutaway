@@ -206,7 +206,11 @@ impl fmt::Display for Fingerprint {
 ///
 /// The two aspects are private because a node without any aspect would stand
 /// nameless and kindless, and the constructors are the only way in: every one
-/// of them takes an aspect, so the invariant holds by construction. Where
+/// of them names a reading, so the invariant holds by construction and a
+/// producer always says which reading it speaks. [`ElementKind`] is the
+/// currency of the readers - the vocabulary, the chips, the comparison - and
+/// no way in takes one: a kind alone would let a caller mint a place in the
+/// tree without the tree. Where
 /// both aspects stand they describe one boundary twice - the module `element`
 /// and the file `element.rs` - each under its own name, because a language's
 /// name for a thing and the tree's name for it need not agree.
@@ -265,28 +269,6 @@ impl Element {
             semantic: Some(semantic),
             substrate: Some(substrate),
             fingerprint,
-        }
-    }
-
-    /// The element one vocabulary kind alone describes. Each kind belongs to
-    /// exactly one reading, so the kind decides the aspect. This is the way
-    /// in for a caller holding a kind and nothing more; a producer that
-    /// knows which reading it speaks names the aspect instead.
-    ///
-    /// Nothing in the workspace produces elements this way today: a plan
-    /// states what a language reads and says so in a [`SemanticKind`], and
-    /// the analyzers and the inspection core name their aspects. It stands
-    /// for the tests that build a graph from kinds alone.
-    #[must_use]
-    pub fn of_kind(id: ElementId, kind: ElementKind, name: ElementName) -> Self {
-        match kind {
-            ElementKind::Project => Self::semantic(id, SemanticKind::Project, name),
-            ElementKind::Package => Self::semantic(id, SemanticKind::Package, name),
-            ElementKind::Module => Self::semantic(id, SemanticKind::Module, name),
-            ElementKind::Function => Self::semantic(id, SemanticKind::Function, name),
-            ElementKind::Type => Self::semantic(id, SemanticKind::Type, name),
-            ElementKind::Directory => Self::substrate(id, SubstrateKind::Directory, name, None),
-            ElementKind::File => Self::substrate(id, SubstrateKind::File, name, None),
         }
     }
 
@@ -554,24 +536,6 @@ mod tests {
             carrying.with_substrate(file, None).fingerprint,
             None,
             "a place that says nothing about its contents leaves the node saying nothing"
-        );
-    }
-
-    #[test]
-    fn a_kind_alone_decides_which_reading_carries_it() {
-        assert_eq!(
-            Element::of_kind(id("a"), ElementKind::Module, name("a")).semantic_aspect(),
-            Some(&Semantic {
-                kind: SemanticKind::Module,
-                name: name("a")
-            })
-        );
-        assert_eq!(
-            Element::of_kind(id("a"), ElementKind::Directory, name("a")).substrate_aspect(),
-            Some(&Substrate {
-                kind: SubstrateKind::Directory,
-                name: name("a")
-            })
         );
     }
 

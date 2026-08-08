@@ -1015,13 +1015,13 @@ mod tests {
         &DRAWN
     }
 
-    fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: ElementKind) {
+    fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: SemanticKind) {
         add_named(graph, id_text, id_text, kind);
     }
 
-    fn add_named(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: ElementKind) {
+    fn add_named(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: SemanticKind) {
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id(id_text),
                 kind,
                 ElementName::new(name).unwrap(),
@@ -1054,12 +1054,12 @@ mod tests {
     fn graph() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         for package in ["package:a", "package:b", "package:c"] {
-            add(&mut graph, package, ElementKind::Package);
+            add(&mut graph, package, SemanticKind::Package);
         }
         for module in ["a/one", "a/two", "b/one", "c/one"] {
-            add(&mut graph, module, ElementKind::Module);
+            add(&mut graph, module, SemanticKind::Module);
         }
-        add(&mut graph, "a/two#type:X", ElementKind::Type);
+        add(&mut graph, "a/two#type:X", SemanticKind::Type);
         for (frame, inner) in [
             ("package:a", "a/one"),
             ("package:a", "a/two"),
@@ -1251,8 +1251,8 @@ mod tests {
         for package in ["app", "engine", "store"] {
             let package_id = format!("package:{package}");
             let root = format!("{package}/lib.rs");
-            add_named(&mut graph, &package_id, package, ElementKind::Package);
-            add_named(&mut graph, &root, "crate", ElementKind::Module);
+            add_named(&mut graph, &package_id, package, SemanticKind::Package);
+            add_named(&mut graph, &root, "crate", SemanticKind::Module);
             relate(&mut graph, &package_id, &root, RelationKind::Contains);
         }
         for partner in ["engine/lib.rs", "store/lib.rs"] {
@@ -1294,8 +1294,8 @@ mod tests {
     #[test]
     fn a_dependency_outside_every_boundary_leads_nowhere() {
         let mut graph = graph();
-        add(&mut graph, "project", ElementKind::Project);
-        add(&mut graph, "stray", ElementKind::Module);
+        add(&mut graph, "project", SemanticKind::Project);
+        add(&mut graph, "stray", SemanticKind::Module);
         relate(&mut graph, "project", "stray", RelationKind::Contains);
         relate(&mut graph, "stray", "b/one", RelationKind::DependsOn);
         let mut cut = Cut::whole();

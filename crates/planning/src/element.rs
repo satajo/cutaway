@@ -233,7 +233,7 @@ impl Plan {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::ElementKind;
+    use cutaway_architecture::SemanticKind;
 
     use super::*;
 
@@ -267,14 +267,14 @@ mod tests {
     fn base() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         for (element, kind) in [
-            ("package:a", ElementKind::Package),
-            ("package:b", ElementKind::Package),
-            ("a/lib", ElementKind::Module),
-            ("a/lib#type:X", ElementKind::Type),
-            ("b/lib", ElementKind::Module),
+            ("package:a", SemanticKind::Package),
+            ("package:b", SemanticKind::Package),
+            ("a/lib", SemanticKind::Module),
+            ("a/lib#type:X", SemanticKind::Type),
+            ("b/lib", SemanticKind::Module),
         ] {
             graph
-                .add_element(Element::of_kind(id(element), kind, name(element)))
+                .add_element(Element::semantic(id(element), kind, name(element)))
                 .unwrap();
         }
         for (from, to) in [

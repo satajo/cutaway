@@ -5,8 +5,10 @@
 //!
 //! - What appeared and what disappeared: [`ArchitectureDelta`], a plain list
 //!   of added and removed elements and relations.
-//! - What the picture lays out: the union graph, every element and relation
-//!   either version holds, so one drawing carries both versions at once.
+//! - What the picture lays out: the union graph, everything either version
+//!   holds, so one drawing carries both versions at once. An element both
+//!   versions hold enters as the newer one and stands where it is arriving,
+//!   because a picture nests as a tree.
 //! - What each drawn box says about the change: [`Comparison::readings_at`],
 //!   which attributes every change to the nearest boundary the picture
 //!   actually draws.
@@ -151,8 +153,8 @@ impl Comparison {
         }
     }
 
-    /// The graph the comparison picture lays out: every element and relation
-    /// of either version.
+    /// The graph the comparison picture lays out: everything either version
+    /// holds, with a survivor drawn where it is arriving.
     #[must_use]
     pub fn union(&self) -> &ArchitectureGraph {
         &self.union

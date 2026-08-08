@@ -500,7 +500,7 @@ fn row(ui: &mut egui::Ui, hit: &Hit, highlighted: bool) -> egui::Response {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementName, Relation, RelationKind};
+    use cutaway_architecture::{Element, ElementName, Relation, RelationKind, SemanticKind};
 
     use super::*;
 
@@ -508,9 +508,9 @@ mod tests {
         ElementId::new(text).unwrap()
     }
 
-    fn add(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: ElementKind) {
+    fn add(graph: &mut ArchitectureGraph, id_text: &str, name: &str, kind: SemanticKind) {
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id(id_text),
                 kind,
                 ElementName::new(name).unwrap(),
@@ -536,31 +536,31 @@ mod tests {
             &mut graph,
             "project:cutaway",
             "cutaway",
-            ElementKind::Project,
+            SemanticKind::Project,
         );
         add(
             &mut graph,
             "package:inspection",
             "inspection",
-            ElementKind::Package,
+            SemanticKind::Package,
         );
         add(
             &mut graph,
             "inspection/ports.rs",
             "ports",
-            ElementKind::Module,
+            SemanticKind::Module,
         );
         add(
             &mut graph,
             "inspection/ports/source_tree.rs",
             "ports::source_tree",
-            ElementKind::Module,
+            SemanticKind::Module,
         );
         add(
             &mut graph,
             "inspection/ports/source_tree.rs#type:SourceTree",
             "SourceTree",
-            ElementKind::Type,
+            SemanticKind::Type,
         );
         contain(&mut graph, "project:cutaway", "package:inspection");
         contain(&mut graph, "package:inspection", "inspection/ports.rs");
@@ -646,8 +646,13 @@ mod tests {
     #[test]
     fn equally_direct_answers_rank_the_shorter_name_first() {
         let mut graph = ArchitectureGraph::new();
-        add(&mut graph, "long", "planning_of_notes", ElementKind::Module);
-        add(&mut graph, "short", "planning", ElementKind::Module);
+        add(
+            &mut graph,
+            "long",
+            "planning_of_notes",
+            SemanticKind::Module,
+        );
+        add(&mut graph, "short", "planning", SemanticKind::Module);
         assert_eq!(
             names(&hits(&graph, &drawn(), "plan")),
             ["planning", "planning_of_notes"]
@@ -677,7 +682,7 @@ mod tests {
                 &mut graph,
                 &format!("module:{number}"),
                 &format!("planner{number}"),
-                ElementKind::Module,
+                SemanticKind::Module,
             );
         }
         assert_eq!(hits(&graph, &drawn(), "plan").len(), RESULT_LIMIT);
@@ -686,7 +691,7 @@ mod tests {
     /// The module `element`, read out of the file `element.rs`, inside a
     /// package that occupies the directory `crates/architecture`.
     fn fused() -> ArchitectureGraph {
-        use cutaway_architecture::{Semantic, SemanticKind, Substrate, SubstrateKind};
+        use cutaway_architecture::{Semantic, Substrate, SubstrateKind};
 
         let mut graph = ArchitectureGraph::new();
         let name = |text: &str| cutaway_architecture::ElementName::new(text).unwrap();

@@ -273,7 +273,7 @@ pub(crate) fn boundary_in_view(
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementKind, ElementName};
+    use cutaway_architecture::{Element, ElementName, SemanticKind};
 
     use super::*;
 
@@ -294,16 +294,16 @@ mod tests {
     fn view() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
         for (element, kind) in [
-            ("package:a", ElementKind::Package),
-            ("package:b", ElementKind::Package),
-            ("package:c", ElementKind::Package),
-            ("package:d", ElementKind::Package),
-            ("a/one", ElementKind::Module),
-            ("a/two", ElementKind::Module),
-            ("b/one", ElementKind::Module),
+            ("package:a", SemanticKind::Package),
+            ("package:b", SemanticKind::Package),
+            ("package:c", SemanticKind::Package),
+            ("package:d", SemanticKind::Package),
+            ("a/one", SemanticKind::Module),
+            ("a/two", SemanticKind::Module),
+            ("b/one", SemanticKind::Module),
         ] {
             graph
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     id(element),
                     kind,
                     ElementName::new(element).unwrap(),
@@ -457,9 +457,9 @@ mod tests {
     fn graph() -> ArchitectureGraph {
         let mut graph = view();
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id("a/one#type:X"),
-                ElementKind::Type,
+                SemanticKind::Type,
                 ElementName::new("X").unwrap(),
             ))
             .unwrap();
@@ -478,9 +478,9 @@ mod tests {
         let mut packages = ArchitectureGraph::new();
         for package in ["package:a", "package:b", "package:c", "package:d"] {
             packages
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     id(package),
-                    ElementKind::Package,
+                    SemanticKind::Package,
                     ElementName::new(package).unwrap(),
                 ))
                 .unwrap();
@@ -510,9 +510,9 @@ mod tests {
     fn an_element_no_boundary_holds_maps_nowhere() {
         let mut graph = graph();
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id("stray"),
-                ElementKind::Module,
+                SemanticKind::Module,
                 ElementName::new("stray").unwrap(),
             ))
             .unwrap();

@@ -136,7 +136,7 @@ fn most_alike<'a>(
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementKind, ElementName, RelationKind};
+    use cutaway_architecture::{Element, ElementKind, ElementName, RelationKind, SemanticKind};
     use cutaway_lenses::{Cut, boundary_view};
 
     use super::*;
@@ -145,9 +145,9 @@ mod tests {
         ElementId::new(text).unwrap()
     }
 
-    fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: ElementKind) {
+    fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: SemanticKind) {
         graph
-            .add_element(Element::of_kind(
+            .add_element(Element::semantic(
                 id(id_text),
                 kind,
                 ElementName::new(id_text).unwrap(),
@@ -181,9 +181,9 @@ mod tests {
     /// c/one is a boundary of its own rather than the whole of package:c.
     fn graph() -> ArchitectureGraph {
         let mut graph = ArchitectureGraph::new();
-        add(&mut graph, "project", ElementKind::Project);
+        add(&mut graph, "project", SemanticKind::Project);
         for package in ["package:a", "package:b", "package:c"] {
-            add(&mut graph, package, ElementKind::Package);
+            add(&mut graph, package, SemanticKind::Package);
         }
         for module in [
             "a/one",
@@ -194,10 +194,10 @@ mod tests {
             "c/two",
             "stray",
         ] {
-            add(&mut graph, module, ElementKind::Module);
+            add(&mut graph, module, SemanticKind::Module);
         }
-        add(&mut graph, "a/one#type:X", ElementKind::Type);
-        add(&mut graph, "c/one#type:Y", ElementKind::Type);
+        add(&mut graph, "a/one#type:X", SemanticKind::Type);
+        add(&mut graph, "c/one#type:Y", SemanticKind::Type);
         for (frame, inner) in [
             ("project", "package:a"),
             ("project", "package:b"),

@@ -23,10 +23,13 @@ Early but usable. The application opens a git repository, inspects the
 Rust, Go, TypeScript, and JavaScript sources of its `HEAD` commit (package
 manifests, module structure, imports), and draws the boundary lens as
 nested boxes with the dependencies that cross boundary lines as arrows.
-The picture starts as closed packages; opening a box reveals one layer of
-its contents, and a vocabulary of element kinds (packages, directories,
-modules, types, functions) picks what the picture speaks about — a hidden
-kind hands its contents to the box above it. Arrows
+The picture starts as the tree a listing shows; opening a box reveals one
+layer of its contents, and a vocabulary of element kinds (packages,
+directories, modules, files, types, functions) picks what the picture speaks
+about — a hidden kind hands its contents to the box above it, so hiding
+directories and files leaves the packages and modules the languages read.
+A box a language and the tree both name says whichever of the two the
+vocabulary speaks. Arrows
 attach to the nearest visible box, framed boxes included: an arrow that ends
 at a box speaks about the box's own code or the box as a whole, and what
 passes between a box and its own contents stays inside it. Existing
@@ -34,8 +37,9 @@ connections are monochrome; severing one turns it
 red, drawing a new one turns it green, and any connection or boundary can
 carry a note. All markup saves immediately to
 `cutaway.json` in the root of the inspected repository — a versioned JSON
-work order ready to hand to an AI agent. The delta view exists as a domain
-model only.
+work order ready to hand to an AI agent. A second mode compares two commits
+of the repository in one picture: green for what arrived, red for what went,
+amber for a boundary that stands in both and changed inside itself.
 
 ## Installation
 

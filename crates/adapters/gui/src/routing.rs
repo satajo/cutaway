@@ -750,7 +750,7 @@ impl Path {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{Element, ElementKind, ElementName};
+    use cutaway_architecture::{Element, ElementName, SemanticKind};
 
     use super::*;
 
@@ -854,9 +854,9 @@ mod tests {
     fn an_edge_ending_at_a_frame_with_painted_children_lands_on_its_border() {
         let mut view = ArchitectureGraph::new();
         for element in ["neighbor", "frame", "inside", "beside"] {
-            view.add_element(Element::of_kind(
+            view.add_element(Element::semantic(
                 id(element),
-                ElementKind::Module,
+                SemanticKind::Module,
                 ElementName::new(element).unwrap(),
             ))
             .unwrap();
@@ -1116,12 +1116,12 @@ mod tests {
     fn two_frames() -> (ArchitectureGraph, Layout) {
         let mut view = ArchitectureGraph::new();
         for (element, kind) in [
-            ("package:a", ElementKind::Package),
-            ("package:b", ElementKind::Package),
-            ("a/one", ElementKind::Module),
-            ("b/one", ElementKind::Module),
+            ("package:a", SemanticKind::Package),
+            ("package:b", SemanticKind::Package),
+            ("a/one", SemanticKind::Module),
+            ("b/one", SemanticKind::Module),
         ] {
-            view.add_element(Element::of_kind(
+            view.add_element(Element::semantic(
                 id(element),
                 kind,
                 ElementName::new(element).unwrap(),
@@ -1179,9 +1179,9 @@ mod tests {
         // run straight.
         let mut view = ArchitectureGraph::new();
         for element in ["package:a", "a/one", "a/two", "package:z"] {
-            view.add_element(Element::of_kind(
+            view.add_element(Element::semantic(
                 id(element),
-                ElementKind::Module,
+                SemanticKind::Module,
                 ElementName::new(element).unwrap(),
             ))
             .unwrap();
@@ -1252,13 +1252,13 @@ mod tests {
     fn an_edge_between_boundaries_reaches_further_than_one_inside_a_boundary() {
         let mut view = ArchitectureGraph::new();
         for (element, kind) in [
-            ("package:a", ElementKind::Package),
-            ("package:b", ElementKind::Package),
-            ("a/one", ElementKind::Module),
-            ("a/two", ElementKind::Module),
-            ("b/one", ElementKind::Module),
+            ("package:a", SemanticKind::Package),
+            ("package:b", SemanticKind::Package),
+            ("a/one", SemanticKind::Module),
+            ("a/two", SemanticKind::Module),
+            ("b/one", SemanticKind::Module),
         ] {
-            view.add_element(Element::of_kind(
+            view.add_element(Element::semantic(
                 id(element),
                 kind,
                 ElementName::new(element).unwrap(),

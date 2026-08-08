@@ -307,13 +307,13 @@ mod tests {
     }
 
     fn graph_of(elements: &[&str], relations: &[(&str, &str)]) -> ArchitectureGraph {
-        use cutaway_architecture::{Element, ElementKind, ElementName};
+        use cutaway_architecture::{Element, ElementName, SemanticKind};
         let mut graph = ArchitectureGraph::new();
         for id in elements {
             graph
-                .add_element(Element::of_kind(
+                .add_element(Element::semantic(
                     ElementId::new(*id).unwrap(),
-                    ElementKind::Module,
+                    SemanticKind::Module,
                     ElementName::new(*id).unwrap(),
                 ))
                 .unwrap();
@@ -341,12 +341,12 @@ mod tests {
 
     #[test]
     fn a_planned_element_joins_the_graph_a_lens_views_with_its_containment() {
-        use cutaway_architecture::{Element, ElementKind, ElementName};
+        use cutaway_architecture::{Element, ElementName, SemanticKind};
         let base = graph_of(&["a"], &[]);
         let mut plan = Plan::new();
-        plan.propose(ProposedChange::AddElement(Element::of_kind(
+        plan.propose(ProposedChange::AddElement(Element::semantic(
             ElementId::new("a/new").unwrap(),
-            ElementKind::Module,
+            SemanticKind::Module,
             ElementName::new("new").unwrap(),
         )))
         .unwrap();

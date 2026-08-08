@@ -68,14 +68,14 @@ pub enum ChangeSetError {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_architecture::{ElementKind, ElementName, RelationKind};
+    use cutaway_architecture::{ElementName, RelationKind, SemanticKind};
 
     use super::*;
 
     fn element(id: &str) -> Element {
-        Element::of_kind(
+        Element::semantic(
             ElementId::new(id).unwrap(),
-            ElementKind::Module,
+            SemanticKind::Module,
             ElementName::new(id).unwrap(),
         )
     }
