@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use cutaway_analyzer_rust::RustSourceAnalyzer;
 use cutaway_analyzer_typescript::TypeScriptSourceAnalyzer;
 use cutaway_architecture::{
-    ArchitectureGraph, ElementId, ElementKind, ElementName, Relation, RelationKind,
+    ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
 };
 use cutaway_comparison::{Comparison, ElementChange, Presence};
 use cutaway_inspection::inspect;
@@ -231,13 +231,39 @@ impl InProcessDriver {
         self.rebuild_view()
     }
 
+    /// One boundary by the name a scenario knows it under.
+    ///
+    /// A node may carry two names - the module `element` is also the file
+    /// `element.rs` - and a scenario may say either: which one the picture
+    /// currently speaks depends on the vocabulary, while the boundary a
+    /// scenario means does not.
     fn boundary_id(&self, name: &str) -> Result<ElementId, String> {
         self.view()
             .graph
             .elements()
-            .find(|element| element.primary_name().as_str() == name)
+            .find(|element| {
+                element
+                    .semantic_aspect()
+                    .is_some_and(|aspect| aspect.name.as_str() == name)
+                    || element
+                        .substrate_aspect()
+                        .is_some_and(|aspect| aspect.name.as_str() == name)
+            })
             .map(|element| element.id.clone())
             .ok_or_else(|| format!("no boundary named {name}"))
+    }
+
+    /// The name the picture draws on one boundary: the aspect the vocabulary
+    /// lets speak, and what the node reads as by default where the cut
+    /// renders neither aspect.
+    fn spoken_name(&self, element: &Element) -> String {
+        self.cut
+            .as_ref()
+            .and_then(|cut| element.speaks_as(&cut.kinds))
+            .map_or_else(
+                || element.primary_name().to_string(),
+                |(_, name)| name.to_string(),
+            )
     }
 
     /// Puts one planned element in the plan and in the picture, exactly as
@@ -305,10 +331,9 @@ impl InProcessDriver {
 
     /// The name a scenario knows one element by.
     fn display_name(&self, id: &ElementId) -> String {
-        self.viewed().element(id).map_or_else(
-            || id.to_string(),
-            |element| element.primary_name().to_string(),
-        )
+        self.viewed()
+            .element(id)
+            .map_or_else(|| id.to_string(), |element| self.spoken_name(element))
     }
 }
 
@@ -479,17 +504,16 @@ impl ApplicationDriver for InProcessDriver {
         self.view()
             .graph
             .elements()
-            .map(|element| element.primary_name().to_string())
+            .map(|element| self.spoken_name(element))
             .collect()
     }
 
     fn connections(&self) -> Vec<(String, String)> {
         let view = self.view();
         let name = |id: &ElementId| {
-            view.graph.element(id).map_or_else(
-                || id.to_string(),
-                |element| element.primary_name().to_string(),
-            )
+            view.graph
+                .element(id)
+                .map_or_else(|| id.to_string(), |element| self.spoken_name(element))
         };
         view.provenance
             .keys()
@@ -675,7 +699,7 @@ impl ApplicationDriver for InProcessDriver {
             .relations()
             .filter(|relation| relation.kind == RelationKind::Contains && relation.from == id)
             .filter_map(|relation| view.graph.element(&relation.to))
-            .map(|element| element.primary_name().to_string())
+            .map(|element| self.spoken_name(element))
             .collect()
     }
 

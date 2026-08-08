@@ -23,23 +23,30 @@ Feature: Comparing two versions
     And in version "after" a package "app" at "crates/app" depending on "engine"
     And in version "after" a package "engine" at "crates/engine"
     When the change from version "before" to version "after" is viewed
+    And the file tree is hidden
     Then the boundary "app" reads as unchanged
     And the boundary "engine" reads as unchanged
     And the connection from "app" to "engine" reads as "unchanged"
 
   Scenario: A package only the newer version holds reads as added
     Given in version "before" a package "app" at "crates/app"
+    And in version "before" a package "store" at "crates/store"
     And in version "after" a package "app" at "crates/app"
+    And in version "after" a package "store" at "crates/store"
     And in version "after" a package "engine" at "crates/engine"
     When the change from version "before" to version "after" is viewed
+    And the file tree is hidden
     Then the boundary "engine" reads as "added"
     And the boundary "app" reads as unchanged
 
   Scenario: A package only the older version holds stands in the picture and reads as removed
     Given in version "before" a package "app" at "crates/app"
+    And in version "before" a package "store" at "crates/store"
     And in version "before" a package "engine" at "crates/engine"
     And in version "after" a package "app" at "crates/app"
+    And in version "after" a package "store" at "crates/store"
     When the change from version "before" to version "after" is viewed
+    And the file tree is hidden
     Then the boundaries include "engine"
     And the boundary "engine" reads as "removed"
 
@@ -58,6 +65,7 @@ Feature: Comparing two versions
       pub fn step() {}
       """
     When the change from version "before" to version "after" is viewed
+    And the file tree is hidden
     Then the boundaries do not include "physics"
     And the boundary "engine" reads as "modified"
 
@@ -76,9 +84,41 @@ Feature: Comparing two versions
       pub fn step() {}
       """
     When the change from version "before" to version "after" is viewed
+    And the file tree is hidden
     And the boundary "engine" is expanded
-    Then the boundary "physics" reads as "added"
-    And the boundary "engine" reads as unchanged
+    Then the boundaries include "physics"
+    And the boundary "physics" reads as "added"
+
+  Scenario: A boundary whose place in the tree changed still draws, where it is arriving
+    Given in version "before" a source file "crates/engine/Cargo.toml" containing:
+      """
+      [package]
+      name = "engine"
+      """
+    And in version "before" a source file "crates/engine/src/lib.rs" containing:
+      """
+      pub fn run() {}
+      """
+    And in version "after" a source file "crates/engine/Cargo.toml" containing:
+      """
+      [package]
+      name = "engine"
+      """
+    And in version "after" a source file "crates/engine/src/lib.rs" containing:
+      """
+      mod physics;
+      pub fn run() {}
+      """
+    And in version "after" a source file "crates/engine/src/physics.rs" containing:
+      """
+      pub fn step() {}
+      """
+    When the change from version "before" to version "after" is viewed
+    And every boundary is opened
+    Then the boundaries include "src"
+    And the boundary "src" contains "lib.rs"
+    And the boundary "src" contains "physics"
+    And the boundary "physics" reads as "added"
 
   Scenario: A dependency the newer version adds reads as an added connection
     Given in version "before" a package "app" at "crates/app"
@@ -86,6 +126,7 @@ Feature: Comparing two versions
     And in version "after" a package "app" at "crates/app" depending on "engine"
     And in version "after" a package "engine" at "crates/engine"
     When the change from version "before" to version "after" is viewed
+    And the file tree is hidden
     Then the connection from "app" to "engine" reads as "added"
 
   Scenario: The plan plays no part in the comparison
@@ -94,9 +135,11 @@ Feature: Comparing two versions
     And in version "after" a package "engine" at "crates/engine"
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the removal of "engine" is planned
     And a package named "transport" is planned
     And the change from version "before" to version "after" is viewed
+    And the file tree is hidden
     Then the boundaries include "engine"
     And the boundary "engine" reads as unchanged
     And the boundaries do not include "transport"

@@ -160,6 +160,16 @@ fn only_the_structure_is_shown(world: &mut CutawayWorld) {
     }
 }
 
+/// The directories and files a listing shows stand in every picture by
+/// default. Dropping both leaves what the languages read: packages, modules,
+/// and the declarations in them.
+#[when("the file tree is hidden")]
+fn the_file_tree_is_hidden(world: &mut CutawayWorld) {
+    for kind in ["directories", "files"] {
+        world.driver.hide_kind(kind).expect("the kind hides");
+    }
+}
+
 #[when(expr = "{string} are hidden from the picture")]
 fn a_kind_is_hidden(world: &mut CutawayWorld, kind: String) {
     world.driver.hide_kind(&kind).expect("the kind hides");

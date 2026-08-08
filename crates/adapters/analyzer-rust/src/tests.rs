@@ -1,35 +1,98 @@
-use cutaway_architecture::{ElementKind, RelationKind};
+use std::collections::BTreeMap;
+
+use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
+use cutaway_inspection::inspect;
 use cutaway_inspection::ports::source_analyzer::{
-    SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    Extent, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
-use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
+use cutaway_inspection::ports::source_tree::{
+    DirectoryPath, ProjectName, SourceFile, SourcePath, SourceTree, SourceTreeError,
+};
 
 use crate::RustSourceAnalyzer;
+
+fn sources(files: &[(&str, &str)]) -> Vec<SourceFile> {
+    files
+        .iter()
+        .map(|(path, contents)| SourceFile {
+            path: SourcePath::new(*path).unwrap(),
+            contents: contents.as_bytes().to_vec(),
+        })
+        .collect()
+}
 
 fn analyze(files: &[(&str, &str)]) -> SourceStructure {
     try_analyze(files).unwrap()
 }
 
 fn try_analyze(files: &[(&str, &str)]) -> Result<SourceStructure, SourceAnalysisError> {
-    let files: Vec<SourceFile> = files
-        .iter()
-        .map(|(path, contents)| SourceFile {
-            path: SourcePath::new(*path).unwrap(),
-            contents: contents.as_bytes().to_vec(),
-        })
-        .collect();
-    RustSourceAnalyzer.analyze(&files)
+    RustSourceAnalyzer.analyze(&sources(files))
 }
 
-fn parent_of(structure: &SourceStructure, id: &str) -> Option<String> {
+struct Fixture(Vec<SourceFile>);
+
+impl SourceTree for Fixture {
+    fn name(&self) -> ProjectName {
+        ProjectName::new("fixture").unwrap()
+    }
+
+    fn files(&self) -> Result<Vec<SourceFile>, SourceTreeError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// The architecture the wired application builds out of these sources.
+fn inspected(files: &[(&str, &str)]) -> ArchitectureGraph {
+    inspect(&Fixture(sources(files)), &[&RustSourceAnalyzer]).expect("the sources inspect")
+}
+
+/// The boundary a picture speaking no directories and no files draws around
+/// an element: the nearest holder a language read anything into. This is the
+/// shape the model drew before the file tree became its skeleton, so it is
+/// where a change of the substrate would show as a regression.
+fn semantic_holder(graph: &ArchitectureGraph, id: &str) -> Option<String> {
+    let parents: BTreeMap<&ElementId, &ElementId> = graph
+        .relations()
+        .filter(|relation| relation.kind == RelationKind::Contains)
+        .map(|relation| (&relation.to, &relation.from))
+        .collect();
+    let mut current = parents.get(&ElementId::new(id).unwrap()).copied();
+    while let Some(id) = current {
+        if graph
+            .element(id)
+            .is_some_and(|element| element.semantic_aspect().is_some())
+        {
+            return Some(id.as_str().to_owned());
+        }
+        current = parents.get(id).copied();
+    }
+    None
+}
+
+/// What one element reads out of the sources.
+fn extent_of(structure: &SourceStructure, id: &str) -> Extent {
     structure
-        .elements
+        .interpretations
         .iter()
-        .find(|e| e.element.id.as_str() == id)
-        .expect("the element exists")
-        .parent
-        .as_ref()
-        .map(|p| p.as_str().to_owned())
+        .find(|interpretation| interpretation.element.id.as_str() == id)
+        .unwrap_or_else(|| panic!("no interpretation {id}"))
+        .extent
+        .clone()
+}
+
+fn reads_nothing(structure: &SourceStructure, id: &str) -> bool {
+    !structure
+        .interpretations
+        .iter()
+        .any(|interpretation| interpretation.element.id.as_str() == id)
+}
+
+fn file(path: &str) -> SourcePath {
+    SourcePath::new(path).unwrap()
+}
+
+fn directory(path: &str) -> DirectoryPath {
+    DirectoryPath::new(path).unwrap()
 }
 
 fn dependencies(structure: &SourceStructure) -> Vec<(String, String)> {
@@ -55,12 +118,50 @@ fn packages_are_discovered_from_their_manifests() {
         MANIFEST_B,
     ]);
     let packages: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| e.element.primary_kind() == ElementKind::Package)
-        .map(|e| e.element.id.as_str())
+        .filter(|i| i.element.primary_kind() == ElementKind::Package)
+        .map(|i| i.element.id.as_str())
         .collect();
     assert_eq!(packages, ["package:a", "package:b-lib"]);
+}
+
+#[test]
+fn a_package_reads_the_directory_its_manifest_sits_in() {
+    let structure = analyze(&[MANIFEST_A, ("Cargo.toml", "[package]\nname = \"root\"\n")]);
+
+    assert_eq!(
+        extent_of(&structure, "package:a"),
+        Extent::Directory(directory("crates/a"))
+    );
+    assert_eq!(
+        extent_of(&structure, "package:root"),
+        Extent::Root,
+        "a manifest at the top of the tree makes the whole repository the package"
+    );
+}
+
+#[test]
+fn a_manifest_is_a_file_of_the_package_it_names() {
+    let structure = analyze(&[MANIFEST_A]);
+    assert!(
+        reads_nothing(&structure, "crates/a/Cargo.toml"),
+        "the manifest names the package, it is not the package"
+    );
+
+    let graph = inspected(&[MANIFEST_A, ("crates/a/src/lib.rs", "")]);
+    let manifest = graph
+        .element(&ElementId::new("crates/a/Cargo.toml").unwrap())
+        .expect("the manifest stands in the picture");
+    assert_eq!(manifest.primary_kind(), ElementKind::File);
+    assert!(
+        manifest.fingerprint.is_some(),
+        "an edit to the manifest must read as a change"
+    );
+    assert_eq!(
+        semantic_holder(&graph, "crates/a/Cargo.toml"),
+        Some("package:a".to_owned())
+    );
 }
 
 #[test]
@@ -143,36 +244,59 @@ fn a_qualified_macro_invocation_witnesses_the_package_it_names() {
 
 #[test]
 fn the_module_tree_follows_the_src_file_layout() {
-    let structure = analyze(&[
+    let files = [
         MANIFEST_A,
         ("crates/a/src/lib.rs", "mod foo;\n"),
         ("crates/a/src/foo.rs", "pub mod bar;\n"),
         ("crates/a/src/foo/bar.rs", "pub struct Baz;\n"),
-    ]);
+    ];
+    let structure = analyze(&files);
     assert_eq!(
-        parent_of(&structure, "crates/a/src/foo.rs"),
+        extent_of(&structure, "crates/a/src/foo.rs"),
+        Extent::FileAndDirectory {
+            file: file("crates/a/src/foo.rs"),
+            directory: directory("crates/a/src/foo")
+        },
+        "a module whose name also names a directory reads both as one boundary"
+    );
+    assert_eq!(
+        extent_of(&structure, "crates/a/src/foo/bar.rs"),
+        Extent::File(file("crates/a/src/foo/bar.rs"))
+    );
+
+    let graph = inspected(&files);
+    assert_eq!(
+        semantic_holder(&graph, "crates/a/src/foo.rs"),
         Some("package:a".to_owned())
     );
     assert_eq!(
-        parent_of(&structure, "crates/a/src/foo/bar.rs"),
-        Some("crates/a/src/foo.rs".to_owned())
+        semantic_holder(&graph, "crates/a/src/foo/bar.rs"),
+        Some("crates/a/src/foo.rs".to_owned()),
+        "the spanning extent makes the children of foo/ the children of module foo"
     );
 }
 
 #[test]
-fn the_crate_root_dissolves_into_its_package() {
-    let structure = analyze(&[MANIFEST_B, ("crates/b/src/lib.rs", "pub struct Session;\n")]);
+fn the_crate_root_reads_nothing_of_its_own() {
+    let files = [MANIFEST_B, ("crates/b/src/lib.rs", "pub struct Session;\n")];
+    let structure = analyze(&files);
     assert!(
-        structure
-            .elements
-            .iter()
-            .all(|e| e.element.id.as_str() != "crates/b/src/lib.rs"),
-        "the crate root is no element of its own"
+        reads_nothing(&structure, "crates/b/src/lib.rs"),
+        "the package and its root namespace are one boundary"
+    );
+
+    let graph = inspected(&files);
+    assert_eq!(
+        semantic_holder(&graph, "crates/b/src/lib.rs#type:Session"),
+        Some("package:b-lib".to_owned()),
+        "the crate root's declarations read as the package's items"
     );
     assert_eq!(
-        parent_of(&structure, "crates/b/src/lib.rs#type:Session"),
-        Some("package:b-lib".to_owned()),
-        "the crate root's declarations are the package's items"
+        graph
+            .element(&ElementId::new("crates/b/src/lib.rs").unwrap())
+            .map(cutaway_architecture::Element::primary_kind),
+        Some(ElementKind::File),
+        "the file itself still stands where the tree puts it"
     );
 }
 
@@ -396,20 +520,28 @@ fn super_paths_resolve_within_the_module_tree() {
 
 #[test]
 fn integration_tests_are_their_own_crate_roots_using_the_package_by_name() {
-    let structure = analyze(&[
+    let files = [
         MANIFEST_B,
         ("crates/b/src/lib.rs", "pub mod util;\n"),
         ("crates/b/src/util.rs", "pub struct Thing;\n"),
         ("crates/b/tests/smoke.rs", "use b_lib::util::Thing;\n"),
-    ]);
-    assert_eq!(
-        parent_of(&structure, "crates/b/tests/smoke.rs"),
-        Some("package:b-lib".to_owned())
+    ];
+    let structure = analyze(&files);
+    assert!(
+        reads_nothing(&structure, "crates/b/tests/smoke.rs"),
+        "a standalone crate root is a crate root, so it reads no module"
     );
     assert!(dependencies(&structure).contains(&(
         "crates/b/tests/smoke.rs".to_owned(),
         "crates/b/src/util.rs#type:Thing".to_owned()
     )));
+
+    let graph = inspected(&files);
+    assert_eq!(
+        semantic_holder(&graph, "crates/b/tests/smoke.rs"),
+        Some("package:b-lib".to_owned()),
+        "the test file lies in the package's directory, so it stands inside it"
+    );
 }
 
 #[test]
@@ -624,18 +756,19 @@ fn top_level_declarations_belong_to_their_module() {
         ),
     ]);
     let declared: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| {
-            e.parent
-                .as_ref()
-                .map(cutaway_architecture::ElementId::as_str)
-                == Some("crates/b/src/api.rs")
+        .filter(|i| {
+            i.extent
+                == Extent::Within {
+                    file: file("crates/b/src/api.rs"),
+                    parent: None,
+                }
         })
-        .map(|e| {
+        .map(|i| {
             (
-                e.element.primary_name().as_str().to_owned(),
-                e.element.primary_kind(),
+                i.element.primary_name().as_str().to_owned(),
+                i.element.primary_kind(),
             )
         })
         .collect();
@@ -659,10 +792,10 @@ fn declarations_without_a_visibility_modifier_stay_out_of_the_architecture() {
         ),
     ]);
     let items: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| e.element.primary_kind() != ElementKind::Package)
-        .map(|e| e.element.primary_name().as_str().to_owned())
+        .filter(|i| i.element.primary_kind() != ElementKind::Package)
+        .map(|i| i.element.primary_name().as_str().to_owned())
         .collect();
     assert_eq!(items, ["run"]);
 }
@@ -688,13 +821,13 @@ fn a_file_module_declaration_adds_no_element_beside_the_file_module() {
         ("crates/b/src/util.rs", ""),
     ]);
     let utils: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| {
-            e.element.primary_kind() == ElementKind::Module
-                && e.element.primary_name().as_str() == "util"
+        .filter(|i| {
+            i.element.primary_kind() == ElementKind::Module
+                && i.element.primary_name().as_str() == "util"
         })
-        .map(|e| e.element.id.as_str())
+        .map(|i| i.element.id.as_str())
         .collect();
     assert_eq!(utils, ["crates/b/src/util.rs"]);
 }
@@ -733,8 +866,11 @@ fn a_public_method_is_an_element_inside_its_type() {
         ("crates/a/src/lib.rs", "pub mod config;\n"),
     ]);
     assert_eq!(
-        parent_of(&structure, "crates/a/src/config.rs#function:Config::new"),
-        Some("crates/a/src/config.rs#type:Config".to_owned())
+        extent_of(&structure, "crates/a/src/config.rs#function:Config::new"),
+        Extent::Within {
+            file: file("crates/a/src/config.rs"),
+            parent: Some(ElementId::new("crates/a/src/config.rs#type:Config").unwrap())
+        }
     );
 }
 
@@ -770,10 +906,7 @@ fn a_private_methods_writing_stays_the_types_own() {
         ("crates/a/src/store.rs", "pub fn read() {}\n"),
     ]);
     assert!(
-        !structure
-            .elements
-            .iter()
-            .any(|e| e.element.id.as_str() == "crates/a/src/lib.rs#function:Config::refresh"),
+        reads_nothing(&structure, "crates/a/src/lib.rs#function:Config::refresh"),
         "a private method is the type's internals, not an element"
     );
     assert!(dependencies(&structure).contains(&(
@@ -793,10 +926,7 @@ fn a_trait_impls_methods_stay_the_types_own() {
         ("crates/a/src/store.rs", "pub fn read() {}\n"),
     ]);
     assert!(
-        !structure
-            .elements
-            .iter()
-            .any(|e| e.element.id.as_str() == "crates/a/src/lib.rs#function:Config::show"),
+        reads_nothing(&structure, "crates/a/src/lib.rs#function:Config::show"),
         "two traits may hand a type same-named methods, which one id per name cannot tell apart"
     );
     assert!(dependencies(&structure).contains(&(
@@ -825,66 +955,77 @@ fn a_method_naming_its_own_type_says_nothing() {
 }
 
 #[test]
-fn every_mapped_source_and_naming_manifest_is_claimed() {
+fn a_workspace_manifest_that_names_no_package_reads_nothing() {
     let structure = analyze(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n"),
+        MANIFEST_A,
+    ]);
+
+    assert_eq!(
+        structure
+            .interpretations
+            .iter()
+            .filter(|i| i.element.primary_kind() == ElementKind::Package)
+            .count(),
+        1,
+        "a workspace root declares no package"
+    );
+    assert_eq!(
+        extent_of(&structure, "package:a"),
+        Extent::Directory(directory("crates/a")),
+        "the member package keeps its own directory rather than the whole tree"
+    );
+}
+
+#[test]
+fn every_file_of_a_rust_project_stands_in_the_picture() {
+    let graph = inspected(&[
         MANIFEST_A,
         ("crates/a/src/lib.rs", "mod foo;\n"),
         ("crates/a/src/foo.rs", ""),
         ("crates/a/tests/behaviour.rs", ""),
         ("crates/a/notes.txt", "loose"),
+        ("README.md", "about"),
     ]);
-    let claimed = |path: &str| structure.claimed.contains(&SourcePath::new(path).unwrap());
-    assert!(claimed("crates/a/Cargo.toml"));
-    assert!(
-        claimed("crates/a/src/lib.rs"),
-        "a dissolved crate root is still read"
-    );
-    assert!(claimed("crates/a/src/foo.rs"));
-    assert!(
-        claimed("crates/a/tests/behaviour.rs"),
-        "a standalone root is read too"
-    );
-    assert!(
-        !claimed("crates/a/notes.txt"),
-        "no meaning was read from it"
-    );
+
+    for path in [
+        "crates/a/Cargo.toml",
+        "crates/a/src/lib.rs",
+        "crates/a/src/foo.rs",
+        "crates/a/tests/behaviour.rs",
+        "crates/a/notes.txt",
+        "README.md",
+    ] {
+        let element = graph
+            .element(&ElementId::new(path).unwrap())
+            .unwrap_or_else(|| panic!("{path} stands in the picture"));
+        assert!(
+            element.fingerprint.is_some(),
+            "{path} must speak through its contents"
+        );
+    }
 }
 
 #[test]
-fn a_workspace_manifest_that_names_no_package_stays_unclaimed() {
-    let structure = analyze(&[
-        ("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n"),
+fn the_default_picture_shows_the_tree_a_listing_would() {
+    let graph = inspected(&[
         MANIFEST_A,
+        MANIFEST_B,
+        ("crates/a/src/lib.rs", "mod foo;\n"),
+        ("crates/a/src/foo.rs", ""),
     ]);
-    assert!(
-        !structure
-            .claimed
-            .contains(&SourcePath::new("Cargo.toml").unwrap())
-    );
-    assert!(
-        structure
-            .claimed
-            .contains(&SourcePath::new("crates/a/Cargo.toml").unwrap())
-    );
-}
+    let holds = |frame: &str, id: &str| {
+        graph.relations().any(|relation| {
+            relation.kind == RelationKind::Contains
+                && relation.from.as_str() == frame
+                && relation.to.as_str() == id
+        })
+    };
 
-#[test]
-fn the_territory_of_a_package_is_its_manifest_directory() {
-    use cutaway_architecture::ElementId;
-    use cutaway_inspection::ports::source_tree::DirectoryPath;
-
-    let structure = analyze(&[MANIFEST_A, MANIFEST_B]);
-    assert_eq!(
-        structure.territories,
-        std::collections::BTreeMap::from([
-            (
-                DirectoryPath::new("crates/a").unwrap(),
-                ElementId::new("package:a").unwrap()
-            ),
-            (
-                DirectoryPath::new("crates/b").unwrap(),
-                ElementId::new("package:b-lib").unwrap()
-            ),
-        ])
-    );
+    assert!(holds("project:fixture", "crates"));
+    assert!(holds("crates", "package:a"));
+    assert!(holds("package:a", "crates/a/Cargo.toml"));
+    assert!(holds("package:a", "crates/a/src"));
+    assert!(holds("crates/a/src", "crates/a/src/lib.rs"));
+    assert!(holds("crates/a/src", "crates/a/src/foo.rs"));
 }

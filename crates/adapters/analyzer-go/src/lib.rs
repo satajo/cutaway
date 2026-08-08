@@ -23,14 +23,12 @@
 //!
 //! Directories are the boundaries. Go compiles and imports a whole
 //! directory at once and lets its files share one namespace, so the
-//! directory is a module element. Inside it the files carry the internal
-//! organization of the package: a directory of several files gives each file
-//! a module of its own, and a directory of one file lets that file dissolve
-//! into it, because one file groups nothing. The module root directory is
-//! the module's own code rather than a directory of its own: its
-//! declarations are the package's items, its subdirectories and files are
-//! the package's modules, and an import that resolves to it lands on the
-//! package. Imports resolve down to the deepest directory that exists, and a
+//! directory is a module element. Go reads nothing into a file, so a file is
+//! no module: it stands where the tree puts it, inside its directory,
+//! holding the declarations written in it. The module root directory is the
+//! module's own code rather than a directory of its own: the go.mod module
+//! is that boundary, and an import that resolves to it lands on the package.
+//! Imports resolve down to the deepest directory that exists, and a
 //! qualified name one step further onto a declaration of that directory.
 //!
 //! Capitalization decides what joins the architecture: an upper-case name
@@ -54,7 +52,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{Element, ElementId, ElementName, Relation, RelationKind, SemanticKind};
 use cutaway_inspection::ports::source_analyzer::{
-    AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    Extent, Interpretation, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
 use cutaway_inspection::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
@@ -83,7 +81,7 @@ impl SourceAnalyzer for GoSourceAnalyzer {
         let modules = manifest::discover_modules(files)?;
         let catalog = DirectoryCatalog::build(&modules, files);
 
-        let mut elements = containment(&modules, &catalog);
+        let mut interpretations = structure(&modules, &catalog);
         let mut relations = BTreeSet::new();
 
         // Two passes over the sources: an import binds the package clause
@@ -131,24 +129,27 @@ impl SourceAnalyzer for GoSourceAnalyzer {
             let cataloged = catalog
                 .file(&file.path)
                 .expect("the first pass kept only cataloged files");
-            // What the file's code speaks as: the file's own module, or the
-            // directory the file dissolved into.
-            let speaks_as = cataloged.id();
             for declaration in &file.declarations {
                 // Only the directory's surface joins the architecture;
                 // unexported declarations are its internals.
                 if !declaration.exported {
                     continue;
                 }
-                elements.push(AnalyzedElement {
+                interpretations.push(Interpretation {
                     element: declaration.element.clone(),
-                    parent: Some(speaks_as.clone()),
+                    extent: Extent::Within {
+                        file: file.path.clone(),
+                        parent: None,
+                    },
                 });
             }
             for declaration in &file.nested {
-                elements.push(AnalyzedElement {
+                interpretations.push(Interpretation {
                     element: declaration.element.clone(),
-                    parent: Some(declaration.holder.clone()),
+                    extent: Extent::Within {
+                        file: file.path.clone(),
+                        parent: Some(declaration.holder.clone()),
+                    },
                 });
             }
 
@@ -164,46 +165,10 @@ impl SourceAnalyzer for GoSourceAnalyzer {
         }
 
         Ok(SourceStructure {
-            elements,
+            interpretations,
             relations: relations.into_iter().collect(),
-            claimed: claimed(&modules, &catalog, files),
-            territories: territories(&modules),
         })
     }
-}
-
-/// The files this analyzer read meaning from: every `.go` file the catalog
-/// placed - it became a module element or dissolved into its directory - and
-/// every manifest, each of which names a module. A file the go tool leaves
-/// out of the build (vendored code, `testdata`, names starting with `.` or
-/// `_`) made no element, so it stays unclaimed and keeps a place of its own
-/// in the picture.
-fn claimed(
-    modules: &[DiscoveredModule],
-    catalog: &DirectoryCatalog,
-    files: &[SourceFile],
-) -> BTreeSet<SourcePath> {
-    files
-        .iter()
-        .map(|file| file.path.clone())
-        .filter(|path| catalog.file(path).is_some())
-        .chain(modules.iter().map(DiscoveredModule::manifest))
-        .collect()
-}
-
-/// The directory each module occupies: what the language leaves unclaimed
-/// inside it still belongs inside the module's boundary.
-fn territories(modules: &[DiscoveredModule]) -> BTreeMap<DirectoryPath, ElementId> {
-    modules
-        .iter()
-        .map(|module| {
-            (
-                DirectoryPath::new(&module.dir)
-                    .expect("a manifest directory carries no trailing slash"),
-                module_id(module),
-            )
-        })
-        .collect()
 }
 
 /// Turns one file's imports and references into dependency relations. An
@@ -223,11 +188,11 @@ fn witness_dependencies(
     let directory = catalog.directory_of(cataloged);
     let own_directory = directory.id();
     // The containment chain within this file: a method sits in its type, a
-    // declaration in the element the file speaks as. An edge along that
-    // chain, in either direction, restates containment rather than
-    // witnessing a dependency. The file may speak as its own module, as its
-    // directory, or as the package a module root dissolves into, so the
-    // guard reads the element the file actually speaks as.
+    // declaration in the file that writes it, and the file in its directory.
+    // An edge along that chain, in either direction, restates containment
+    // rather than witnessing a dependency, so the guard drops it - at the
+    // file and at the directory alike, because an edge onto the directory a
+    // file lies in says nothing either.
     let holder_of = |id: &ElementId| -> Option<ElementId> {
         if let Some(nested) = file.nested.iter().find(|n| &n.element.id == id) {
             return Some(nested.holder.clone());
@@ -323,34 +288,29 @@ fn resolve_reference(
     )
 }
 
-/// Everything the structure of the sources alone says, before any file is
-/// read: the modules, the directories that hold code, and the files of every
-/// directory that holds more than one.
-fn containment(modules: &[DiscoveredModule], catalog: &DirectoryCatalog) -> Vec<AnalyzedElement> {
-    let mut elements = Vec::new();
-    for (index, module) in modules.iter().enumerate() {
-        elements.push(AnalyzedElement {
+/// Everything the layout of the sources alone says, before any file is read:
+/// the modules and the directories that hold code. The files stand in the
+/// picture because the tree holds them, not because Go reads anything into
+/// them.
+fn structure(modules: &[DiscoveredModule], catalog: &DirectoryCatalog) -> Vec<Interpretation> {
+    let mut interpretations: Vec<Interpretation> = modules
+        .iter()
+        .map(|module| Interpretation {
             element: module_element(module),
-            parent: enclosing_module(modules, index).map(|m| module_id(&modules[m])),
-        });
-    }
-    for directory in catalog.directories() {
-        if let Some(element) = directory.element() {
-            elements.push(AnalyzedElement {
-                element,
-                parent: Some(catalog.parent_of(directory, modules)),
-            });
-        }
-    }
-    for file in catalog.files() {
-        if let Some(element) = file.element() {
-            elements.push(AnalyzedElement {
-                element,
-                parent: Some(catalog.directory_of(file).id()),
-            });
-        }
-    }
-    elements
+            extent: module_extent(module),
+        })
+        .collect();
+    interpretations.extend(catalog.directories().filter_map(Directory::interpretation));
+    interpretations
+}
+
+/// What a go.mod module reads: the directory its manifest sits in - the
+/// whole repository for a manifest at the root, which is the common case,
+/// where the whole tree nests inside the module.
+fn module_extent(module: &DiscoveredModule) -> Extent {
+    Extent::directory(
+        DirectoryPath::new(&module.dir).expect("a manifest directory carries no trailing slash"),
+    )
 }
 
 /// Whether the go tool treats the file as test-only code.
@@ -388,22 +348,6 @@ fn module_element(module: &DiscoveredModule) -> Element {
 
 pub(crate) fn module_id(module: &DiscoveredModule) -> ElementId {
     ElementId::new(format!("package:{}", module.path)).expect("a module path is never empty")
-}
-
-/// The module whose directory most closely encloses the module at `index`,
-/// for a nested go.mod that carves its subtree out of an outer module.
-fn enclosing_module(modules: &[DiscoveredModule], index: usize) -> Option<usize> {
-    let dir = &modules[index].dir;
-    modules
-        .iter()
-        .enumerate()
-        .filter(|(other, candidate)| {
-            *other != index
-                && !dir.is_empty()
-                && (candidate.dir.is_empty() || dir.starts_with(&format!("{}/", candidate.dir)))
-        })
-        .max_by_key(|(_, candidate)| candidate.dir.len())
-        .map(|(other, _)| other)
 }
 
 #[cfg(test)]

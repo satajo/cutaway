@@ -31,6 +31,7 @@ Feature: Focusing the picture on one boundary
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     Then the boundaries are "app, engine, other, store"
     When the picture is focused on "engine"
     Then the boundaries are "app, engine, store"
@@ -57,6 +58,7 @@ Feature: Focusing the picture on one boundary
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     Then a connection goes from "engine" to "store"
     When the picture is focused on "app"
     Then the boundaries are "app, engine, store"
@@ -80,6 +82,7 @@ Feature: Focusing the picture on one boundary
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the boundary "engine" is expanded
     Then the boundaries include "physics"
     When the picture is focused on "app"
@@ -106,6 +109,7 @@ Feature: Focusing the picture on one boundary
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the picture is focused on "app"
     Then the boundaries are "app, engine"
     When the picture is focused on "engine"
@@ -128,6 +132,7 @@ Feature: Focusing the picture on one boundary
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the picture is focused on "app"
     Then the boundaries do not include "other"
     When the whole picture is shown again
@@ -155,9 +160,11 @@ Feature: Focusing the picture on one boundary
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the picture is focused on "app"
     Then the boundaries are "app, engine"
     When the boundaries are viewed
+    And the file tree is hidden
     And every boundary is opened
     And only the structure is shown
     Then the boundaries include "wiring"

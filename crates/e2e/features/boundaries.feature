@@ -4,10 +4,15 @@ Feature: The boundary lens
   in two independent ways. Every boundary starts as a closed box, and
   opening one reveals exactly one layer: its contents arrive closed, and
   opening each of them is a step of its own. Beside that stands the
-  vocabulary of kinds the picture speaks - packages, directories, modules,
-  types, functions. A hidden kind draws nothing and hands its contents to
-  the box above it, so hiding modules pools their declarations in the
-  package itself.
+  vocabulary of kinds the picture speaks - packages, directories, files,
+  modules, types, functions. A hidden kind draws nothing and hands its
+  contents to the box above it, so hiding modules pools their declarations in
+  the package itself.
+
+  The directories and files a listing shows are the skeleton of every
+  project, so they stand in the picture by default. Hiding both leaves what
+  the languages read, and that reading is what most of these scenarios speak
+  about.
 
   Connections attach to the nearest visible boundary, single boxes
   and boundaries with visible children alike. A connection that ends at a
@@ -23,6 +28,7 @@ Feature: The boundary lens
     And a package "engine" at "crates/engine"
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     Then the boundaries are "app, engine"
     And a connection goes from "app" to "engine"
 
@@ -38,6 +44,7 @@ Feature: The boundary lens
     And a package "engine" at "crates/engine"
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     Then no connection goes from "app" to "engine"
 
   Scenario: Imports in code roll up to package connections
@@ -53,6 +60,7 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     Then a connection goes from "app" to "engine"
 
   Scenario: A boundary's own code connects from the boundary itself
@@ -82,6 +90,7 @@ Feature: The boundary lens
     And the boundaries are viewed
     And every boundary is opened
     And only the structure is shown
+    And the file tree is hidden
     Then a connection goes from "app" to "engine"
     And no connection goes from "wiring" to "engine"
 
@@ -104,11 +113,12 @@ Feature: The boundary lens
     And the boundaries are viewed
     And every boundary is opened
     And only the structure is shown
+    And the file tree is hidden
     Then the boundaries do not include "crate"
     And the boundary "engine" contains "physics"
     And the boundary "engine" contains "render"
 
-  Scenario: An integration test file keeps a box of its own beside the modules
+  Scenario: An integration test file stands as a file of the package
     Given a package "engine" at "crates/engine"
     And a source file "crates/engine/src/lib.rs" containing:
       """
@@ -127,8 +137,9 @@ Feature: The boundary lens
     And every boundary is opened
     And only the structure is shown
     Then the boundaries do not include "crate"
-    And the boundary "engine" contains "physics"
     And the boundary "engine" contains "tests/behaviour.rs"
+    When the file tree is hidden
+    Then the boundary "engine" contains "physics"
 
   Scenario: What passes between a boundary and its own contents stays inside it
     Given a package "engine" at "crates/engine"
@@ -150,6 +161,7 @@ Feature: The boundary lens
     And the boundaries are viewed
     And every boundary is opened
     And only the structure is shown
+    And the file tree is hidden
     Then the boundaries include "tests"
     And no connection goes from "tests" to "engine"
 
@@ -160,8 +172,10 @@ Feature: The boundary lens
     And the boundaries are viewed
     And every boundary is opened
     And only the structure is shown
+    And the file tree is hidden
     Then a connection goes from "app" to "engine"
     When the boundaries are viewed
+    And the file tree is hidden
     Then a connection goes from "app" to "engine"
 
   Scenario: One package opens deeper while the rest of the picture stays whole
@@ -186,6 +200,7 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     Then a connection goes from "app" to "engine"
     When the boundary "app" is expanded
     Then the boundaries include "wiring"
@@ -204,6 +219,7 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the boundary "engine" is expanded
     Then the boundaries include "physics"
     And the boundaries do not include "step"
@@ -222,6 +238,7 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the boundary "engine" is opened fully
     Then the boundaries include "physics"
     And the boundaries include "step"
@@ -238,6 +255,7 @@ Feature: The boundary lens
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the boundary "engine" is expanded
     And the boundary "physics" is expanded
     Then the boundaries include "step"
@@ -256,6 +274,7 @@ Feature: The boundary lens
     And the boundaries are viewed
     And every boundary is opened
     And only the structure is shown
+    And the file tree is hidden
     Then a connection goes from "app" to "engine"
     When the boundary "engine" is collapsed
     Then a connection goes from "app" to "engine"
@@ -274,6 +293,7 @@ Feature: The boundary lens
     When the project is inspected
     And the boundaries are viewed
     And every boundary is opened
+    And the file tree is hidden
     Then the boundaries include "run"
     And a connection goes from "app" to "run"
 
@@ -287,6 +307,7 @@ Feature: The boundary lens
     When the project is inspected
     And the boundaries are viewed
     And every boundary is opened
+    And the file tree is hidden
     Then the boundaries include "run"
     And the boundaries do not include "helper"
 
@@ -304,6 +325,7 @@ Feature: The boundary lens
     When the project is inspected
     And the boundaries are viewed
     And every boundary is opened
+    And the file tree is hidden
     Then a connection goes from "app" to "run"
     When "functions" are hidden from the picture
     Then the boundaries do not include "run"
@@ -324,6 +346,7 @@ Feature: The boundary lens
     When the project is inspected
     And the boundaries are viewed
     And every boundary is opened
+    And the file tree is hidden
     Then the boundary "physics" contains "Body"
     When "modules" are hidden from the picture
     Then the boundaries do not include "physics"
@@ -351,6 +374,7 @@ Feature: The boundary lens
     When the project is inspected
     And the boundaries are viewed
     And every boundary is opened
+    And the file tree is hidden
     And "modules" are hidden from the picture
     Then the boundary "app" contains "drive"
     And a connection goes from "drive" to "serve"
@@ -379,6 +403,7 @@ Feature: The boundary lens
     When the project is inspected
     And the boundaries are viewed
     And every boundary is opened
+    And the file tree is hidden
     Then the boundary "Config" contains "load"
     And a connection goes from "load" to "read"
     When "functions" are hidden from the picture

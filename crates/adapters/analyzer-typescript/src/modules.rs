@@ -5,22 +5,12 @@
 //! file, so every import lands on one. Nothing about where a file sits
 //! restricts what may reach it - any file may import any other.
 //!
-//! A directory is therefore pure grouping - the author's organization, with
-//! nothing the language reads into it - and it is a boundary of its own only
-//! when it groups at least two things: the files directly in it, and the
-//! directories directly beneath it that earned a boundary of their own. A
-//! group of fewer than two things groups nothing, so such a directory
-//! dissolves the way the entry file dissolves into its package - it is no
-//! element, and what it held belongs to the nearest directory above it that
-//! survived, else to the package. A chain of directories holding one child
-//! each compresses away completely, leaving only the group at its end. The
-//! package's own directory is never an element: it is the package.
-//!
-//! A name reads against the element that holds it: a directory beneath a
-//! surviving directory carries the segment below it, and a module whose own
-//! directories dissolved carries every segment they gave up. The whole path
-//! stays in the id, where it identifies; the name only has to tell the
-//! boundary apart from its siblings.
+//! A directory is pure grouping - the author's organization, with nothing
+//! the language reads into it - so this adapter reads no directory at all.
+//! The file tree is the skeleton of every project whatever wrote it, and the
+//! core builds it: which directories earn a boundary, and how what hoists
+//! out of a dissolved one is named, is one law in one place rather than one
+//! per language.
 //!
 //! The entry module is the package's own code, not a module of its own: to
 //! every consumer, importing the package by name and the surface of its entry
@@ -38,7 +28,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind, SubstrateKind};
+use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind};
+use cutaway_inspection::ports::source_analyzer::{Extent, Interpretation};
 use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
 
 use crate::declarations::DeclarationIndex;
@@ -61,13 +52,10 @@ pub struct Module {
     /// Index into the discovered packages; None for files outside every
     /// package.
     package: Option<usize>,
-    /// Human-facing name: the path relative to the element that holds this
-    /// one, without its extension. A label reads inside the frame that draws
-    /// it, so the segments the frame already spells say nothing twice.
+    /// Human-facing name: the file's own name without its extension. Where
+    /// the file lies is the tree's business and stands in the name the tree
+    /// gives the same node.
     name: String,
-    /// The nearest directory above the file that survived as a boundary; None
-    /// when the package (or the project root) holds the file directly.
-    enclosing: Option<ElementId>,
     entry: bool,
 }
 
@@ -76,58 +64,20 @@ impl Module {
         self.id.clone()
     }
 
-    /// The containing element of this module: the nearest surviving directory
-    /// above it, else its package, else nothing (the project root).
-    pub fn parent(&self, packages: &[DiscoveredPackage]) -> Option<ElementId> {
-        self.enclosing
-            .clone()
-            .or_else(|| self.package.map(|index| package_id(&packages[index])))
-    }
-
-    /// The module element this file contributes, and None for an entry file:
-    /// that file dissolves into its package, which is an element already.
-    pub fn element(&self) -> Option<Element> {
+    /// What this file lets the architecture read, and None for an entry file:
+    /// the package already is that boundary.
+    pub fn interpretation(&self) -> Option<Interpretation> {
         if self.entry {
             return None;
         }
-        Some(Element::semantic(
-            self.id(),
-            SemanticKind::Module,
-            ElementName::new(&self.name).expect("a module name is never empty"),
-        ))
-    }
-}
-
-/// One directory that groups enough to be a boundary of its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Directory {
-    /// The directory path verbatim, so a file's id begins with its
-    /// directory's id.
-    id: ElementId,
-    /// Human-facing name: the path relative to the element that holds this
-    /// one, as a module's name is.
-    name: String,
-    package: Option<usize>,
-    /// The nearest surviving directory above this one.
-    enclosing: Option<ElementId>,
-}
-
-impl Directory {
-    /// The containing element: the nearest surviving directory above it, else
-    /// its package, else nothing (the project root).
-    pub fn parent(&self, packages: &[DiscoveredPackage]) -> Option<ElementId> {
-        self.enclosing
-            .clone()
-            .or_else(|| self.package.map(|index| package_id(&packages[index])))
-    }
-
-    pub fn element(&self) -> Element {
-        Element::substrate(
-            self.id.clone(),
-            SubstrateKind::Directory,
-            ElementName::new(&self.name).expect("a directory name is never empty"),
-            None,
-        )
+        Some(Interpretation {
+            element: Element::semantic(
+                self.id(),
+                SemanticKind::Module,
+                ElementName::new(&self.name).expect("a module name is never empty"),
+            ),
+            extent: Extent::File(self.path.clone()),
+        })
     }
 }
 
@@ -181,7 +131,6 @@ pub struct ModuleCatalog {
     by_path: BTreeMap<SourcePath, usize>,
     /// Package index -> the module that dissolves into it.
     entries: BTreeMap<usize, usize>,
-    directories: Vec<Directory>,
 }
 
 impl ModuleCatalog {
@@ -190,7 +139,6 @@ impl ModuleCatalog {
             modules: Vec::new(),
             by_path: BTreeMap::new(),
             entries: BTreeMap::new(),
-            directories: Vec::new(),
         };
         for file in files {
             let path = file.path.as_str();
@@ -211,10 +159,7 @@ impl ModuleCatalog {
                 path: file.path.clone(),
                 id: ElementId::new(path).expect("a source path is never empty"),
                 package,
-                // The name settles below, together with the directory it
-                // reads against.
-                name: String::new(),
-                enclosing: None,
+                name: without_extension(base_name(path)).to_owned(),
                 entry: false,
             });
         }
@@ -235,41 +180,11 @@ impl ModuleCatalog {
             catalog.modules[entry].id = package_id(package);
             catalog.entries.insert(index, entry);
         }
-
-        // The directories settle only once the entries are known: a file that
-        // dissolved into its package groups nothing. The names settle with
-        // them: a name reads against the element that holds it, and which
-        // element that is depends on which directories survived.
-        let surviving = surviving_directories(&catalog.modules, packages);
-        for module in &mut catalog.modules {
-            let package_base = package_dir(packages, module.package);
-            module.enclosing = enclosing(module.path.as_str(), package_base, &surviving);
-            let base = read_against(module.enclosing.as_ref(), package_base);
-            module.name = without_extension(strip_dir(module.path.as_str(), base)).to_owned();
-        }
-        catalog.directories = surviving
-            .iter()
-            .map(|(path, package)| {
-                let package_base = package_dir(packages, *package);
-                let enclosing = enclosing(path, package_base, &surviving);
-                Directory {
-                    id: directory_id(path),
-                    name: strip_dir(path, read_against(enclosing.as_ref(), package_base))
-                        .to_owned(),
-                    package: *package,
-                    enclosing,
-                }
-            })
-            .collect();
         catalog
     }
 
     pub fn modules(&self) -> impl Iterator<Item = &Module> {
         self.modules.iter()
-    }
-
-    pub fn directories(&self) -> impl Iterator<Item = &Directory> {
-        self.directories.iter()
     }
 
     pub fn module_of(&self, path: &SourcePath) -> Option<&Module> {
@@ -508,110 +423,6 @@ fn normalize(base: &str, specifier: &str) -> Option<String> {
     Some(components.join("/")).filter(|path| !path.is_empty())
 }
 
-/// The directories that group at least two things, each with the package it
-/// belongs to. A directory's children are the files directly in it, one per
-/// directory beneath it that survived this same rule, and whatever the
-/// dissolved ones beneath it hand up: a dissolved directory is not there any
-/// more, so what it held stands in the directory above it and counts for it.
-/// The deepest directories therefore settle first.
-///
-/// The answer depends on the set of source paths alone, never on the order
-/// the tree yielded them.
-fn surviving_directories(
-    modules: &[Module],
-    packages: &[DiscoveredPackage],
-) -> BTreeMap<String, Option<usize>> {
-    let mut files_in: BTreeMap<String, usize> = BTreeMap::new();
-    let mut candidates: BTreeMap<String, Option<usize>> = BTreeMap::new();
-    for module in modules {
-        // An entry file speaks as its package, so it is not in any directory.
-        if module.entry {
-            continue;
-        }
-        let base = package_dir(packages, module.package);
-        let mut current = parent_dir(module.path.as_str()).to_owned();
-        if !is_inside(&current, base) {
-            continue;
-        }
-        *files_in.entry(current.clone()).or_default() += 1;
-        while is_inside(&current, base) {
-            let above = parent_dir(&current).to_owned();
-            candidates.insert(current, module.package);
-            current = above;
-        }
-    }
-
-    let mut ordered: Vec<&String> = candidates.keys().collect();
-    ordered.sort_by_key(|path| std::cmp::Reverse(depth(path)));
-    let mut surviving = BTreeMap::new();
-    // What the directories beneath each directory contribute to it: one for a
-    // surviving one, and a dissolved one's own children, which now stand
-    // directly in it.
-    let mut from_below: BTreeMap<String, usize> = BTreeMap::new();
-    for path in ordered {
-        let children = files_in.get(path).copied().unwrap_or_default()
-            + from_below.get(path).copied().unwrap_or_default();
-        let contribution = if children < 2 {
-            children
-        } else {
-            surviving.insert(path.clone(), candidates[path]);
-            1
-        };
-        *from_below.entry(parent_dir(path).to_owned()).or_default() += contribution;
-    }
-    surviving
-}
-
-/// The surviving directory that most closely encloses `path`, searching only
-/// within the package directory `base`: the package itself is no directory
-/// module.
-fn enclosing(
-    path: &str,
-    base: &str,
-    surviving: &BTreeMap<String, Option<usize>>,
-) -> Option<ElementId> {
-    let mut current = parent_dir(path).to_owned();
-    while is_inside(&current, base) {
-        if surviving.contains_key(&current) {
-            return Some(directory_id(&current));
-        }
-        current = parent_dir(&current).to_owned();
-    }
-    None
-}
-
-/// The directory a name reads against: the surviving directory that holds
-/// the element, and the package's own directory when no directory does. What
-/// the holder already spells stays out of the name it draws inside.
-fn read_against<'a>(enclosing: Option<&'a ElementId>, package_base: &'a str) -> &'a str {
-    enclosing.map_or(package_base, ElementId::as_str)
-}
-
-/// A directory speaks as its own path, the same string every file under it
-/// begins with.
-fn directory_id(path: &str) -> ElementId {
-    ElementId::new(path).expect("a directory path is never empty")
-}
-
-/// The directory of a package, and the repository root for what no package
-/// owns.
-fn package_dir(packages: &[DiscoveredPackage], package: Option<usize>) -> &str {
-    package.map_or("", |index| packages[index].dir.as_str())
-}
-
-/// Whether `path` names something strictly below the directory `base`.
-fn is_inside(path: &str, base: &str) -> bool {
-    if base.is_empty() {
-        !path.is_empty()
-    } else {
-        path.starts_with(&format!("{base}/"))
-    }
-}
-
-fn depth(path: &str) -> usize {
-    path.split('/').count()
-}
-
 /// Whether the path lies in installed third-party material.
 pub fn is_vendored(path: &str) -> bool {
     path.split('/').any(|component| component == "node_modules")
@@ -636,6 +447,10 @@ fn without_extension(path: &str) -> &str {
         .map_or(path, |(stem, _)| stem)
 }
 
+fn base_name(path: &str) -> &str {
+    path.rsplit_once('/').map_or(path, |(_, name)| name)
+}
+
 fn parent_dir(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(head, _)| head)
 }
@@ -645,14 +460,5 @@ pub fn join(dir: &str, rest: &str) -> String {
         (true, _) => rest.to_owned(),
         (_, true) => dir.to_owned(),
         (false, false) => format!("{dir}/{rest}"),
-    }
-}
-
-fn strip_dir<'a>(path: &'a str, dir: &str) -> &'a str {
-    if dir.is_empty() {
-        path
-    } else {
-        path.strip_prefix(dir)
-            .map_or(path, |rest| rest.strip_prefix('/').unwrap_or(rest))
     }
 }

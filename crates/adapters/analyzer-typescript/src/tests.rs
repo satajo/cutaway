@@ -1,54 +1,122 @@
-use cutaway_architecture::{ElementKind, RelationKind};
+use std::collections::BTreeMap;
+
+use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
+use cutaway_inspection::inspect;
 use cutaway_inspection::ports::source_analyzer::{
-    SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    Extent, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
-use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
+use cutaway_inspection::ports::source_tree::{
+    DirectoryPath, ProjectName, SourceFile, SourcePath, SourceTree, SourceTreeError,
+};
 
 use crate::TypeScriptSourceAnalyzer;
+
+fn sources(files: &[(&str, &str)]) -> Vec<SourceFile> {
+    files
+        .iter()
+        .map(|(path, contents)| SourceFile {
+            path: SourcePath::new(*path).unwrap(),
+            contents: contents.as_bytes().to_vec(),
+        })
+        .collect()
+}
 
 fn analyze(files: &[(&str, &str)]) -> SourceStructure {
     try_analyze(files).unwrap()
 }
 
 fn try_analyze(files: &[(&str, &str)]) -> Result<SourceStructure, SourceAnalysisError> {
-    let files: Vec<SourceFile> = files
-        .iter()
-        .map(|(path, contents)| SourceFile {
-            path: SourcePath::new(*path).unwrap(),
-            contents: contents.as_bytes().to_vec(),
-        })
-        .collect();
-    TypeScriptSourceAnalyzer.analyze(&files)
+    TypeScriptSourceAnalyzer.analyze(&sources(files))
 }
 
-fn parent_of(structure: &SourceStructure, id: &str) -> Option<String> {
+struct Fixture(Vec<SourceFile>);
+
+impl SourceTree for Fixture {
+    fn name(&self) -> ProjectName {
+        ProjectName::new("fixture").unwrap()
+    }
+
+    fn files(&self) -> Result<Vec<SourceFile>, SourceTreeError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// The architecture the wired application builds out of these sources.
+fn inspected(files: &[(&str, &str)]) -> ArchitectureGraph {
+    inspect(&Fixture(sources(files)), &[&TypeScriptSourceAnalyzer]).expect("the sources inspect")
+}
+
+/// The containment parent one element stands under in the whole picture.
+fn holder(graph: &ArchitectureGraph, id: &str) -> Option<String> {
+    graph
+        .relations()
+        .find(|relation| relation.kind == RelationKind::Contains && relation.to.as_str() == id)
+        .map(|relation| relation.from.as_str().to_owned())
+}
+
+/// The boundary a picture speaking no directories and no files draws around
+/// an element: the nearest holder a language read anything into. This is the
+/// shape the model drew before the file tree became its skeleton, so it is
+/// where a change of the substrate would show as a regression.
+fn semantic_holder(graph: &ArchitectureGraph, id: &str) -> Option<String> {
+    let parents: BTreeMap<&ElementId, &ElementId> = graph
+        .relations()
+        .filter(|relation| relation.kind == RelationKind::Contains)
+        .map(|relation| (&relation.to, &relation.from))
+        .collect();
+    let mut current = parents.get(&ElementId::new(id).unwrap()).copied();
+    while let Some(id) = current {
+        if graph
+            .element(id)
+            .is_some_and(|element| element.semantic_aspect().is_some())
+        {
+            return Some(id.as_str().to_owned());
+        }
+        current = parents.get(id).copied();
+    }
+    None
+}
+
+/// What one element reads out of the sources.
+fn extent_of(structure: &SourceStructure, id: &str) -> Extent {
     structure
-        .elements
+        .interpretations
         .iter()
-        .find(|e| e.element.id.as_str() == id)
-        .expect("the element exists")
-        .parent
-        .as_ref()
-        .map(|p| p.as_str().to_owned())
+        .find(|interpretation| interpretation.element.id.as_str() == id)
+        .unwrap_or_else(|| panic!("no interpretation {id}"))
+        .extent
+        .clone()
+}
+
+fn reads_nothing(structure: &SourceStructure, id: &str) -> bool {
+    !structure
+        .interpretations
+        .iter()
+        .any(|interpretation| interpretation.element.id.as_str() == id)
+}
+
+/// The element a declaration hangs under, as the analyzer states it: the
+/// declaration that holds it, else the file that writes it.
+fn parent_of(structure: &SourceStructure, id: &str) -> Option<String> {
+    match extent_of(structure, id) {
+        Extent::Within { file, parent } => Some(parent.map_or_else(
+            || file.as_str().to_owned(),
+            |holder| holder.as_str().to_owned(),
+        )),
+        _ => None,
+    }
 }
 
 fn name_of(structure: &SourceStructure, id: &str) -> String {
     structure
-        .elements
+        .interpretations
         .iter()
-        .find(|e| e.element.id.as_str() == id)
+        .find(|interpretation| interpretation.element.id.as_str() == id)
         .expect("the element exists")
         .element
         .primary_name()
         .as_str()
         .to_owned()
-}
-
-fn has_element(structure: &SourceStructure, id: &str) -> bool {
-    structure
-        .elements
-        .iter()
-        .any(|e| e.element.id.as_str() == id)
 }
 
 fn dependencies(structure: &SourceStructure) -> Vec<(String, String)> {
@@ -81,10 +149,10 @@ fn packages_are_discovered_from_their_manifests() {
         MANIFEST_CORE,
     ]);
     let packages: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| e.element.primary_kind() == ElementKind::Package)
-        .map(|e| e.element.id.as_str())
+        .filter(|i| i.element.primary_kind() == ElementKind::Package)
+        .map(|i| i.element.id.as_str())
         .collect();
     assert_eq!(packages, ["package:app", "package:core"]);
 }
@@ -92,255 +160,93 @@ fn packages_are_discovered_from_their_manifests() {
 #[test]
 fn a_manifest_without_a_name_contributes_nothing() {
     let structure = analyze(&[("package.json", r#"{"private":true,"version":"1.0.0"}"#)]);
-    assert!(structure.elements.is_empty());
+    assert!(structure.interpretations.is_empty());
 }
 
 #[test]
-fn source_files_are_modules_within_their_package_named_without_their_extension() {
+fn a_package_reads_the_directory_its_manifest_sits_in() {
     let structure = analyze(&[
+        MANIFEST_APP,
+        ("package.json", r#"{"name":"whole","main":"index.ts"}"#),
+    ]);
+
+    assert_eq!(
+        extent_of(&structure, "package:app"),
+        Extent::Directory(DirectoryPath::new("packages/app").unwrap())
+    );
+    assert_eq!(
+        extent_of(&structure, "package:whole"),
+        Extent::Root,
+        "a manifest at the top of the tree makes the whole repository the package"
+    );
+}
+
+#[test]
+fn a_source_file_is_a_module_named_without_its_extension() {
+    let files = [
         MANIFEST_APP,
         (
             "packages/app/src/utils/date.ts",
             "export const now = () => 1;\n",
         ),
-    ]);
+    ];
+    let structure = analyze(&files);
     assert_eq!(
-        parent_of(&structure, "packages/app/src/utils/date.ts"),
-        Some("package:app".to_owned())
+        extent_of(&structure, "packages/app/src/utils/date.ts"),
+        Extent::File(SourcePath::new("packages/app/src/utils/date.ts").unwrap())
     );
-    let names: Vec<_> = structure
-        .elements
-        .iter()
-        .filter(|e| e.element.primary_kind() == ElementKind::Module)
-        .map(|e| e.element.primary_name().as_str().to_owned())
-        .collect();
-    assert_eq!(names, ["src/utils/date"]);
+    assert_eq!(
+        name_of(&structure, "packages/app/src/utils/date.ts"),
+        "date",
+        "the language names the file; where it lies is the tree's word"
+    );
+
+    assert_eq!(
+        semantic_holder(&inspected(&files), "packages/app/src/utils/date.ts"),
+        Some("package:app".to_owned()),
+        "the directories between hold nothing else, so they dissolve"
+    );
 }
 
 #[test]
-fn a_directory_holding_two_files_is_a_boundary_within_its_package() {
-    let structure = analyze(&[
+fn the_directories_of_a_package_come_from_the_tree() {
+    let graph = inspected(&[
         MANIFEST_APP,
         ("packages/app/src/a.ts", "export const a = () => 1;\n"),
         ("packages/app/src/b.ts", "export const b = () => 1;\n"),
     ]);
-    let directory = structure
-        .elements
-        .iter()
-        .find(|e| e.element.id.as_str() == "packages/app/src")
-        .expect("the directory is an element");
+
+    let directory = graph
+        .element(&ElementId::new("packages/app/src").unwrap())
+        .expect("the directory groups two things, so it stands");
     assert_eq!(
-        directory.element.primary_kind(),
+        directory.primary_kind(),
         ElementKind::Directory,
         "a TypeScript directory is organization the author chose, and the \
          language reads nothing into it"
     );
-    assert_eq!(directory.element.primary_name().as_str(), "src");
+    assert_eq!(directory.primary_name().as_str(), "src");
     assert_eq!(
-        parent_of(&structure, "packages/app/src"),
+        holder(&graph, "packages/app/src"),
         Some("package:app".to_owned())
     );
     assert_eq!(
-        parent_of(&structure, "packages/app/src/a.ts"),
-        Some("packages/app/src".to_owned())
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/b.ts"),
+        holder(&graph, "packages/app/src/a.ts"),
         Some("packages/app/src".to_owned())
     );
 }
 
 #[test]
-fn a_chain_of_directories_holding_one_child_each_dissolves_into_the_group_at_its_end() {
-    let structure = analyze(&[
-        MANIFEST_APP,
-        ("packages/app/src/a/b/c/one.ts", "export const one = 1;\n"),
-        ("packages/app/src/a/b/c/two.ts", "export const two = 2;\n"),
-    ]);
-    for dissolved in [
-        "packages/app/src",
-        "packages/app/src/a",
-        "packages/app/src/a/b",
-    ] {
-        assert!(
-            !has_element(&structure, dissolved),
-            "{dissolved} groups one thing and is no element"
-        );
-    }
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/a/b/c"),
-        Some("package:app".to_owned())
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/a/b/c/one.ts"),
-        Some("packages/app/src/a/b/c".to_owned())
-    );
-}
-
-#[test]
-fn a_directory_groups_what_its_dissolved_subdirectories_hand_up() {
-    let structure = analyze(&[
-        MANIFEST_APP,
-        (
-            "packages/app/src/plugins/index.ts",
-            "export const plugins = [];\n",
-        ),
-        (
-            "packages/app/src/plugins/cleanup/cleanup.ts",
-            "export const cleanup = () => 1;\n",
-        ),
-    ]);
-    assert!(
-        !has_element(&structure, "packages/app/src/plugins/cleanup"),
-        "a directory of one file dissolves"
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/plugins"),
-        Some("package:app".to_owned()),
-        "the dissolved subdirectory leaves its file standing in the directory above"
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/plugins/index.ts"),
-        Some("packages/app/src/plugins".to_owned())
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/plugins/cleanup/cleanup.ts"),
-        Some("packages/app/src/plugins".to_owned())
-    );
-}
-
-#[test]
-fn a_directory_counts_a_surviving_subdirectory_among_its_children() {
-    let structure = analyze(&[
-        MANIFEST_APP,
-        ("packages/app/src/util.ts", "export const now = () => 1;\n"),
-        (
-            "packages/app/src/widgets/panel.ts",
-            "export class Panel {}\n",
-        ),
-        (
-            "packages/app/src/widgets/button.ts",
-            "export class Button {}\n",
-        ),
-    ]);
-    assert_eq!(
-        parent_of(&structure, "packages/app/src"),
-        Some("package:app".to_owned()),
-        "one file and one surviving subdirectory are two children"
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/widgets"),
-        Some("packages/app/src".to_owned())
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/util.ts"),
-        Some("packages/app/src".to_owned())
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/widgets/panel.ts"),
-        Some("packages/app/src/widgets".to_owned())
-    );
-}
-
-#[test]
-fn a_module_parents_onto_the_nearest_surviving_directory_above_it() {
-    let structure = analyze(&[
-        MANIFEST_APP,
-        ("packages/app/src/a.ts", "export const a = 1;\n"),
-        ("packages/app/src/b.ts", "export const b = 2;\n"),
-        (
-            "packages/app/src/lonely/deep.ts",
-            "export const deep = 3;\n",
-        ),
-    ]);
-    assert!(!has_element(&structure, "packages/app/src/lonely"));
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/lonely/deep.ts"),
-        Some("packages/app/src".to_owned())
-    );
-}
-
-#[test]
-fn a_name_says_only_what_the_element_above_it_does_not_already_spell() {
-    let structure = analyze(&[
-        MANIFEST_APP,
-        ("packages/app/src/util.ts", "export const now = () => 1;\n"),
-        (
-            "packages/app/src/widgets/panel.ts",
-            "export class Panel {}\n",
-        ),
-        (
-            "packages/app/src/widgets/button.ts",
-            "export class Button {}\n",
-        ),
-    ]);
-    assert_eq!(name_of(&structure, "packages/app/src"), "src");
-    assert_eq!(name_of(&structure, "packages/app/src/widgets"), "widgets");
-    assert_eq!(name_of(&structure, "packages/app/src/util.ts"), "util");
-    assert_eq!(
-        name_of(&structure, "packages/app/src/widgets/panel.ts"),
-        "panel"
-    );
-    assert_eq!(
-        structure
-            .elements
-            .iter()
-            .find(|e| e.element.id.as_str() == "packages/app/src/widgets")
-            .map(|e| e.element.id.as_str().to_owned()),
-        Some("packages/app/src/widgets".to_owned()),
-        "the id keeps the whole path, because it identifies rather than reads"
-    );
-}
-
-#[test]
-fn a_name_keeps_the_segments_the_directories_that_dissolved_gave_up() {
-    let structure = analyze(&[
-        MANIFEST_APP,
-        ("packages/app/src/a.ts", "export const a = 1;\n"),
-        ("packages/app/src/b.ts", "export const b = 2;\n"),
-        (
-            "packages/app/src/lonely/deep.ts",
-            "export const deep = 3;\n",
-        ),
-    ]);
-    assert_eq!(
-        name_of(&structure, "packages/app/src/lonely/deep.ts"),
-        "lonely/deep",
-        "no box spells `lonely`, so the module has to"
-    );
-}
-
-#[test]
-fn the_entry_file_counts_for_no_directory() {
-    let structure = analyze(&[
-        MANIFEST_APP,
-        ("packages/app/src/index.ts", "export class Session {}\n"),
-        ("packages/app/src/a.ts", "export const a = 1;\n"),
-    ]);
-    assert!(
-        !has_element(&structure, "packages/app/src"),
-        "the dissolved entry leaves one child, which groups nothing"
-    );
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/a.ts"),
-        Some("package:app".to_owned())
-    );
-}
-
-#[test]
-fn items_and_imports_keep_naming_their_file_when_directories_are_modules() {
-    let structure = analyze(&[
+fn items_and_imports_keep_naming_their_file_whatever_holds_it() {
+    let files = [
         MANIFEST_APP,
         (
             "packages/app/src/widgets/a.ts",
             "import { Widget } from \"./b\";\nexport function use() {}\n",
         ),
         ("packages/app/src/widgets/b.ts", "export class Widget {}\n"),
-    ]);
-    assert_eq!(
-        parent_of(&structure, "packages/app/src/widgets/a.ts"),
-        Some("packages/app/src/widgets".to_owned())
-    );
+    ];
+    let structure = analyze(&files);
     assert_eq!(
         parent_of(&structure, "packages/app/src/widgets/a.ts#function:use"),
         Some("packages/app/src/widgets/a.ts".to_owned())
@@ -350,37 +256,47 @@ fn items_and_imports_keep_naming_their_file_when_directories_are_modules() {
         "packages/app/src/widgets/a.ts",
         "packages/app/src/widgets/b.ts#type:Widget"
     ));
+
+    assert_eq!(
+        holder(&inspected(&files), "packages/app/src/widgets/a.ts"),
+        Some("packages/app/src/widgets".to_owned())
+    );
 }
 
 #[test]
 fn the_entry_file_dissolves_into_its_package() {
-    let structure = analyze(&[
+    let files = [
         MANIFEST_CORE,
         ("packages/core/src/index.ts", "export class Session {}\n"),
-    ]);
+    ];
+    let structure = analyze(&files);
     assert!(
-        !has_element(&structure, "packages/core/src/index.ts"),
-        "the entry file is no element of its own"
+        reads_nothing(&structure, "packages/core/src/index.ts"),
+        "the entry file is no module of its own"
     );
+
     assert_eq!(
-        parent_of(&structure, "packages/core/src/index.ts#type:Session"),
+        semantic_holder(
+            &inspected(&files),
+            "packages/core/src/index.ts#type:Session"
+        ),
         Some("package:core".to_owned()),
-        "the entry file's declarations are the package's items"
+        "the entry file's declarations read as the package's items"
     );
 }
 
 #[test]
 fn a_main_field_naming_the_built_output_finds_the_typescript_source() {
-    let structure = analyze(&[
+    let files = [
         (
             "packages/core/package.json",
             r#"{"name":"core","main":"./index.js"}"#,
         ),
         ("packages/core/index.ts", "export class Session {}\n"),
-    ]);
-    assert!(!has_element(&structure, "packages/core/index.ts"));
+    ];
+    assert!(reads_nothing(&analyze(&files), "packages/core/index.ts"));
     assert_eq!(
-        parent_of(&structure, "packages/core/index.ts#type:Session"),
+        semantic_holder(&inspected(&files), "packages/core/index.ts#type:Session"),
         Some("package:core".to_owned())
     );
 }
@@ -399,7 +315,7 @@ fn a_package_without_a_resolvable_entry_keeps_its_files_as_modules() {
             "import { Session } from \"core\";\n",
         ),
     ]);
-    assert!(has_element(&structure, "packages/core/lib/session.ts"));
+    assert!(!reads_nothing(&structure, "packages/core/lib/session.ts"));
     assert!(depends(&structure, "package:app", "package:core"));
 }
 
@@ -920,13 +836,14 @@ fn exported_functions_classes_interfaces_aliases_and_enums_become_items() {
         ),
     ]);
     let items: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| {
-            e.parent
-                .as_ref()
-                .map(cutaway_architecture::ElementId::as_str)
-                == Some("packages/app/src/api.ts")
+        .filter(|i| {
+            i.extent
+                == Extent::Within {
+                    file: SourcePath::new("packages/app/src/api.ts").unwrap(),
+                    parent: None,
+                }
         })
         .map(|e| {
             (
@@ -957,10 +874,10 @@ fn an_exported_const_is_an_item_only_when_it_holds_a_function() {
         ),
     ]);
     let items: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| e.element.primary_kind() == ElementKind::Function)
-        .map(|e| e.element.primary_name().as_str().to_owned())
+        .filter(|i| i.element.primary_kind() == ElementKind::Function)
+        .map(|i| i.element.primary_name().as_str().to_owned())
         .collect();
     assert_eq!(items, ["render", "build"]);
 }
@@ -975,15 +892,15 @@ fn an_export_list_marks_local_declarations_as_exported() {
         ),
     ]);
     let items: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| {
+        .filter(|i| {
             matches!(
-                e.element.primary_kind(),
+                i.element.primary_kind(),
                 ElementKind::Function | ElementKind::Type
             )
         })
-        .map(|e| e.element.primary_name().as_str().to_owned())
+        .map(|i| i.element.primary_name().as_str().to_owned())
         .collect();
     assert_eq!(items, ["connect", "Session"]);
 }
@@ -1011,9 +928,9 @@ fn a_default_export_of_a_named_function_is_an_item_and_an_anonymous_one_is_none(
     ]);
     assert!(
         anonymous
-            .elements
+            .interpretations
             .iter()
-            .all(|e| e.element.primary_kind() != ElementKind::Function),
+            .all(|i| i.element.primary_kind() != ElementKind::Function),
         "an anonymous default declares no item"
     );
     assert!(depends(
@@ -1071,15 +988,15 @@ fn commonjs_exports_assignments_declare_the_modules_items() {
         ),
     ]);
     let items: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| {
+        .filter(|i| {
             matches!(
-                e.element.primary_kind(),
+                i.element.primary_kind(),
                 ElementKind::Function | ElementKind::Type
             )
         })
-        .map(|e| e.element.id.as_str().to_owned())
+        .map(|i| i.element.id.as_str().to_owned())
         .collect();
     assert_eq!(
         items,
@@ -1163,7 +1080,7 @@ fn node_modules_stays_outside_the_architecture_and_its_files_are_never_parsed() 
             "import pad from \"left-pad\";\n",
         ),
     ]);
-    assert!(!has_element(&structure, "package:left-pad"));
+    assert!(reads_nothing(&structure, "package:left-pad"));
     assert!(dependencies(&structure).is_empty());
 }
 
@@ -1189,12 +1106,16 @@ fn a_tsx_component_and_a_jsx_file_parse_and_their_imports_witness_dependencies()
 
 #[test]
 fn a_package_nested_in_another_packages_directory_parents_onto_it() {
-    let structure = analyze(&[("package.json", r#"{"name":"root"}"#), MANIFEST_APP]);
+    let graph = inspected(&[("package.json", r#"{"name":"root"}"#), MANIFEST_APP]);
     assert_eq!(
-        parent_of(&structure, "package:app"),
-        Some("package:root".to_owned())
+        semantic_holder(&graph, "package:app"),
+        Some("package:root".to_owned()),
+        "a root manifest makes the whole repository its package's territory"
     );
-    assert_eq!(parent_of(&structure, "package:root"), None);
+    assert_eq!(
+        semantic_holder(&graph, "package:root"),
+        Some("project:fixture".to_owned())
+    );
 }
 
 #[test]
@@ -1230,15 +1151,12 @@ fn files_outside_every_package_are_modules_under_the_project_root() {
 
 #[test]
 fn a_directory_outside_every_package_groups_under_the_project_root() {
-    let structure = analyze(&[
+    let graph = inspected(&[
         ("tools/build.ts", "export const run = () => 1;\n"),
         ("tools/check.ts", "export const check = () => 2;\n"),
     ]);
-    assert_eq!(parent_of(&structure, "tools"), None);
-    assert_eq!(
-        parent_of(&structure, "tools/build.ts"),
-        Some("tools".to_owned())
-    );
+    assert_eq!(holder(&graph, "tools"), Some("project:fixture".to_owned()));
+    assert_eq!(holder(&graph, "tools/build.ts"), Some("tools".to_owned()));
 }
 
 #[test]
@@ -1319,11 +1237,11 @@ fn a_private_members_writing_stays_the_classs_own() {
         ),
     ]);
     assert!(
-        !has_element(&structure, "packages/app/src/store.ts#function:Store.warm"),
+        reads_nothing(&structure, "packages/app/src/store.ts#function:Store.warm"),
         "a private-modifier member is the class's internals"
     );
     assert!(
-        !has_element(
+        reads_nothing(
             &structure,
             "packages/app/src/store.ts#function:Store.#prime"
         ),
@@ -1337,8 +1255,8 @@ fn a_private_members_writing_stays_the_classs_own() {
 }
 
 #[test]
-fn every_cataloged_source_and_naming_manifest_is_claimed() {
-    let structure = analyze(&[
+fn every_file_of_a_typescript_project_stands_in_the_picture() {
+    let graph = inspected(&[
         ("package.json", r#"{"workspaces":["packages/*"]}"#),
         MANIFEST_APP,
         ("packages/app/src/index.ts", "export const go = () => 1;\n"),
@@ -1349,44 +1267,26 @@ fn every_cataloged_source_and_naming_manifest_is_claimed() {
         ),
         ("packages/app/README.md", "docs"),
     ]);
-    let claimed = |path: &str| structure.claimed.contains(&SourcePath::new(path).unwrap());
-    assert!(claimed("packages/app/package.json"));
-    assert!(
-        claimed("packages/app/src/index.ts"),
-        "a dissolved entry file is still read"
-    );
-    assert!(claimed("packages/app/src/util.ts"));
-    assert!(
-        !claimed("package.json"),
-        "a nameless workspace manifest names no package"
-    );
-    assert!(
-        !claimed("packages/app/node_modules/dep/index.js"),
-        "vendored code is never even read"
-    );
-    assert!(
-        !claimed("packages/app/README.md"),
-        "no meaning was read from it"
-    );
-}
 
-#[test]
-fn the_territory_of_a_package_is_its_manifest_directory() {
-    use cutaway_architecture::ElementId;
-    use cutaway_inspection::ports::source_tree::DirectoryPath;
-
-    let structure = analyze(&[MANIFEST_APP, MANIFEST_CORE]);
+    for path in [
+        "package.json",
+        "packages/app/package.json",
+        "packages/app/src/index.ts",
+        "packages/app/src/util.ts",
+        "packages/app/node_modules/dep/index.js",
+        "packages/app/README.md",
+    ] {
+        let element = graph
+            .element(&ElementId::new(path).unwrap())
+            .unwrap_or_else(|| panic!("{path} stands in the picture"));
+        assert!(
+            element.fingerprint.is_some(),
+            "{path} must speak through its contents"
+        );
+    }
     assert_eq!(
-        structure.territories,
-        std::collections::BTreeMap::from([
-            (
-                DirectoryPath::new("packages/app").unwrap(),
-                ElementId::new("package:app").unwrap()
-            ),
-            (
-                DirectoryPath::new("packages/core").unwrap(),
-                ElementId::new("package:core").unwrap()
-            ),
-        ])
+        semantic_holder(&graph, "packages/app/README.md"),
+        Some("package:app".to_owned()),
+        "a file the language never read still lies in the package's directory"
     );
 }

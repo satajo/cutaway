@@ -1,35 +1,123 @@
-use cutaway_architecture::{ElementId, ElementKind, RelationKind};
+use std::collections::BTreeMap;
+
+use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
+use cutaway_inspection::inspect;
 use cutaway_inspection::ports::source_analyzer::{
-    AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    Extent, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
-use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
+use cutaway_inspection::ports::source_tree::{
+    DirectoryPath, ProjectName, SourceFile, SourcePath, SourceTree, SourceTreeError,
+};
 
 use crate::GoSourceAnalyzer;
+
+fn sources(files: &[(&str, &str)]) -> Vec<SourceFile> {
+    files
+        .iter()
+        .map(|(path, contents)| SourceFile {
+            path: SourcePath::new(*path).unwrap(),
+            contents: contents.as_bytes().to_vec(),
+        })
+        .collect()
+}
 
 fn analyze(files: &[(&str, &str)]) -> SourceStructure {
     try_analyze(files).unwrap()
 }
 
 fn try_analyze(files: &[(&str, &str)]) -> Result<SourceStructure, SourceAnalysisError> {
-    let files: Vec<SourceFile> = files
-        .iter()
-        .map(|(path, contents)| SourceFile {
-            path: SourcePath::new(*path).unwrap(),
-            contents: contents.as_bytes().to_vec(),
-        })
-        .collect();
-    GoSourceAnalyzer.analyze(&files)
+    GoSourceAnalyzer.analyze(&sources(files))
 }
 
-fn parent_of(structure: &SourceStructure, id: &str) -> Option<String> {
+struct Fixture(Vec<SourceFile>);
+
+impl SourceTree for Fixture {
+    fn name(&self) -> ProjectName {
+        ProjectName::new("fixture").unwrap()
+    }
+
+    fn files(&self) -> Result<Vec<SourceFile>, SourceTreeError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// The architecture the wired application builds out of these sources.
+fn inspected(files: &[(&str, &str)]) -> ArchitectureGraph {
+    inspect(&Fixture(sources(files)), &[&GoSourceAnalyzer]).expect("the sources inspect")
+}
+
+/// The boundary a picture speaking no directories and no files draws around
+/// an element: the nearest holder a language read anything into. This is the
+/// shape the model drew before the file tree became its skeleton, so it is
+/// where a change of the substrate would show as a regression.
+fn semantic_holder(graph: &ArchitectureGraph, id: &str) -> Option<String> {
+    let parents: BTreeMap<&ElementId, &ElementId> = graph
+        .relations()
+        .filter(|relation| relation.kind == RelationKind::Contains)
+        .map(|relation| (&relation.to, &relation.from))
+        .collect();
+    let mut current = parents.get(&ElementId::new(id).unwrap()).copied();
+    while let Some(id) = current {
+        if graph
+            .element(id)
+            .is_some_and(|element| element.semantic_aspect().is_some())
+        {
+            return Some(id.as_str().to_owned());
+        }
+        current = parents.get(id).copied();
+    }
+    None
+}
+
+/// What one element reads out of the sources.
+fn extent_of(structure: &SourceStructure, id: &str) -> Extent {
     structure
-        .elements
+        .interpretations
         .iter()
-        .find(|e| e.element.id.as_str() == id)
-        .expect("the element exists")
-        .parent
-        .as_ref()
-        .map(|p| p.as_str().to_owned())
+        .find(|interpretation| interpretation.element.id.as_str() == id)
+        .unwrap_or_else(|| panic!("no interpretation {id}"))
+        .extent
+        .clone()
+}
+
+fn reads_nothing(structure: &SourceStructure, id: &str) -> bool {
+    !structure
+        .interpretations
+        .iter()
+        .any(|interpretation| interpretation.element.id.as_str() == id)
+}
+
+/// The element a declaration hangs under, as the analyzer states it: the
+/// declaration that holds it, else the file that writes it.
+fn parent_of(structure: &SourceStructure, id: &str) -> Option<String> {
+    match extent_of(structure, id) {
+        Extent::Within { file, parent } => Some(parent.map_or_else(
+            || file.as_str().to_owned(),
+            |holder| holder.as_str().to_owned(),
+        )),
+        _ => None,
+    }
+}
+
+/// What one file declares straight into the architecture.
+fn declared_in(structure: &SourceStructure, file: &str) -> Vec<(String, ElementKind)> {
+    structure
+        .interpretations
+        .iter()
+        .filter(|interpretation| {
+            interpretation.extent
+                == Extent::Within {
+                    file: SourcePath::new(file).unwrap(),
+                    parent: None,
+                }
+        })
+        .map(|interpretation| {
+            (
+                interpretation.element.primary_name().as_str().to_owned(),
+                interpretation.element.primary_kind(),
+            )
+        })
+        .collect()
 }
 
 fn dependencies(structure: &SourceStructure) -> Vec<(String, String)> {
@@ -45,34 +133,8 @@ fn depends(structure: &SourceStructure, from: &str, to: &str) -> bool {
     dependencies(structure).contains(&(from.to_owned(), to.to_owned()))
 }
 
-fn element(structure: &SourceStructure, id: &str) -> AnalyzedElement {
-    structure
-        .elements
-        .iter()
-        .find(|e| e.element.id.as_str() == id)
-        .expect("the element exists")
-        .clone()
-}
-
-fn children_of(structure: &SourceStructure, parent: &str) -> Vec<(String, ElementKind)> {
-    structure
-        .elements
-        .iter()
-        .filter(|e| e.parent.as_ref().map(ElementId::as_str) == Some(parent))
-        .map(|e| {
-            (
-                e.element.primary_name().as_str().to_owned(),
-                e.element.primary_kind(),
-            )
-        })
-        .collect()
-}
-
-fn has_element(structure: &SourceStructure, id: &str) -> bool {
-    structure
-        .elements
-        .iter()
-        .any(|e| e.element.id.as_str() == id)
+fn directory(path: &str) -> DirectoryPath {
+    DirectoryPath::new(path).unwrap()
 }
 
 const ALPHA: (&str, &str) = ("alpha/go.mod", "module example.com/alpha\n\ngo 1.22\n");
@@ -82,10 +144,10 @@ const BETA: (&str, &str) = ("beta/go.mod", "module example.com/beta\n\ngo 1.22\n
 fn modules_are_discovered_from_their_manifests() {
     let structure = analyze(&[ALPHA, BETA]);
     let packages: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| e.element.primary_kind() == ElementKind::Package)
-        .map(|e| e.element.id.as_str())
+        .filter(|i| i.element.primary_kind() == ElementKind::Package)
+        .map(|i| i.element.id.as_str())
         .collect();
     assert_eq!(
         packages,
@@ -104,53 +166,76 @@ fn a_manifest_without_a_module_path_is_rejected() {
 
 #[test]
 fn a_directory_of_go_files_is_a_module_within_its_package() {
-    let structure = analyze(&[
+    let files = [
         ALPHA,
         ("alpha/internal/server/serve.go", "package server\n"),
-    ]);
-    let directory = structure
-        .elements
+    ];
+    let structure = analyze(&files);
+    let read = structure
+        .interpretations
         .iter()
-        .find(|e| e.element.id.as_str() == "alpha/internal/server")
-        .expect("the directory is an element");
-    assert_eq!(directory.element.primary_kind(), ElementKind::Module);
-    assert_eq!(directory.element.primary_name().as_str(), "internal/server");
+        .find(|i| i.element.id.as_str() == "alpha/internal/server")
+        .expect("the directory is a module");
+    assert_eq!(read.element.primary_kind(), ElementKind::Module);
+    assert_eq!(read.element.primary_name().as_str(), "internal/server");
     assert_eq!(
-        directory.parent.as_ref().map(ElementId::as_str),
-        Some("package:example.com/alpha")
+        read.extent,
+        Extent::Directory(directory("alpha/internal/server"))
+    );
+
+    assert_eq!(
+        semantic_holder(&inspected(&files), "alpha/internal/server"),
+        Some("package:example.com/alpha".to_owned())
+    );
+}
+
+#[test]
+fn a_module_reads_the_directory_its_manifest_sits_in() {
+    let structure = analyze(&[ALPHA, ("go.mod", "module example.com/whole\n")]);
+
+    assert_eq!(
+        extent_of(&structure, "package:example.com/alpha"),
+        Extent::Directory(directory("alpha"))
+    );
+    assert_eq!(
+        extent_of(&structure, "package:example.com/whole"),
+        Extent::Root,
+        "the common case: the whole repository nests inside the module"
     );
 }
 
 #[test]
 fn the_module_root_directory_dissolves_into_its_package() {
-    let structure = analyze(&[
+    let files = [
         ALPHA,
         ("alpha/main.go", "package main\n\ntype Config struct{}\n"),
-    ]);
+    ];
+    let structure = analyze(&files);
     assert!(
-        !has_element(&structure, "alpha"),
-        "the module root directory is no element of its own"
+        reads_nothing(&structure, "alpha"),
+        "the go.mod module reads that directory already"
     );
+
     assert_eq!(
-        parent_of(&structure, "alpha/main.go#type:Config"),
+        semantic_holder(&inspected(&files), "alpha/main.go#type:Config"),
         Some("package:example.com/alpha".to_owned()),
-        "the root directory's declarations are the package's items"
+        "the root directory's declarations read as the package's items"
     );
 }
 
 #[test]
 fn a_directory_belongs_to_the_nearest_ancestor_directory_of_go_files() {
-    let structure = analyze(&[
+    let files = [
         ALPHA,
         ("alpha/a/a.go", "package a\n"),
         ("alpha/a/b/c/c.go", "package c\n"),
-    ]);
+    ];
     assert!(
-        !has_element(&structure, "alpha/a/b"),
+        reads_nothing(&analyze(&files), "alpha/a/b"),
         "a directory without go files is no package"
     );
     assert_eq!(
-        parent_of(&structure, "alpha/a/b/c"),
+        semantic_holder(&inspected(&files), "alpha/a/b/c"),
         Some("alpha/a".to_owned())
     );
 }
@@ -167,7 +252,7 @@ fn an_import_of_another_module_witnesses_the_dependency_between_the_packages() {
         ("beta/run.go", "package beta\n\nfunc Run() {}\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:example.com/alpha".to_owned(),
+        "alpha/main.go".to_owned(),
         "package:example.com/beta".to_owned()
     )));
 }
@@ -183,7 +268,7 @@ fn an_import_within_a_module_witnesses_the_dependency_between_its_directories() 
         ("alpha/internal/store/store.go", "package store\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:example.com/alpha".to_owned(),
+        "alpha/main.go".to_owned(),
         "alpha/internal/store".to_owned()
     )));
 }
@@ -202,7 +287,7 @@ fn a_qualified_reference_resolves_onto_the_exported_declaration() {
         ),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:example.com/alpha".to_owned(),
+        "alpha/main.go".to_owned(),
         "alpha/server/server.go#type:Handler".to_owned()
     )));
 }
@@ -221,7 +306,7 @@ fn an_aliased_import_resolves_references_through_the_alias() {
         ),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:example.com/alpha".to_owned(),
+        "alpha/main.go".to_owned(),
         "alpha/server/server.go#function:Start".to_owned()
     )));
 }
@@ -240,7 +325,7 @@ fn an_import_binds_the_package_clause_name_over_the_last_path_segment() {
         ),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:example.com/alpha".to_owned(),
+        "alpha/main.go".to_owned(),
         "alpha/internal/store-v2/store.go#function:Open".to_owned()
     )));
 }
@@ -259,10 +344,7 @@ fn a_reference_to_an_unexported_name_lands_on_its_directory() {
         ),
     ]);
     let dependencies = dependencies(&structure);
-    assert!(dependencies.contains(&(
-        "package:example.com/alpha".to_owned(),
-        "alpha/server".to_owned()
-    )));
+    assert!(dependencies.contains(&("alpha/main.go".to_owned(), "alpha/server".to_owned())));
     assert!(!dependencies.iter().any(|(_, to)| to.contains("#function:")));
 }
 
@@ -287,7 +369,7 @@ fn a_qualified_reference_speaks_from_the_declaration_whose_body_writes_it() {
         "alpha/store/store.go#function:Open"
     ));
     assert!(
-        depends(&structure, "alpha/app", "alpha/store"),
+        depends(&structure, "alpha/app/app.go", "alpha/store"),
         "the import itself is still the file's own plumbing"
     );
 }
@@ -426,7 +508,7 @@ fn a_method_on_a_generic_type_extends_the_plain_type() {
 }
 
 #[test]
-fn a_method_on_an_unexported_type_speaks_from_the_module() {
+fn a_method_on_an_unexported_type_speaks_from_the_file() {
     let structure = analyze(&[
         ALPHA,
         STORE,
@@ -438,7 +520,7 @@ fn a_method_on_an_unexported_type_speaks_from_the_module() {
     assert!(
         depends(
             &structure,
-            "alpha/app",
+            "alpha/app/app.go",
             "alpha/store/store.go#function:Open"
         ),
         "an unexported type is no element, so what its methods write is the module's"
@@ -531,7 +613,7 @@ fn a_signature_a_variable_and_a_type_declaration_witness_the_types_they_name() {
 }
 
 #[test]
-fn a_reference_outside_every_declaration_stays_with_the_module() {
+fn a_reference_outside_every_declaration_stays_with_the_file() {
     let structure = analyze(&[
         ALPHA,
         STORE,
@@ -542,7 +624,7 @@ fn a_reference_outside_every_declaration_stays_with_the_module() {
     ]);
     assert!(depends(
         &structure,
-        "alpha/app",
+        "alpha/app/app.go",
         "alpha/store/store.go#function:Open"
     ));
     assert!(
@@ -556,7 +638,7 @@ fn a_reference_outside_every_declaration_stays_with_the_module() {
 }
 
 #[test]
-fn an_unexported_declarations_references_stay_with_the_module() {
+fn an_unexported_declarations_references_stay_with_the_file() {
     let structure = analyze(&[
         ALPHA,
         STORE,
@@ -567,7 +649,7 @@ fn an_unexported_declarations_references_stay_with_the_module() {
     ]);
     assert!(depends(
         &structure,
-        "alpha/app",
+        "alpha/app/app.go",
         "alpha/store/store.go#function:Open"
     ));
     assert!(
@@ -590,7 +672,7 @@ fn exported_declarations_become_items_and_unexported_ones_stay_internals() {
         ),
     ]);
     assert_eq!(
-        children_of(&structure, "alpha/server"),
+        declared_in(&structure, "alpha/server/server.go"),
         [
             ("Start".to_owned(), ElementKind::Function),
             ("Handler".to_owned(), ElementKind::Type),
@@ -611,7 +693,7 @@ fn methods_do_not_become_items() {
         ),
     ]);
     assert_eq!(
-        children_of(&structure, "alpha/server"),
+        declared_in(&structure, "alpha/server/server.go"),
         [("Handler".to_owned(), ElementKind::Type)],
         "a method belongs to its type, not to the directory's namespace"
     );
@@ -632,7 +714,7 @@ fn test_files_declare_nothing_but_their_imports_witness_dependencies() {
         ),
     ]);
     assert!(
-        children_of(&structure, "alpha/server/server_test.go").is_empty(),
+        declared_in(&structure, "alpha/server/server_test.go").is_empty(),
         "nothing a test file declares can be imported, so nothing of it is surface"
     );
     let dependencies = dependencies(&structure);
@@ -647,46 +729,53 @@ fn test_files_declare_nothing_but_their_imports_witness_dependencies() {
 }
 
 #[test]
-fn a_test_file_is_a_module_among_the_files_of_its_directory() {
-    let structure = analyze(&[
+fn a_test_file_stands_inside_the_directory_it_is_built_with() {
+    let graph = inspected(&[
         ALPHA,
         ("alpha/server/server.go", "package server\n"),
         ("alpha/server/server_test.go", "package server\n"),
     ]);
-    let test_file = element(&structure, "alpha/server/server_test.go");
-    assert_eq!(test_file.element.primary_kind(), ElementKind::Module);
-    assert_eq!(test_file.element.primary_name().as_str(), "server_test");
+
     assert_eq!(
-        test_file.parent.as_ref().map(ElementId::as_str),
-        Some("alpha/server"),
-        "a test file is built with its directory, so it counts among its files"
+        semantic_holder(&graph, "alpha/server/server_test.go"),
+        Some("alpha/server".to_owned()),
+        "a test file is built with its directory, so it stands in it"
     );
 }
 
 #[test]
-fn every_file_of_a_directory_of_several_is_a_module_within_it() {
-    let structure = analyze(&[
+fn every_file_of_a_directory_stands_inside_the_module_it_belongs_to() {
+    let files = [
         ALPHA,
         ("alpha/internal/server/serve.go", "package server\n"),
         ("alpha/internal/server/routes.go", "package server\n"),
-    ]);
-    for (id, name) in [
-        ("alpha/internal/server/serve.go", "serve"),
-        ("alpha/internal/server/routes.go", "routes"),
+    ];
+    let structure = analyze(&files);
+    let graph = inspected(&files);
+    for id in [
+        "alpha/internal/server/serve.go",
+        "alpha/internal/server/routes.go",
     ] {
-        let file = element(&structure, id);
-        assert_eq!(file.element.primary_kind(), ElementKind::Module);
-        assert_eq!(file.element.primary_name().as_str(), name);
+        assert!(
+            reads_nothing(&structure, id),
+            "Go reads meaning into a directory, not into a file"
+        );
         assert_eq!(
-            file.parent.as_ref().map(ElementId::as_str),
-            Some("alpha/internal/server")
+            graph
+                .element(&ElementId::new(id).unwrap())
+                .map(cutaway_architecture::Element::primary_kind),
+            Some(ElementKind::File)
+        );
+        assert_eq!(
+            semantic_holder(&graph, id),
+            Some("alpha/internal/server".to_owned())
         );
     }
 }
 
 #[test]
-fn the_only_file_of_a_directory_dissolves_into_it() {
-    let structure = analyze(&[
+fn the_declarations_of_a_lone_file_read_as_the_items_of_its_directory() {
+    let files = [
         ALPHA,
         (
             "alpha/main.go",
@@ -696,20 +785,16 @@ fn the_only_file_of_a_directory_dissolves_into_it() {
             "alpha/server/server.go",
             "package server\n\ntype Handler struct{}\n",
         ),
-    ]);
-    assert!(
-        !has_element(&structure, "alpha/server/server.go"),
-        "one file groups nothing the directory does not already show"
-    );
+    ];
+    let structure = analyze(&files);
     assert_eq!(
-        children_of(&structure, "alpha/server"),
-        [("Handler".to_owned(), ElementKind::Type)],
-        "the lone file's declarations are the directory's items"
+        semantic_holder(&inspected(&files), "alpha/server/server.go#type:Handler"),
+        Some("alpha/server".to_owned()),
+        "one file adds no boundary the directory does not already show"
     );
-    assert!(dependencies(&structure).contains(&(
-        "package:example.com/alpha".to_owned(),
-        "alpha/server".to_owned()
-    )));
+    assert!(
+        dependencies(&structure).contains(&("alpha/main.go".to_owned(), "alpha/server".to_owned()))
+    );
 }
 
 #[test]
@@ -726,11 +811,11 @@ fn an_exported_declaration_belongs_to_the_file_that_declares_it() {
         ),
     ]);
     assert_eq!(
-        children_of(&structure, "alpha/server/serve.go"),
+        declared_in(&structure, "alpha/server/serve.go"),
         [("Serve".to_owned(), ElementKind::Function)]
     );
     assert_eq!(
-        children_of(&structure, "alpha/server/routes.go"),
+        declared_in(&structure, "alpha/server/routes.go"),
         [("Router".to_owned(), ElementKind::Type)]
     );
 }
@@ -766,28 +851,29 @@ fn an_import_witnesses_the_dependency_from_the_file_that_states_it() {
 
 #[test]
 fn the_files_of_the_module_root_sit_directly_in_the_package() {
-    let structure = analyze(&[
+    let files = [
         ALPHA,
         ("alpha/main.go", "package main\n"),
         ("alpha/config.go", "package main\n\ntype Config struct{}\n"),
-    ]);
+    ];
+    let structure = analyze(&files);
     assert!(
-        !has_element(&structure, "alpha"),
-        "the module root directory is still no element of its own"
-    );
-    assert_eq!(
-        parent_of(&structure, "alpha/main.go"),
-        Some("package:example.com/alpha".to_owned())
-    );
-    assert_eq!(
-        parent_of(&structure, "alpha/config.go"),
-        Some("package:example.com/alpha".to_owned())
+        reads_nothing(&structure, "alpha"),
+        "the module root directory is still no boundary of its own"
     );
     assert_eq!(
         parent_of(&structure, "alpha/config.go#type:Config"),
         Some("alpha/config.go".to_owned()),
-        "the root's declarations still belong to the file that declares them"
+        "the root's declarations belong to the file that declares them"
     );
+
+    let graph = inspected(&files);
+    for id in ["alpha/main.go", "alpha/config.go"] {
+        assert_eq!(
+            semantic_holder(&graph, id),
+            Some("package:example.com/alpha".to_owned())
+        );
+    }
 }
 
 #[test]
@@ -814,10 +900,10 @@ fn directories_the_go_tool_excludes_stay_outside_the_architecture() {
         ("alpha/server/_ignored.go", "package server\n"),
     ]);
     let directories: Vec<_> = structure
-        .elements
+        .interpretations
         .iter()
-        .filter(|e| e.element.primary_kind() == ElementKind::Module)
-        .map(|e| e.element.id.as_str())
+        .filter(|i| i.element.primary_kind() == ElementKind::Module)
+        .map(|i| i.element.id.as_str())
         .collect();
     assert!(directories.is_empty(), "found {directories:?}");
 }
@@ -846,14 +932,14 @@ fn an_import_of_a_missing_directory_stops_at_the_deepest_existing_one() {
         ("alpha/internal/store/store.go", "package store\n"),
     ]);
     assert!(dependencies(&structure).contains(&(
-        "package:example.com/alpha".to_owned(),
+        "alpha/main.go".to_owned(),
         "alpha/internal/store".to_owned()
     )));
 }
 
 #[test]
 fn a_nested_module_carves_its_subtree_out_of_the_enclosing_module() {
-    let structure = analyze(&[
+    let files = [
         ("go.mod", "module example.com/outer\n"),
         ("tools/go.mod", "module example.com/outer/tools\n"),
         (
@@ -861,19 +947,20 @@ fn a_nested_module_carves_its_subtree_out_of_the_enclosing_module() {
             "package main\n\nimport \"example.com/outer/tools/gen\"\n\nfunc main() { gen.Run() }\n",
         ),
         ("tools/gen/gen.go", "package gen\n\nfunc Run() {}\n"),
-    ]);
+    ];
+    let graph = inspected(&files);
     assert_eq!(
-        parent_of(&structure, "package:example.com/outer/tools"),
+        semantic_holder(&graph, "package:example.com/outer/tools"),
         Some("package:example.com/outer".to_owned()),
         "the nested module sits inside the enclosing module's directory"
     );
     assert_eq!(
-        parent_of(&structure, "tools/gen"),
+        semantic_holder(&graph, "tools/gen"),
         Some("package:example.com/outer/tools".to_owned()),
         "the deeper manifest owns the subtree"
     );
-    assert!(dependencies(&structure).contains(&(
-        "package:example.com/outer".to_owned(),
+    assert!(dependencies(&analyze(&files)).contains(&(
+        "main.go".to_owned(),
         "tools/gen/gen.go#function:Run".to_owned()
     )));
 }
@@ -900,13 +987,10 @@ fn a_blank_or_dot_import_still_witnesses_the_directory_dependency() {
     ]);
     let dependencies = dependencies(&structure);
     assert!(dependencies.contains(&(
-        "package:example.com/alpha".to_owned(),
+        "alpha/main.go".to_owned(),
         "alpha/internal/driver".to_owned()
     )));
-    assert!(dependencies.contains(&(
-        "package:example.com/alpha".to_owned(),
-        "alpha/internal/dsl".to_owned()
-    )));
+    assert!(dependencies.contains(&("alpha/main.go".to_owned(), "alpha/internal/dsl".to_owned())));
 }
 
 #[test]
@@ -919,8 +1003,8 @@ fn go_files_outside_every_module_stay_outside_the_architecture() {
             "package scripts\n\ntype Loose struct{}\n",
         ),
     ]);
-    assert!(!has_element(&structure, "scripts"));
-    assert!(!has_element(&structure, "scripts/loose.go#type:Loose"));
+    assert!(reads_nothing(&structure, "scripts"));
+    assert!(reads_nothing(&structure, "scripts/loose.go#type:Loose"));
 }
 
 #[test]
@@ -985,7 +1069,7 @@ func run(ctx interface{ Done() <-chan struct{} }) {
 "#;
     let structure = analyze(&[ALPHA, ("alpha/server/server.go", src)]);
     assert_eq!(
-        children_of(&structure, "alpha/server"),
+        declared_in(&structure, "alpha/server/server.go"),
         [
             ("Number".to_owned(), ElementKind::Type),
             ("Set".to_owned(), ElementKind::Type),
@@ -1038,10 +1122,7 @@ fn an_unexported_methods_writing_stays_the_types_own() {
         ),
     ]);
     assert!(
-        !structure
-            .elements
-            .iter()
-            .any(|e| e.element.id.as_str() == "alpha/config/config.go#function:Config.refresh"),
+        reads_nothing(&structure, "alpha/config/config.go#function:Config.refresh"),
         "an unexported method is the type's internals, not an element"
     );
     assert!(depends(
@@ -1052,41 +1133,33 @@ fn an_unexported_methods_writing_stays_the_types_own() {
 }
 
 #[test]
-fn every_buildable_source_and_every_manifest_is_claimed() {
-    let structure = analyze(&[
+fn every_file_of_a_go_project_stands_in_the_picture() {
+    let graph = inspected(&[
         ALPHA,
         ("alpha/main.go", "package main\n"),
         ("alpha/util/util.go", "package util\n"),
         ("alpha/vendor/dep/dep.go", "package dep\n"),
         ("alpha/notes.txt", "loose"),
     ]);
-    let claimed = |path: &str| structure.claimed.contains(&SourcePath::new(path).unwrap());
-    assert!(claimed("alpha/go.mod"));
-    assert!(claimed("alpha/main.go"));
-    assert!(claimed("alpha/util/util.go"));
-    assert!(
-        !claimed("alpha/vendor/dep/dep.go"),
-        "the go tool leaves vendored code out of the build, so no meaning was read from it"
-    );
-    assert!(!claimed("alpha/notes.txt"), "no meaning was read from it");
-}
 
-#[test]
-fn the_territory_of_a_module_is_its_manifest_directory() {
-    use cutaway_inspection::ports::source_tree::DirectoryPath;
-
-    let structure = analyze(&[ALPHA, BETA]);
+    for path in [
+        "alpha/go.mod",
+        "alpha/main.go",
+        "alpha/util/util.go",
+        "alpha/vendor/dep/dep.go",
+        "alpha/notes.txt",
+    ] {
+        let element = graph
+            .element(&ElementId::new(path).unwrap())
+            .unwrap_or_else(|| panic!("{path} stands in the picture"));
+        assert!(
+            element.fingerprint.is_some(),
+            "{path} must speak through its contents"
+        );
+    }
     assert_eq!(
-        structure.territories,
-        std::collections::BTreeMap::from([
-            (
-                DirectoryPath::new("alpha").unwrap(),
-                ElementId::new("package:example.com/alpha").unwrap()
-            ),
-            (
-                DirectoryPath::new("beta").unwrap(),
-                ElementId::new("package:example.com/beta").unwrap()
-            ),
-        ])
+        semantic_holder(&graph, "alpha/vendor/dep/dep.go"),
+        Some("package:example.com/alpha".to_owned()),
+        "the go tool builds no vendored file, so no module reads it - it is still there"
     );
 }

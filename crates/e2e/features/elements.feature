@@ -22,6 +22,7 @@ Feature: Planning whole elements
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
 
   Scenario: Planning the removal of a package severs what crosses its border
     When the removal of "model" is planned
@@ -49,6 +50,7 @@ Feature: Planning whole elements
 
   Scenario: A planned module appears inside the boundary that holds it
     When the boundaries are viewed
+    And the file tree is hidden
     And every boundary is opened
     And only the structure is shown
     And a "module" named "physics" is planned inside "model"
@@ -59,12 +61,14 @@ Feature: Planning whole elements
 
   Scenario: A connection drawn to a planned element survives the cut changing
     When the boundaries are viewed
+    And the file tree is hidden
     And every boundary is opened
     And only the structure is shown
     And a "module" named "physics" is planned inside "model"
     And a connection is drawn from "wiring" to "physics"
     Then the plan proposes a connection from "wiring" to "physics"
     When the boundaries are viewed
+    And the file tree is hidden
     And every boundary is opened
     And only the structure is shown
     Then the boundaries include "physics"

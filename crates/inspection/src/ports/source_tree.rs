@@ -139,13 +139,6 @@ impl DirectoryPath {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// Whether the file at `path` lies within this directory's subtree. The
-    /// root contains every file.
-    #[must_use]
-    pub fn contains(&self, path: &SourcePath) -> bool {
-        self.0.is_empty() || path.as_str().starts_with(&format!("{}/", self.0))
-    }
 }
 
 impl fmt::Display for DirectoryPath {
@@ -202,20 +195,6 @@ mod tests {
             DirectoryPath::new("crates/app/"),
             Err(InvalidDirectoryPath::TrailingSlash { .. })
         ));
-    }
-
-    #[test]
-    fn a_directory_contains_the_files_beneath_it_and_no_namesake_beside_it() {
-        let dir = DirectoryPath::new("crates/app").unwrap();
-        assert!(dir.contains(&SourcePath::new("crates/app/notes.txt").unwrap()));
-        assert!(dir.contains(&SourcePath::new("crates/app/deep/notes.txt").unwrap()));
-        assert!(!dir.contains(&SourcePath::new("crates/app-extras/notes.txt").unwrap()));
-        assert!(!dir.contains(&SourcePath::new("crates/app").unwrap()));
-    }
-
-    #[test]
-    fn the_root_directory_contains_every_file() {
-        assert!(DirectoryPath::root().contains(&SourcePath::new("anywhere/notes.txt").unwrap()));
     }
 
     #[test]

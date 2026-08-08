@@ -140,7 +140,10 @@ impl Comparison {
             })
             .collect();
         Self {
-            parents: containment_parents(&union),
+            // Both versions speak here, while the union draws the newer
+            // place alone: a change out of sight must still reach whichever
+            // boundary held the element, in either version.
+            parents: containment_parents(before.relations().chain(after.relations())),
             delta: ArchitectureDelta::between(before, after),
             elements,
             relations,
@@ -333,7 +336,15 @@ pub enum ElementChange {
 ///
 /// Where an id exists in both versions, the union takes the newer element:
 /// the comparison reads toward the change, so the picture shows the name,
-/// kind, and fingerprint the project is arriving at.
+/// kind, and fingerprint the project is arriving at - and the place too. An
+/// element that survives is drawn where it is arriving, so the union holds
+/// the newer version's `Contains` edge alone: a picture nests as a tree, and
+/// an element held by the place it left and the place it reached at once is
+/// no tree. What the older version made of the move is not lost - the
+/// readings still climb from both places, through [`Comparison::parents`].
+///
+/// A departing element keeps the older version's edges: nothing newer says
+/// where it stood.
 fn union_of(before: &ArchitectureGraph, after: &ArchitectureGraph) -> ArchitectureGraph {
     let mut union = ArchitectureGraph::new();
     let surviving_or_arriving = after.elements();
@@ -346,7 +357,14 @@ fn union_of(before: &ArchitectureGraph, after: &ArchitectureGraph) -> Architectu
             .expect("each id enters the union once: the after version wins the shared ones");
     }
 
-    let relations: BTreeSet<&Relation> = before.relations().chain(after.relations()).collect();
+    let superseded = |relation: &&Relation| {
+        relation.kind == RelationKind::Contains && after.element(&relation.to).is_some()
+    };
+    let relations: BTreeSet<&Relation> = before
+        .relations()
+        .filter(|relation| !superseded(relation))
+        .chain(after.relations())
+        .collect();
     for relation in relations {
         union
             .add_relation(relation.clone())
@@ -355,13 +373,13 @@ fn union_of(before: &ArchitectureGraph, after: &ArchitectureGraph) -> Architectu
     union
 }
 
-/// The containment parents of every contained element of a graph.
-fn containment_parents(graph: &ArchitectureGraph) -> BTreeMap<ElementId, BTreeSet<ElementId>> {
+/// The containment parents of every contained element, over relations from
+/// either version: an element that moved answers with both places it stood.
+fn containment_parents<'a>(
+    relations: impl Iterator<Item = &'a Relation>,
+) -> BTreeMap<ElementId, BTreeSet<ElementId>> {
     let mut parents: BTreeMap<ElementId, BTreeSet<ElementId>> = BTreeMap::new();
-    for relation in graph
-        .relations()
-        .filter(|relation| relation.kind == RelationKind::Contains)
-    {
+    for relation in relations.filter(|relation| relation.kind == RelationKind::Contains) {
         parents
             .entry(relation.to.clone())
             .or_default()

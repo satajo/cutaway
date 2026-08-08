@@ -60,7 +60,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{Element, ElementId, ElementName, Relation, RelationKind, SemanticKind};
 use cutaway_inspection::ports::source_analyzer::{
-    AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    Extent, Interpretation, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
 use cutaway_inspection::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
@@ -90,32 +90,16 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
         let packages = manifest::discover_packages(files)?;
         let catalog = ModuleCatalog::build(&packages, files);
 
-        let mut elements = Vec::new();
+        let mut interpretations: Vec<Interpretation> = packages
+            .iter()
+            .map(|package| Interpretation {
+                element: package_element(package),
+                extent: package_extent(package),
+            })
+            .collect();
         let mut relations = BTreeSet::new();
 
-        for (index, package) in packages.iter().enumerate() {
-            elements.push(AnalyzedElement {
-                element: package_element(package),
-                parent: enclosing_package(&packages, index).map(|p| package_id(&packages[p])),
-            });
-        }
-
-        for directory in catalog.directories() {
-            elements.push(AnalyzedElement {
-                element: directory.element(),
-                parent: directory.parent(&packages),
-            });
-        }
-
-        for module in catalog.modules() {
-            let Some(element) = module.element() else {
-                continue;
-            };
-            elements.push(AnalyzedElement {
-                element,
-                parent: module.parent(&packages),
-            });
-        }
+        interpretations.extend(catalog.modules().filter_map(Module::interpretation));
 
         // Two passes over the sources: a name resolves against the
         // declarations and re-exports of every file, so all files parse
@@ -166,18 +150,24 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
                 if !declaration.exported || !declared_ids.insert(declaration.element.id.clone()) {
                     continue;
                 }
-                elements.push(AnalyzedElement {
+                interpretations.push(Interpretation {
                     element: declaration.element.clone(),
-                    parent: Some(module.id()),
+                    extent: Extent::Within {
+                        file: file.path.clone(),
+                        parent: None,
+                    },
                 });
             }
             for declaration in &file.nested {
                 if !declared_ids.insert(declaration.element.id.clone()) {
                     continue;
                 }
-                elements.push(AnalyzedElement {
+                interpretations.push(Interpretation {
                     element: declaration.element.clone(),
-                    parent: Some(declaration.holder.clone()),
+                    extent: Extent::Within {
+                        file: file.path.clone(),
+                        parent: Some(declaration.holder.clone()),
+                    },
                 });
             }
 
@@ -185,46 +175,18 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
         }
 
         Ok(SourceStructure {
-            elements,
+            interpretations,
             relations: relations.into_iter().collect(),
-            claimed: claimed(&packages, &catalog, files),
-            territories: territories(&packages),
         })
     }
 }
 
-/// The files this analyzer read meaning from: every source file the catalog
-/// placed - it became a module element or dissolved into its package - and
-/// every manifest that named a package. A nameless manifest (a workspace
-/// root) named nothing, and vendored code under `node_modules` is never even
-/// read, so both stay unclaimed and keep a place of their own in the
-/// picture.
-fn claimed(
-    packages: &[DiscoveredPackage],
-    catalog: &ModuleCatalog,
-    files: &[SourceFile],
-) -> BTreeSet<SourcePath> {
-    files
-        .iter()
-        .map(|file| file.path.clone())
-        .filter(|path| catalog.module_of(path).is_some())
-        .chain(packages.iter().map(DiscoveredPackage::manifest))
-        .collect()
-}
-
-/// The directory each package occupies: what the language leaves unclaimed
-/// inside it still belongs inside the package's boundary.
-fn territories(packages: &[DiscoveredPackage]) -> BTreeMap<DirectoryPath, ElementId> {
-    packages
-        .iter()
-        .map(|package| {
-            (
-                DirectoryPath::new(&package.dir)
-                    .expect("a manifest directory carries no trailing slash"),
-                package_id(package),
-            )
-        })
-        .collect()
+/// What a package reads: the directory its manifest sits in - the whole
+/// repository for a manifest at the root.
+fn package_extent(package: &DiscoveredPackage) -> Extent {
+    Extent::directory(
+        DirectoryPath::new(&package.dir).expect("a manifest directory carries no trailing slash"),
+    )
 }
 
 /// Turns one file's imports and references into dependency relations. An
@@ -401,23 +363,6 @@ fn package_element(package: &DiscoveredPackage) -> Element {
 
 pub(crate) fn package_id(package: &DiscoveredPackage) -> ElementId {
     ElementId::new(format!("package:{}", package.name)).expect("a package name is never empty")
-}
-
-/// The package whose directory most closely encloses the package at `index`,
-/// for the workspace layout that nests one package inside another's
-/// directory.
-fn enclosing_package(packages: &[DiscoveredPackage], index: usize) -> Option<usize> {
-    let dir = &packages[index].dir;
-    packages
-        .iter()
-        .enumerate()
-        .filter(|(other, candidate)| {
-            *other != index
-                && !dir.is_empty()
-                && (candidate.dir.is_empty() || dir.starts_with(&format!("{}/", candidate.dir)))
-        })
-        .max_by_key(|(_, candidate)| candidate.dir.len())
-        .map(|(other, _)| other)
 }
 
 fn text_of(node: tree_sitter::Node<'_>, text: &str) -> String {

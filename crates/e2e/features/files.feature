@@ -1,10 +1,10 @@
 Feature: Files no language reads
 
-  Inspection is total: every file of the sources stands in the picture. A
-  file no language reads meaning from appears as itself, a plain file, where
-  it lies in the directory tree: grouped with its neighbours into the
-  directories that organize them, and inside the package whose directory
-  holds it. Between two versions such a file speaks through its contents:
+  Inspection is total: every file of the sources stands in the picture,
+  where it lies in the directory tree. A file no language reads meaning from
+  appears as itself, a plain file, grouped with its neighbours into the
+  directories that organize them and inside the package whose directory
+  holds it. Between two versions every file speaks through its contents:
   changed contents read as modified, and untouched contents read as nothing
   at all.
 

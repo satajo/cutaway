@@ -9,6 +9,7 @@ Feature: Planning on the boundary view
     And a package "engine" at "crates/engine"
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
 
   Scenario: Severing a connection marks it for removal
     When the connection from "app" to "engine" is severed
@@ -43,6 +44,7 @@ Feature: Planning on the boundary view
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And the connection from "viewer" to "model" is severed
     And the boundary "model" is expanded
     Then a connection goes from "viewer" to "runner"
@@ -68,10 +70,12 @@ Feature: Planning on the boundary view
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And every boundary is opened
     And only the structure is shown
     And a connection is drawn from "physics" to "wiring"
     And the boundaries are viewed
+    And the file tree is hidden
     Then a connection goes from "model" to "viewer"
     And the plan proposes a connection from "model" to "viewer"
 
@@ -90,6 +94,7 @@ Feature: Planning on the boundary view
       """
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
     And a connection is drawn from "model" to "viewer"
     And the boundary "viewer" is expanded
     Then a connection goes from "model" to "viewer"

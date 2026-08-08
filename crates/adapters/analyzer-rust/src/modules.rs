@@ -3,23 +3,25 @@
 //!
 //! Modules are files. Within a package the `src/` layout defines the module
 //! tree: `src/lib.rs` (or `src/main.rs` without a lib) is the crate root,
-//! `src/foo.rs` and `src/foo/mod.rs` are the module `foo`, and so on. Files
-//! outside `src/` (tests, benches, examples, `build.rs`) are crate roots of
-//! their own, contained directly by the package. Files outside every package
-//! attach to the project root.
+//! `src/foo.rs` and `src/foo/mod.rs` are the module `foo`, and so on. A
+//! module whose name also names a directory reads that whole directory too:
+//! `foo.rs` beside `foo/`, and `foo/` holding `foo/mod.rs`, are one boundary
+//! spanning both pieces, so the modules beneath it stand inside it.
 //!
-//! The crate root is the package's own code, not a module of its own: to
-//! every consumer the package and its root namespace are one boundary, named
-//! by the package. The root file therefore dissolves into the package - it
-//! is no element, its declarations are the package's items, its child
-//! modules are the package's modules, and a path that resolves to it lands
-//! on the package.
+//! A crate root is no module of its own: to every consumer the package and
+//! its root namespace are one boundary, named by the package. The root file
+//! therefore reads nothing - it stands where the tree puts it, holding the
+//! declarations written in it, and a path resolving to it lands on the
+//! package. The files outside `src/` (tests, benches, examples, `build.rs`,
+//! `src/bin/`) are crate roots of their own by the same law, so they too
+//! stand as plain files where the tree puts them - inside the package's
+//! directory rather than beside it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind};
-use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
-use cutaway_inspection::ports::source_tree::{SourceFile, SourcePath};
+use cutaway_inspection::ports::source_analyzer::{Extent, Interpretation, SourceAnalysisError};
+use cutaway_inspection::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
 use crate::declarations::DeclarationIndex;
 use crate::manifest::DiscoveredPackage;
@@ -43,6 +45,10 @@ pub struct Module {
     /// a crate root, or the file path relative to its package for standalone
     /// crate roots.
     name: String,
+    /// The directory this module reads together with its file, where the
+    /// sources hold one: `foo.rs` beside `foo/`, or `foo/mod.rs` inside
+    /// `foo/`.
+    expansion: Option<String>,
 }
 
 impl Module {
@@ -50,22 +56,28 @@ impl Module {
         self.id.clone()
     }
 
-    /// The module element this file contributes, and None for a crate root:
-    /// that file dissolves into its package, which is an element already.
-    pub fn element(&self) -> Option<Element> {
-        if self.is_crate_root() {
+    /// What this file lets the architecture read, and None for a crate root:
+    /// the package already is that boundary, so the file stands as itself.
+    pub fn interpretation(&self) -> Option<Interpretation> {
+        if self.segments.as_ref().is_none_or(Vec::is_empty) {
             return None;
         }
-        Some(Element::semantic(
-            self.id(),
-            SemanticKind::Module,
-            ElementName::new(&self.name).expect("a module name is never empty"),
-        ))
-    }
-
-    /// Whether this file is the root of its package's `src/` module tree.
-    fn is_crate_root(&self) -> bool {
-        self.segments.as_ref().is_some_and(Vec::is_empty)
+        let extent = match &self.expansion {
+            Some(directory) => Extent::FileAndDirectory {
+                file: self.path.clone(),
+                directory: DirectoryPath::new(directory)
+                    .expect("a module directory carries no trailing slash"),
+            },
+            None => Extent::File(self.path.clone()),
+        };
+        Some(Interpretation {
+            element: Element::semantic(
+                self.id(),
+                SemanticKind::Module,
+                ElementName::new(&self.name).expect("a module name is never empty"),
+            ),
+            extent,
+        })
     }
 }
 
@@ -145,6 +157,12 @@ impl ModuleCatalog {
             .filter(|f| f.path.as_str().ends_with("/lib.rs") || f.path.as_str() == "src/lib.rs")
             .map(|f| f.path.as_str())
             .collect();
+        // Whether a module also reads a directory depends on the tree, not on
+        // the file, so the directories that hold something are known first.
+        let directories: BTreeSet<&str> = files
+            .iter()
+            .flat_map(|file| ancestors(file.path.as_str()))
+            .collect();
 
         for file in files {
             let path = file.path.as_str();
@@ -190,6 +208,13 @@ impl ModuleCatalog {
                 _ => ElementId::new(path).expect("a source path is never empty"),
             };
 
+            let expansion = segments.as_ref().filter(|s| !s.is_empty()).and_then(|_| {
+                let candidate = path
+                    .strip_suffix("/mod.rs")
+                    .or_else(|| path.strip_suffix(".rs"))?;
+                directories.get(candidate).map(|found| (*found).to_owned())
+            });
+
             let index = catalog.modules.len();
             if let (Some(package), Some(segments)) = (package, segments.as_ref())
                 && let Some(existing) = catalog
@@ -211,6 +236,7 @@ impl ModuleCatalog {
                 package,
                 segments,
                 name,
+                expansion,
             });
         }
         Ok(catalog)
@@ -222,24 +248,6 @@ impl ModuleCatalog {
 
     pub fn module_of(&self, path: &SourcePath) -> Option<&Module> {
         self.by_path.get(path).map(|index| &self.modules[*index])
-    }
-
-    /// The containing element of a module: the nearest ancestor module in the
-    /// `src/` tree - the package itself when that ancestor is the crate root -
-    /// else its package, else nothing (the project root).
-    pub fn parent_of(&self, module: &Module, packages: &[DiscoveredPackage]) -> Option<ElementId> {
-        if let (Some(package), Some(segments)) = (module.package, module.segments.as_ref()) {
-            let mut prefix = segments.clone();
-            while !prefix.is_empty() {
-                prefix.pop();
-                if let Some(parent) = self.by_segments.get(&(package, prefix.clone()))
-                    && self.modules[*parent].path != module.path
-                {
-                    return Some(self.modules[*parent].id());
-                }
-            }
-        }
-        module.package.map(|p| package_id(&packages[p]))
     }
 
     /// Resolves one `use` path from `module` to the deepest project element
@@ -500,4 +508,16 @@ fn strip_dir<'a>(path: &'a str, dir: &str) -> &'a str {
             .and_then(|p| p.strip_prefix('/'))
             .unwrap_or(path)
     }
+}
+
+/// Every directory a path lies in, the repository root excluded: the root is
+/// no directory a module can span.
+fn ancestors(path: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut dir = path.rsplit_once('/').map_or("", |(head, _)| head);
+    while !dir.is_empty() {
+        found.push(dir);
+        dir = dir.rsplit_once('/').map_or("", |(head, _)| head);
+    }
+    found
 }

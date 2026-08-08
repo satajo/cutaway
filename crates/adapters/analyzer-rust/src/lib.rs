@@ -17,12 +17,16 @@
 //!
 //! Modules are files: the module tree of a package derives from the `src/`
 //! file layout (`foo.rs` or `foo/mod.rs`), and inline `mod` blocks stay
-//! items of their enclosing file. Only declarations with a visibility
-//! modifier become items: a bare declaration is the module's internals, and
-//! a path that names one lands on the module. The crate root file is the package's own
-//! code rather than a module of its own: its declarations are the package's
-//! items, its child modules are the package's modules, and an import that
-//! resolves to it lands on the package. Imports resolve down to the deepest
+//! items of their enclosing file. A module whose name also names a directory
+//! reads the file and that directory as one boundary, so what lies in `foo/`
+//! belongs to the module `foo`. Only declarations with a visibility modifier
+//! become items: a bare declaration is the module's internals, and a path
+//! that names one lands on the module. The crate root file is the package's
+//! own code rather than a module of its own, and so is every standalone
+//! crate root (`tests/`, `benches/`, `examples/`, `build.rs`, `src/bin/`):
+//! such a file reads nothing, it stands where the tree puts it holding the
+//! declarations written in it, and an import that resolves to a crate root
+//! lands on the package. Imports resolve down to the deepest
 //! file module that exists, one segment further onto a top-level
 //! declaration of that module when the path continues, and one more onto a
 //! public method the declaration holds (`Config::new`). A public method of
@@ -45,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{Element, ElementId, ElementName, Relation, RelationKind, SemanticKind};
 use cutaway_inspection::ports::source_analyzer::{
-    AnalyzedElement, SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    Extent, Interpretation, SourceAnalysisError, SourceAnalyzer, SourceStructure,
 };
 use cutaway_inspection::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
@@ -76,25 +80,21 @@ impl SourceAnalyzer for RustSourceAnalyzer {
         let packages = manifest::discover_packages(files)?;
         let catalog = ModuleCatalog::build(&packages, files)?;
 
-        let mut elements = Vec::new();
+        let mut interpretations = Vec::new();
         let mut relations = BTreeSet::new();
 
-        for (index, package) in packages.iter().enumerate() {
-            elements.push(AnalyzedElement {
+        for package in &packages {
+            interpretations.push(Interpretation {
                 element: package_element(package),
-                parent: enclosing_package(&packages, index).map(|p| package_id(&packages[p])),
+                extent: package_extent(package),
             });
         }
 
-        for module in catalog.modules() {
-            let Some(element) = module.element() else {
-                continue;
-            };
-            elements.push(AnalyzedElement {
-                element,
-                parent: catalog.parent_of(module, &packages),
-            });
-        }
+        interpretations.extend(
+            catalog
+                .modules()
+                .filter_map(modules::Module::interpretation),
+        );
 
         // Two passes over the sources: imports resolve against the
         // declarations and re-exports of every file, so all files parse
@@ -145,15 +145,21 @@ impl SourceAnalyzer for RustSourceAnalyzer {
                 if !declaration.public {
                     continue;
                 }
-                elements.push(AnalyzedElement {
+                interpretations.push(Interpretation {
                     element: declaration.element.clone(),
-                    parent: Some(module.id()),
+                    extent: Extent::Within {
+                        file: file.path.clone(),
+                        parent: None,
+                    },
                 });
             }
             for declaration in &file.nested {
-                elements.push(AnalyzedElement {
+                interpretations.push(Interpretation {
                     element: declaration.element.clone(),
-                    parent: Some(declaration.holder.clone()),
+                    extent: Extent::Within {
+                        file: file.path.clone(),
+                        parent: Some(declaration.holder.clone()),
+                    },
                 });
             }
 
@@ -161,45 +167,19 @@ impl SourceAnalyzer for RustSourceAnalyzer {
         }
 
         Ok(SourceStructure {
-            elements,
+            interpretations,
             relations: relations.into_iter().collect(),
-            claimed: claimed(&packages, &catalog, files),
-            territories: territories(&packages),
         })
     }
 }
 
-/// The files this analyzer read meaning from: every `.rs` file the catalog
-/// placed - it became a module element or dissolved into its package - and
-/// every manifest that named a package. A workspace-only manifest named
-/// nothing, so it stays unclaimed and keeps a place of its own in the
-/// picture.
-fn claimed(
-    packages: &[DiscoveredPackage],
-    catalog: &ModuleCatalog,
-    files: &[SourceFile],
-) -> BTreeSet<SourcePath> {
-    files
-        .iter()
-        .map(|file| file.path.clone())
-        .filter(|path| catalog.module_of(path).is_some())
-        .chain(packages.iter().map(DiscoveredPackage::manifest))
-        .collect()
-}
-
-/// The directory each package occupies: what the language leaves unclaimed
-/// inside it still belongs inside the package's boundary.
-fn territories(packages: &[DiscoveredPackage]) -> BTreeMap<DirectoryPath, ElementId> {
-    packages
-        .iter()
-        .map(|package| {
-            (
-                DirectoryPath::new(&package.dir)
-                    .expect("a manifest directory carries no trailing slash"),
-                package_id(package),
-            )
-        })
-        .collect()
+/// What a package reads: the directory its manifest sits in - the whole
+/// repository for a manifest at the root, because a repository whose root
+/// manifest names a package is that package's territory.
+fn package_extent(package: &DiscoveredPackage) -> Extent {
+    Extent::directory(
+        DirectoryPath::new(&package.dir).expect("a manifest directory carries no trailing slash"),
+    )
 }
 
 /// Turns one file's imports and references into dependency relations. A
@@ -327,22 +307,6 @@ fn package_element(package: &DiscoveredPackage) -> Element {
 
 pub(crate) fn package_id(package: &DiscoveredPackage) -> ElementId {
     ElementId::new(format!("package:{}", package.name)).expect("a package name is never empty")
-}
-
-/// The package whose directory most closely encloses the package at `index`,
-/// for the rare case of a package nested inside another package's directory.
-fn enclosing_package(packages: &[DiscoveredPackage], index: usize) -> Option<usize> {
-    let dir = &packages[index].dir;
-    packages
-        .iter()
-        .enumerate()
-        .filter(|(other, candidate)| {
-            *other != index
-                && !dir.is_empty()
-                && (candidate.dir.is_empty() || dir.starts_with(&format!("{}/", candidate.dir)))
-        })
-        .max_by_key(|(_, candidate)| candidate.dir.len())
-        .map(|(other, _)| other)
 }
 
 #[cfg(test)]

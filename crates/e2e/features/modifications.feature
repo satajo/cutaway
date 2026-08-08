@@ -11,6 +11,7 @@ Feature: Planning modifications of what stays
     And a package "engine" at "crates/engine"
     When the project is inspected
     And the boundaries are viewed
+    And the file tree is hidden
 
   Scenario: A rename records the name the element takes
     When the rename of "engine" to "motor" is planned
