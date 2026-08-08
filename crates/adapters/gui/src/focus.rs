@@ -173,6 +173,12 @@ impl Containment {
         self.children.get(frame).map_or(&[], Vec::as_slice)
     }
 
+    /// Every boundary that holds something, for a walk that reads each
+    /// frame's contents against each other.
+    pub(crate) fn frames(&self) -> impl Iterator<Item = &ElementId> {
+        self.children.keys()
+    }
+
     /// The boundary that directly holds this one, if any.
     pub(crate) fn parent(&self, id: &ElementId) -> Option<&ElementId> {
         self.parents.get(id)

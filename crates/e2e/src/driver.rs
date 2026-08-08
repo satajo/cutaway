@@ -6,6 +6,7 @@ use cutaway_analyzer_rust::RustSourceAnalyzer;
 use cutaway_analyzer_typescript::TypeScriptSourceAnalyzer;
 use cutaway_architecture::{
     ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
+    SemanticKind,
 };
 use cutaway_comparison::{Comparison, ElementChange, Presence};
 use cutaway_inspection::inspect;
@@ -110,17 +111,29 @@ pub trait ApplicationDriver {
     fn working_plan(&self) -> Plan;
 }
 
-/// The kind a scenario names in words.
-fn element_kind(kind: &str) -> Result<ElementKind, String> {
+/// The kind a scenario plans a new boundary under. Only what a language
+/// reads is planned: the directories and files a project lies in are read
+/// out of the sources, never stated ahead of them, so a scenario asking for
+/// one is refused with that law.
+fn planned_kind(kind: &str) -> Result<SemanticKind, String> {
     match kind {
-        "package" => Ok(ElementKind::Package),
-        "directory" => Ok(ElementKind::Directory),
-        "module" => Ok(ElementKind::Module),
-        "file" => Ok(ElementKind::File),
-        "type" => Ok(ElementKind::Type),
-        "function" => Ok(ElementKind::Function),
+        "package" => Ok(SemanticKind::Package),
+        "module" => Ok(SemanticKind::Module),
+        "type" => Ok(SemanticKind::Type),
+        "function" => Ok(SemanticKind::Function),
+        "directory" | "file" => Err(format!(
+            "a {kind} is read out of the source tree, never planned"
+        )),
         other => Err(format!("unknown element kind {other}")),
     }
+}
+
+/// The boundary that directly holds this one, if any.
+fn frame_of<'a>(graph: &'a ArchitectureGraph, id: &ElementId) -> Option<&'a ElementId> {
+    graph
+        .relations()
+        .find(|relation| relation.kind == RelationKind::Contains && relation.to == *id)
+        .map(|relation| &relation.from)
 }
 
 /// The kind a scenario names by the plural word the picture speaks.
@@ -281,14 +294,56 @@ impl InProcessDriver {
     /// The name the picture draws on one boundary: the aspect the vocabulary
     /// lets speak, and what the node reads as by default where the cut
     /// renders neither aspect.
-    fn spoken_name(&self, element: &Element) -> String {
-        self.cut
+    ///
+    /// A name a boundary beside it speaks too names neither of them - two
+    /// TypeScript modules called after the stem of an `index.ts` land in one
+    /// frame - so the name falls back to the place in the tree, which
+    /// carries the segments of every directory that dissolved into it, and
+    /// to the id where even the places read alike. The interface labels its
+    /// boxes by the same law, so a scenario reads what a reader sees.
+    fn spoken_name(&self, graph: &ArchitectureGraph, element: &Element) -> String {
+        let mine = self.ladder(element);
+        let mut beside: Vec<Vec<&str>> = Vec::new();
+        if let Some(frame) = frame_of(graph, &element.id) {
+            for relation in graph.relations() {
+                if relation.kind == RelationKind::Contains
+                    && relation.from == *frame
+                    && relation.to != element.id
+                    && let Some(other) = graph.element(&relation.to)
+                {
+                    beside.push(self.ladder(other));
+                }
+            }
+        }
+        for (rung, name) in mine.iter().enumerate() {
+            if !beside.iter().any(|other| other.get(rung) == Some(name)) {
+                return (*name).to_owned();
+            }
+        }
+        // Every ladder ends at the id, and no two boundaries carry one id,
+        // so the walk above always answers.
+        element.id.to_string()
+    }
+
+    /// The names one boundary falls back through: the reading the vocabulary
+    /// speaks, then the place in the tree it stands at, then its id.
+    fn ladder<'a>(&self, element: &'a Element) -> Vec<&'a str> {
+        let spoken = self
+            .cut
             .as_ref()
             .and_then(|cut| element.speaks_as(&cut.kinds))
             .map_or_else(
-                || element.primary_name().to_string(),
-                |(_, name)| name.to_string(),
-            )
+                || element.primary_name().as_str(),
+                |(_, name)| name.as_str(),
+            );
+        let place = element
+            .substrate_aspect()
+            .map(|aspect| aspect.name.as_str())
+            .filter(|place| *place != spoken);
+        [Some(spoken), place, Some(element.id.as_str())]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Puts one planned element in the plan and in the picture, exactly as
@@ -297,7 +352,7 @@ impl InProcessDriver {
     fn plan_addition(
         &mut self,
         parent: Option<&ElementId>,
-        kind: ElementKind,
+        kind: SemanticKind,
         name: &str,
     ) -> Result<(), String> {
         let name = ElementName::new(name).map_err(|error| error.to_string())?;
@@ -357,9 +412,10 @@ impl InProcessDriver {
 
     /// The name a scenario knows one element by.
     fn display_name(&self, id: &ElementId) -> String {
-        self.viewed()
-            .element(id)
-            .map_or_else(|| id.to_string(), |element| self.spoken_name(element))
+        self.viewed().element(id).map_or_else(
+            || id.to_string(),
+            |element| self.spoken_name(self.viewed(), element),
+        )
     }
 }
 
@@ -530,16 +586,17 @@ impl ApplicationDriver for InProcessDriver {
         self.view()
             .graph
             .elements()
-            .map(|element| self.spoken_name(element))
+            .map(|element| self.spoken_name(&self.view().graph, element))
             .collect()
     }
 
     fn connections(&self) -> Vec<(String, String)> {
         let view = self.view();
         let name = |id: &ElementId| {
-            view.graph
-                .element(id)
-                .map_or_else(|| id.to_string(), |element| self.spoken_name(element))
+            view.graph.element(id).map_or_else(
+                || id.to_string(),
+                |element| self.spoken_name(&view.graph, element),
+            )
         };
         view.provenance
             .keys()
@@ -624,7 +681,7 @@ impl ApplicationDriver for InProcessDriver {
 
     fn add_element_inside(&mut self, parent: &str, kind: &str, name: &str) -> Result<(), String> {
         let parent = self.boundary_id(parent)?;
-        self.plan_addition(Some(&parent), element_kind(kind)?, name)
+        self.plan_addition(Some(&parent), planned_kind(kind)?, name)
     }
 
     fn add_package(&mut self, name: &str) -> Result<(), String> {
@@ -637,7 +694,7 @@ impl ApplicationDriver for InProcessDriver {
             .elements()
             .find(|element| element.primary_kind() == ElementKind::Project)
             .map(|element| element.id.clone());
-        self.plan_addition(root.as_ref(), ElementKind::Package, name)
+        self.plan_addition(root.as_ref(), SemanticKind::Package, name)
     }
 
     fn plan_rename(&mut self, name: &str, to: &str) -> Result<(), String> {
@@ -723,7 +780,7 @@ impl ApplicationDriver for InProcessDriver {
             .relations()
             .filter(|relation| relation.kind == RelationKind::Contains && relation.from == id)
             .filter_map(|relation| view.graph.element(&relation.to))
-            .map(|element| self.spoken_name(element))
+            .map(|element| self.spoken_name(&view.graph, element))
             .collect()
     }
 

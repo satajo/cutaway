@@ -4,7 +4,7 @@
 //! while the domain evolves. Parsing validates back into domain invariants;
 //! a file that fails validation is corrupt, not partially usable.
 
-use cutaway_architecture::{Element, ElementId, ElementKind, ElementName, Relation, RelationKind};
+use cutaway_architecture::{Element, ElementId, ElementName, Relation, RelationKind, SemanticKind};
 use cutaway_planning::ports::plan_store::PlanStoreError;
 use cutaway_planning::{
     Modification, ModificationKind, Note, Plan, ProposedChange, SplitParts, Subject,
@@ -49,6 +49,13 @@ struct StoredElement {
     kind: StoredKind,
 }
 
+/// The kind of an element a plan adds.
+///
+/// Only what a language reads is planned, so writing a plan turns a
+/// [`SemanticKind`] into one of these and nothing else can be written.
+/// `Directory` and `File` survive as variants a file may still carry:
+/// reading one is refused with the law that governs it, which a variant
+/// serde does not know would turn into an unknown-variant parse error.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum StoredKind {
@@ -234,13 +241,22 @@ impl StoredModificationKind {
 impl StoredAction {
     fn from_change(change: &ProposedChange) -> Self {
         match change {
-            ProposedChange::AddElement(element) => Self::AddElement {
-                element: StoredElement {
-                    id: element.id.as_str().to_owned(),
-                    name: element.primary_name().as_str().to_owned(),
-                    kind: StoredKind::from_kind(element.primary_kind()),
-                },
-            },
+            ProposedChange::AddElement(element) => {
+                // Both ways into a plan - the addition the application
+                // states and the file this one reads - carry a
+                // `SemanticKind`, so a planned element always has the
+                // reading this writes.
+                let planned = element
+                    .semantic_aspect()
+                    .expect("a plan states what a language reads, and nothing else");
+                Self::AddElement {
+                    element: StoredElement {
+                        id: element.id.as_str().to_owned(),
+                        name: planned.name.as_str().to_owned(),
+                        kind: StoredKind::from_semantic(planned.kind),
+                    },
+                }
+            }
             ProposedChange::RemoveElement(id) => Self::RemoveElement {
                 element: id.as_str().to_owned(),
             },
@@ -255,9 +271,9 @@ impl StoredAction {
 
     fn into_change(self) -> Result<ProposedChange, PlanStoreError> {
         Ok(match self {
-            Self::AddElement { element } => ProposedChange::AddElement(Element::of_kind(
+            Self::AddElement { element } => ProposedChange::AddElement(Element::semantic(
                 element_id(element.id)?,
-                element.kind.into_kind(),
+                element.kind.into_semantic()?,
                 ElementName::new(element.name).map_err(corrupt)?,
             )),
             Self::RemoveElement { element } => ProposedChange::RemoveElement(element_id(element)?),
@@ -272,27 +288,37 @@ impl StoredAction {
 }
 
 impl StoredKind {
-    fn from_kind(kind: ElementKind) -> Self {
+    fn from_semantic(kind: SemanticKind) -> Self {
         match kind {
-            ElementKind::Project => Self::Project,
-            ElementKind::Package => Self::Package,
-            ElementKind::Directory => Self::Directory,
-            ElementKind::Module => Self::Module,
-            ElementKind::File => Self::File,
-            ElementKind::Function => Self::Function,
-            ElementKind::Type => Self::Type,
+            SemanticKind::Project => Self::Project,
+            SemanticKind::Package => Self::Package,
+            SemanticKind::Module => Self::Module,
+            SemanticKind::Function => Self::Function,
+            SemanticKind::Type => Self::Type,
         }
     }
 
-    fn into_kind(self) -> ElementKind {
+    /// The reading a stored addition states. A plan states what a language
+    /// is to read in the sources; the directories and files a repository
+    /// lies in are found by inspecting it and never stated ahead of it, so a
+    /// file that plans one of them is refused with that law rather than
+    /// loaded into a plan the application itself could never have written.
+    fn into_semantic(self) -> Result<SemanticKind, PlanStoreError> {
         match self {
-            Self::Project => ElementKind::Project,
-            Self::Package => ElementKind::Package,
-            Self::Directory => ElementKind::Directory,
-            Self::Module => ElementKind::Module,
-            Self::File => ElementKind::File,
-            Self::Function => ElementKind::Function,
-            Self::Type => ElementKind::Type,
+            Self::Project => Ok(SemanticKind::Project),
+            Self::Package => Ok(SemanticKind::Package),
+            Self::Module => Ok(SemanticKind::Module),
+            Self::Function => Ok(SemanticKind::Function),
+            Self::Type => Ok(SemanticKind::Type),
+            Self::Directory | Self::File => Err(PlanStoreError::Corrupt {
+                reason: format!(
+                    "a {} is read out of the source tree, never planned",
+                    match self {
+                        Self::Directory => "directory",
+                        _ => "file",
+                    }
+                ),
+            }),
         }
     }
 }

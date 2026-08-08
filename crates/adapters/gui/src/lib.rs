@@ -61,6 +61,7 @@ use std::sync::mpsc;
 
 use cutaway_architecture::{
     ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
+    SemanticKind,
 };
 use cutaway_inspection::ports::project_history::{Version, VersionId};
 use cutaway_lenses::{BoundaryView, Cut, boundary_view};
@@ -234,7 +235,10 @@ struct Session {
 #[derive(Debug, Clone)]
 struct Addition {
     name: String,
-    kind: ElementKind,
+    /// Only what a language reads is planned: the directories and files a
+    /// project lies in are read out of the sources, never stated ahead of
+    /// them.
+    kind: SemanticKind,
 }
 
 impl Default for Addition {
@@ -243,7 +247,7 @@ impl Default for Addition {
             name: String::new(),
             // A module is what fits inside most boundaries; a panel that
             // cannot hold a module offers its own kinds and picks the first.
-            kind: ElementKind::Module,
+            kind: SemanticKind::Module,
         }
     }
 }
@@ -323,10 +327,11 @@ impl Session {
         let viewed = &self.viewed;
         let weights = &self.weights;
         let renames = &self.renames;
+        let vocabulary = &self.cut.kinds;
         self.scene = boundary_view(&self.viewed, &self.cut)
             .map_err(|error| error.to_string())
             .map(|view| {
-                let layout = layout::compute(&view.graph, weights, renames);
+                let layout = layout::compute(&view.graph, weights, vocabulary, renames);
                 Scene {
                     generation,
                     containment: Containment::of(&view.graph),
@@ -383,7 +388,7 @@ impl Session {
                 let Selection::Edge(relation) = &selection else {
                     return None;
                 };
-                let labels = Labels::of(&before.graph);
+                let labels = Labels::of(&before.graph, &self.cut.kinds);
                 Some(following_a_piece(
                     &labels.qualified(&relation.from),
                     &labels.qualified(&relation.to),
@@ -826,7 +831,7 @@ impl Session {
     /// viewed architecture carries the plan's additions, so the reader draws
     /// dependencies to it and annotates it exactly as they would a boundary
     /// the sources declare.
-    fn add_element(&mut self, parent: Option<&ElementId>, kind: ElementKind) {
+    fn add_element(&mut self, parent: Option<&ElementId>, kind: SemanticKind) {
         let name = match ElementName::new(self.addition.name.trim()) {
             Ok(name) => name,
             Err(error) => {
@@ -1538,7 +1543,13 @@ fn mode_requested(ctx: &egui::Context) -> Option<Mode> {
 
 /// The search and the keys that stand over the explored picture.
 fn explore_overlay(ctx: &egui::Context, session: &mut Session) {
-    let found = palette::show(ctx, &mut session.palette, &session.graph, session.viewport);
+    let found = palette::show(
+        ctx,
+        &mut session.palette,
+        &session.graph,
+        &session.cut.kinds,
+        session.viewport,
+    );
     if let Some(target) = found {
         session.locate(&target);
     }
@@ -1676,7 +1687,8 @@ fn project_tools(ui: &mut egui::Ui, session: &mut Session) {
     // stand, together with the way back out.
     if let Some(scope) = session.cut.scope.clone() {
         ui.separator();
-        let name = Labels::renaming(&session.viewed, &session.renames).qualified(&scope);
+        let name = Labels::renaming(&session.viewed, &session.cut.kinds, &session.renames)
+            .qualified(&scope);
         ui.label(format!("Focused on {name}"));
         if ui
             .button("Show everything")
@@ -1703,7 +1715,8 @@ fn project_tools(ui: &mut egui::Ui, session: &mut Session) {
     // A merge is asked for on the panel and answered on the canvas, so the
     // toolbar says what the next click means.
     if let Some(subject) = session.merging.clone() {
-        let folds = Labels::renaming(&session.viewed, &session.renames).qualified(&subject);
+        let folds = Labels::renaming(&session.viewed, &session.cut.kinds, &session.renames)
+            .qualified(&subject);
         if ui
             .selectable_label(true, "Merging: pick the element to merge into")
             .on_hover_text(format!(
@@ -1758,6 +1771,7 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
             world: scene.world,
             edges: &scene.edges,
             nodes: &scene.nodes,
+            vocabulary: &session.cut.kinds,
             renames: &session.renames,
             selected_edge,
             selected_node,
@@ -1973,7 +1987,7 @@ mod tests {
         let mut plan = Plan::new();
         for change in addition_of_element(
             Some(&id(parent)),
-            ElementKind::Module,
+            SemanticKind::Module,
             &ElementName::new(name).unwrap(),
         )
         .unwrap()

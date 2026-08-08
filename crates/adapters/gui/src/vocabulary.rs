@@ -67,9 +67,10 @@ pub(crate) fn chips(
                     label.to_lowercase(),
                     position + 1
                 ))
-                // "The architecture" rather than "this project": a Rust
-                // repository plainly holds filesystem directories, yet its
-                // architecture holds no directory elements - the sentence
+                // "The architecture" rather than "this project": a
+                // repository holds directories on disk that stand as no
+                // boundary of their own - a directory holding one thing
+                // dissolves into the name of what it held - so the sentence
                 // must not read as false about the files on disk.
                 .on_disabled_hover_text(format!(
                     "The architecture holds no {} to show or hide",
@@ -186,6 +187,33 @@ mod tests {
         assert_eq!(
             present_kinds(&graph),
             BTreeSet::from([ElementKind::Package, ElementKind::Module])
+        );
+    }
+
+    #[test]
+    fn a_boundary_of_two_readings_presents_both_of_them() {
+        use cutaway_architecture::{Semantic, SemanticKind, Substrate, SubstrateKind};
+
+        let mut graph = ArchitectureGraph::new();
+        graph
+            .add_element(Element::fused(
+                ElementId::new("src/element.rs").unwrap(),
+                Semantic {
+                    kind: SemanticKind::Module,
+                    name: ElementName::new("element").unwrap(),
+                },
+                Substrate {
+                    kind: SubstrateKind::File,
+                    name: ElementName::new("element.rs").unwrap(),
+                },
+                None,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            present_kinds(&graph),
+            BTreeSet::from([ElementKind::Module, ElementKind::File]),
+            "either chip acts on a boundary the two readings agree on"
         );
     }
 

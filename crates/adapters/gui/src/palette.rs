@@ -21,13 +21,13 @@
 
 use std::collections::BTreeSet;
 
-use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind};
+use cutaway_architecture::{ArchitectureGraph, Element, ElementId, ElementKind};
 use eframe::egui;
 use eframe::egui::text::{CCursor, CCursorRange};
 
 use crate::focus::Containment;
 use crate::glyph;
-use crate::label::kind_symbol;
+use crate::label::{kind_symbol, spoken};
 
 /// How many results one glance reads. Past this a reader types another
 /// letter rather than looks further down.
@@ -194,27 +194,54 @@ pub(crate) struct Hit {
     pub(crate) container: String,
 }
 
+/// How well one element answers a query: the best any of its names manages.
+///
+/// A boundary may carry two names - the module `element` is the file
+/// `element.rs` - and a reader who types either means the same boundary.
+/// Which of the two the row then shows is the vocabulary's decision, not
+/// the query's, so a fused node found by its file name still reads as the
+/// module the picture draws.
+fn answering(element: &Element, query: &str) -> Option<Quality> {
+    element
+        .semantic_aspect()
+        .map(|aspect| aspect.name.as_str())
+        .into_iter()
+        .chain(
+            element
+                .substrate_aspect()
+                .map(|aspect| aspect.name.as_str()),
+        )
+        .filter_map(|name| quality(name, query))
+        .max()
+}
+
 /// The elements answering a query, the most direct answer first.
 ///
 /// The search reads the whole graph however the picture is cut: an element
 /// hidden inside a closed package is exactly what a reader searches for. The
 /// project root stands for the whole picture and answers nothing, so it
 /// alone stays out.
-pub(crate) fn hits(graph: &ArchitectureGraph, query: &str) -> Vec<Hit> {
+///
+/// Every row reads under the vocabulary the picture speaks, so accepting one
+/// leads to a box carrying the very name the row showed. An element no
+/// reading of which the vocabulary renders is drawn nowhere yet answers all
+/// the same - reaching it is what the search is for - and it reads under the
+/// name it carries by default until the picture opens onto it.
+pub(crate) fn hits(
+    graph: &ArchitectureGraph,
+    vocabulary: &BTreeSet<ElementKind>,
+    query: &str,
+) -> Vec<Hit> {
+    let spoken_name = |element: &Element| spoken(element, vocabulary).1.to_string();
     let mut ranked: Vec<_> = graph
         .elements()
         .filter(|element| element.primary_kind() != ElementKind::Project)
-        .filter_map(|element| Some((quality(element.primary_name().as_str(), query)?, element)))
+        .filter_map(|element| Some((answering(element, query)?, element)))
         .collect();
     ranked.sort_by(|(left_quality, left), (right_quality, right)| {
         right_quality
             .cmp(left_quality)
-            .then_with(|| {
-                left.primary_name()
-                    .as_str()
-                    .len()
-                    .cmp(&right.primary_name().as_str().len())
-            })
+            .then_with(|| spoken_name(left).len().cmp(&spoken_name(right).len()))
             .then_with(|| left.id.cmp(&right.id))
     });
     let containment = Containment::of(graph);
@@ -223,17 +250,23 @@ pub(crate) fn hits(graph: &ArchitectureGraph, query: &str) -> Vec<Hit> {
         .take(RESULT_LIMIT)
         .map(|(_, element)| Hit {
             id: element.id.clone(),
-            name: element.primary_name().to_string(),
-            kind: element.primary_kind(),
-            container: container_of(graph, &containment, &element.id),
+            name: spoken_name(element),
+            kind: spoken(element, vocabulary).0,
+            container: container_of(graph, vocabulary, &containment, &element.id),
         })
         .collect()
 }
 
-/// The names of the boundaries above an element, outermost first. The
-/// project root names the whole picture, and a line that says it of every
-/// result says nothing, so it stays out.
-fn container_of(graph: &ArchitectureGraph, containment: &Containment, id: &ElementId) -> String {
+/// The names of the boundaries above an element, outermost first, each under
+/// the reading the picture speaks it as. The project root names the whole
+/// picture, and a line that says it of every result says nothing, so it
+/// stays out.
+fn container_of(
+    graph: &ArchitectureGraph,
+    vocabulary: &BTreeSet<ElementKind>,
+    containment: &Containment,
+    id: &ElementId,
+) -> String {
     let mut names = Vec::new();
     let mut seen = BTreeSet::new();
     let mut current = containment.parent(id);
@@ -244,7 +277,7 @@ fn container_of(graph: &ArchitectureGraph, containment: &Containment, id: &Eleme
         if let Some(element) = graph.element(frame)
             && element.primary_kind() != ElementKind::Project
         {
-            names.push(element.primary_name().to_string());
+            names.push(spoken(element, vocabulary).1.to_string());
         }
         current = containment.parent(frame);
     }
@@ -316,6 +349,7 @@ pub(crate) fn show(
     ctx: &egui::Context,
     palette: &mut Palette,
     graph: &ArchitectureGraph,
+    vocabulary: &BTreeSet<ElementKind>,
     canvas: egui::Rect,
 ) -> Option<ElementId> {
     // Ctrl+F opens the palette wherever the keyboard is, a half-written note
@@ -357,7 +391,7 @@ pub(crate) fn show(
                 .show(ui, |ui| {
                     ui.set_width(WIDTH);
                     field(ui, palette);
-                    let hits = hits(graph, &palette.query);
+                    let hits = hits(graph, vocabulary, &palette.query);
                     move_highlight(palette, &asked, hits.len());
                     rows(ui, palette, &hits, asked.contains(&Command::Accept))
                 })
@@ -547,6 +581,11 @@ mod tests {
         hits.iter().map(|hit| hit.name.as_str()).collect()
     }
 
+    /// The vocabulary a picture that hides nothing speaks.
+    fn drawn() -> BTreeSet<ElementKind> {
+        cutaway_lenses::Cut::whole().kinds
+    }
+
     #[test]
     fn a_query_matches_a_name_holding_its_letters_in_order() {
         assert_eq!(quality("SourceTree", "srtr"), Some(Quality::Scattered));
@@ -599,7 +638,7 @@ mod tests {
     #[test]
     fn the_most_direct_answer_comes_first() {
         assert_eq!(
-            names(&hits(&graph(), "sourcetree")),
+            names(&hits(&graph(), &drawn(), "sourcetree")),
             ["SourceTree", "ports::source_tree"]
         );
     }
@@ -610,14 +649,14 @@ mod tests {
         add(&mut graph, "long", "planning_of_notes", ElementKind::Module);
         add(&mut graph, "short", "planning", ElementKind::Module);
         assert_eq!(
-            names(&hits(&graph, "plan")),
+            names(&hits(&graph, &drawn(), "plan")),
             ["planning", "planning_of_notes"]
         );
     }
 
     #[test]
     fn a_result_names_the_boundaries_above_it() {
-        let found = hits(&graph(), "SourceTree");
+        let found = hits(&graph(), &drawn(), "SourceTree");
         assert_eq!(
             found[0].container,
             ["inspection", "ports", "ports::source_tree"].join(glyph::CONTAINER_STEP),
@@ -627,7 +666,7 @@ mod tests {
 
     #[test]
     fn the_project_root_never_answers_a_query() {
-        assert!(hits(&graph(), "cutaway").is_empty());
+        assert!(hits(&graph(), &drawn(), "cutaway").is_empty());
     }
 
     #[test]
@@ -641,7 +680,102 @@ mod tests {
                 ElementKind::Module,
             );
         }
-        assert_eq!(hits(&graph, "plan").len(), RESULT_LIMIT);
+        assert_eq!(hits(&graph, &drawn(), "plan").len(), RESULT_LIMIT);
+    }
+
+    /// The module `element`, read out of the file `element.rs`, inside a
+    /// package that occupies the directory `crates/architecture`.
+    fn fused() -> ArchitectureGraph {
+        use cutaway_architecture::{Semantic, SemanticKind, Substrate, SubstrateKind};
+
+        let mut graph = ArchitectureGraph::new();
+        let name = |text: &str| cutaway_architecture::ElementName::new(text).unwrap();
+        graph
+            .add_element(Element::fused(
+                id("package:cutaway-architecture"),
+                Semantic {
+                    kind: SemanticKind::Package,
+                    name: name("cutaway-architecture"),
+                },
+                Substrate {
+                    kind: SubstrateKind::Directory,
+                    name: name("crates/architecture"),
+                },
+                None,
+            ))
+            .unwrap();
+        graph
+            .add_element(Element::fused(
+                id("crates/architecture/src/element.rs"),
+                Semantic {
+                    kind: SemanticKind::Module,
+                    name: name("element"),
+                },
+                Substrate {
+                    kind: SubstrateKind::File,
+                    name: name("element.rs"),
+                },
+                None,
+            ))
+            .unwrap();
+        contain(
+            &mut graph,
+            "package:cutaway-architecture",
+            "crates/architecture/src/element.rs",
+        );
+        graph
+    }
+
+    #[test]
+    fn a_boundary_answers_to_either_of_its_names() {
+        let graph = fused();
+        assert_eq!(
+            hits(&graph, &drawn(), "element.rs")
+                .first()
+                .map(|hit| hit.id.clone()),
+            Some(id("crates/architecture/src/element.rs")),
+            "a reader who types the file name means the boundary written there"
+        );
+        assert_eq!(
+            hits(&graph, &drawn(), "element")
+                .first()
+                .map(|hit| hit.id.clone()),
+            Some(id("crates/architecture/src/element.rs"))
+        );
+    }
+
+    #[test]
+    fn a_result_reads_under_the_name_the_vocabulary_speaks() {
+        let graph = fused();
+        let found = |vocabulary: BTreeSet<ElementKind>| {
+            hits(&graph, &vocabulary, "element.rs")
+                .first()
+                .map(|hit| (hit.name.clone(), hit.kind))
+        };
+        assert_eq!(
+            found(drawn()),
+            Some(("element".to_owned(), ElementKind::Module)),
+            "the query finds the file and the row shows the module the picture draws"
+        );
+        assert_eq!(
+            found(BTreeSet::from([ElementKind::Package, ElementKind::File])),
+            Some(("element.rs".to_owned(), ElementKind::File))
+        );
+    }
+
+    #[test]
+    fn a_result_names_its_containers_as_the_picture_speaks_them() {
+        let graph = fused();
+        assert_eq!(
+            hits(
+                &graph,
+                &BTreeSet::from([ElementKind::Directory, ElementKind::File]),
+                "element"
+            )[0]
+            .container,
+            "crates/architecture",
+            "a frame drawn as a directory names itself as one"
+        );
     }
 
     #[test]

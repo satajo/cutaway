@@ -7,9 +7,9 @@
 //! which pixelates text; the camera instead picks the font size each frame,
 //! so labels stay sharp at every magnification.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{ArchitectureGraph, ElementId, Relation};
+use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation};
 use eframe::egui::emath::TSTransform;
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke,
@@ -93,6 +93,9 @@ pub struct Content<'a> {
     pub edges: &'a [EdgeVisual],
     /// The boxes the plan has touched. Everything else stands as it is.
     pub nodes: &'a BTreeMap<ElementId, NodeStatus>,
+    /// The kinds the picture renders, which decides the reading every box
+    /// speaks under: the module `element` or the file `element.rs`.
+    pub vocabulary: &'a BTreeSet<ElementKind>,
     /// The new names the plan gives boxes, so a renamed one says what it
     /// becomes.
     pub renames: &'a Renames,
@@ -264,7 +267,12 @@ pub fn show(
     };
     // One reading of the labels answers the whole frame: the tooltip over a
     // stroke and every box of the picture name the same boundaries.
-    let labels = Labels::over(content.view, content.containment, content.renames);
+    let labels = Labels::over(
+        content.view,
+        content.containment,
+        content.vocabulary,
+        content.renames,
+    );
     if let Some(index) = hovered_edge {
         ui.ctx()
             .output_mut(|output| output.cursor_icon = CursorIcon::PointingHand);
@@ -1799,6 +1807,7 @@ mod tests {
         containment: Containment,
         edges: Vec<EdgeVisual>,
         nodes: BTreeMap<ElementId, NodeStatus>,
+        vocabulary: BTreeSet<ElementKind>,
         renames: Renames,
     }
 
@@ -1830,6 +1839,7 @@ mod tests {
                     })
                     .collect(),
                 nodes: BTreeMap::new(),
+                vocabulary: cutaway_lenses::Cut::whole().kinds,
                 renames: Renames::default(),
             }
         }
@@ -1845,6 +1855,7 @@ mod tests {
                 world: world_bounds(&self.layout),
                 edges: &self.edges,
                 nodes: &self.nodes,
+                vocabulary: &self.vocabulary,
                 renames: &self.renames,
                 selected_edge: None,
                 selected_node: selected,

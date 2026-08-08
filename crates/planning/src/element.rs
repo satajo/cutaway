@@ -25,7 +25,7 @@
 use std::collections::BTreeSet;
 
 use cutaway_architecture::{
-    ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
+    ArchitectureGraph, Element, ElementId, ElementName, Relation, RelationKind, SemanticKind,
 };
 
 use crate::change_set::ProposedChange;
@@ -35,24 +35,26 @@ use crate::plan::Plan;
 /// The id a planned element carries until the sources give it a real one.
 ///
 /// The shape follows the ids a producer derives from the sources: a package
-/// is named by itself, a directory and a module by the path of the boundary
-/// that holds it, an item by the module it is declared in and its kind. A
-/// package therefore ignores the parent it is planned under - the project
-/// root holds every package, and a package id names the package alone.
+/// is named by itself, a module by the path of the boundary that holds it,
+/// an item by the module it is declared in and its kind. A package therefore
+/// ignores the parent it is planned under - the project root holds every
+/// package, and a package id names the package alone.
+///
+/// Only what a language reads is planned: the directories and files of the
+/// tree are found by inspecting the sources, never stated ahead of them, so
+/// the kind here is a [`SemanticKind`] and no plan can name one of them.
 pub fn provisional_id(
     parent: Option<&ElementId>,
-    kind: ElementKind,
+    kind: SemanticKind,
     name: &ElementName,
 ) -> Result<ElementId, ProvisionalIdError> {
     let inside = || parent.ok_or(ProvisionalIdError::MissingParent { kind });
     let id = match kind {
-        ElementKind::Project => return Err(ProvisionalIdError::Whole),
-        ElementKind::Package => format!("package:{name}"),
-        ElementKind::Directory | ElementKind::Module | ElementKind::File => {
-            format!("{}/{name}", inside()?)
-        }
-        ElementKind::Function => format!("{}#function:{name}", inside()?),
-        ElementKind::Type => format!("{}#type:{name}", inside()?),
+        SemanticKind::Project => return Err(ProvisionalIdError::Whole),
+        SemanticKind::Package => format!("package:{name}"),
+        SemanticKind::Module => format!("{}/{name}", inside()?),
+        SemanticKind::Function => format!("{}#function:{name}", inside()?),
+        SemanticKind::Type => format!("{}#type:{name}", inside()?),
     };
     Ok(ElementId::new(id).expect("a name is never empty"))
 }
@@ -60,7 +62,7 @@ pub fn provisional_id(
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ProvisionalIdError {
     #[error("an element of this kind needs a boundary to sit in")]
-    MissingParent { kind: ElementKind },
+    MissingParent { kind: SemanticKind },
     #[error("a project is the picture as a whole, not a part planned into it")]
     Whole,
 }
@@ -74,11 +76,11 @@ pub enum ProvisionalIdError {
 /// before the relation that names it.
 pub fn addition_of_element(
     parent: Option<&ElementId>,
-    kind: ElementKind,
+    kind: SemanticKind,
     name: &ElementName,
 ) -> Result<Vec<ProposedChange>, ProvisionalIdError> {
     let id = provisional_id(parent, kind, name)?;
-    let mut changes = vec![ProposedChange::AddElement(Element::of_kind(
+    let mut changes = vec![ProposedChange::AddElement(Element::semantic(
         id.clone(),
         kind,
         name.clone(),
@@ -231,6 +233,8 @@ impl Plan {
 
 #[cfg(test)]
 mod tests {
+    use cutaway_architecture::ElementKind;
+
     use super::*;
 
     fn id(text: &str) -> ElementId {
@@ -293,7 +297,11 @@ mod tests {
     #[test]
     fn a_planned_module_is_named_by_the_boundary_that_holds_it() {
         assert_eq!(
-            provisional_id(Some(&id("package:a")), ElementKind::Module, &name("wiring")),
+            provisional_id(
+                Some(&id("package:a")),
+                SemanticKind::Module,
+                &name("wiring")
+            ),
             Ok(id("package:a/wiring"))
         );
     }
@@ -301,11 +309,11 @@ mod tests {
     #[test]
     fn a_planned_item_is_named_by_its_module_and_its_kind() {
         assert_eq!(
-            provisional_id(Some(&id("a/lib")), ElementKind::Type, &name("Port")),
+            provisional_id(Some(&id("a/lib")), SemanticKind::Type, &name("Port")),
             Ok(id("a/lib#type:Port"))
         );
         assert_eq!(
-            provisional_id(Some(&id("a/lib")), ElementKind::Function, &name("run")),
+            provisional_id(Some(&id("a/lib")), SemanticKind::Function, &name("run")),
             Ok(id("a/lib#function:run"))
         );
     }
@@ -313,13 +321,13 @@ mod tests {
     #[test]
     fn a_planned_package_is_named_by_itself_wherever_it_is_planned() {
         assert_eq!(
-            provisional_id(None, ElementKind::Package, &name("engine")),
+            provisional_id(None, SemanticKind::Package, &name("engine")),
             Ok(id("package:engine"))
         );
         assert_eq!(
             provisional_id(
                 Some(&id("project:app")),
-                ElementKind::Package,
+                SemanticKind::Package,
                 &name("engine")
             ),
             Ok(id("package:engine")),
@@ -330,9 +338,9 @@ mod tests {
     #[test]
     fn an_element_below_a_package_needs_the_boundary_it_sits_in() {
         assert_eq!(
-            provisional_id(None, ElementKind::Module, &name("wiring")),
+            provisional_id(None, SemanticKind::Module, &name("wiring")),
             Err(ProvisionalIdError::MissingParent {
-                kind: ElementKind::Module
+                kind: SemanticKind::Module
             })
         );
     }
@@ -340,22 +348,25 @@ mod tests {
     #[test]
     fn a_project_is_never_planned_into_a_picture() {
         assert_eq!(
-            provisional_id(None, ElementKind::Project, &name("app")),
+            provisional_id(None, SemanticKind::Project, &name("app")),
             Err(ProvisionalIdError::Whole)
         );
     }
 
     #[test]
     fn adding_an_element_states_the_element_before_the_containment() {
-        let changes =
-            addition_of_element(Some(&id("package:a")), ElementKind::Module, &name("wiring"))
-                .unwrap();
+        let changes = addition_of_element(
+            Some(&id("package:a")),
+            SemanticKind::Module,
+            &name("wiring"),
+        )
+        .unwrap();
         assert_eq!(
             changes,
             vec![
-                ProposedChange::AddElement(Element::of_kind(
+                ProposedChange::AddElement(Element::semantic(
                     id("package:a/wiring"),
-                    ElementKind::Module,
+                    SemanticKind::Module,
                     name("wiring"),
                 )),
                 ProposedChange::AddRelation(contains("package:a", "package:a/wiring")),
@@ -365,7 +376,7 @@ mod tests {
 
     #[test]
     fn adding_a_root_level_element_states_the_element_alone() {
-        let changes = addition_of_element(None, ElementKind::Package, &name("engine")).unwrap();
+        let changes = addition_of_element(None, SemanticKind::Package, &name("engine")).unwrap();
         assert_eq!(changes.len(), 1);
     }
 
@@ -457,12 +468,12 @@ mod tests {
     #[test]
     fn erasing_a_planned_element_takes_the_planned_elements_inside_it() {
         let mut plan = Plan::new();
-        for change in addition_of_element(None, ElementKind::Package, &name("engine")).unwrap() {
+        for change in addition_of_element(None, SemanticKind::Package, &name("engine")).unwrap() {
             plan.propose(change).unwrap();
         }
         for change in addition_of_element(
             Some(&id("package:engine")),
-            ElementKind::Module,
+            SemanticKind::Module,
             &name("wiring"),
         )
         .unwrap()

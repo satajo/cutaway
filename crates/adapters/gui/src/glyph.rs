@@ -60,6 +60,9 @@ glyphs! {
 
     /// One step down the containment above a search result.
     CONTAINER_STEP = " › ";
+    /// What stands between the two readings of one boundary: what a
+    /// language read there, and what the tree holds there.
+    READING_STEP = " · ";
     /// What stands between two parts of one hint.
     HINT_STEP = "·";
     /// Text the interface cuts short, and a command that asks for more

@@ -31,6 +31,15 @@
 //! entry of kind `contains` beside it says which boundary the new element
 //! belongs to.
 //!
+//! Its `kind` is one a language reads: `project`, `package`, `module`,
+//! `function` or `type`. The directories and files a repository lies in are
+//! read out of the source tree by inspecting it, never stated ahead of it,
+//! so `directory` and `file` are refused - and refused for the whole file,
+//! because a plan is applied as one intent and half of one is no intent at
+//! all. The file names the reason, so whoever wrote it reads the law rather
+//! than a parse error. Nothing is versioned around this: `cutaway.json` is
+//! written afresh by the session that owns it.
+//!
 //! A `modifications` entry states how one element that stays is to change:
 //! `rename` with the name it takes, `split` with the names it becomes,
 //! `merge` with the id of the element it folds into, or `rework`, whose
@@ -197,6 +206,27 @@ mod tests {
         .unwrap();
         let store = JsonPlanStore::for_repository(dir.path());
         assert!(matches!(store.load(), Err(PlanStoreError::Corrupt { .. })));
+    }
+
+    #[test]
+    fn a_planned_directory_or_file_is_reported_as_corrupt() {
+        for kind in ["directory", "file"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("cutaway.json"),
+                format!(
+                    r#"{{"version": 1, "changes": [{{"action": "add-element", "element":
+                       {{"id": "app/src", "name": "src", "kind": "{kind}"}}}}],
+                       "annotations": []}}"#
+                ),
+            )
+            .unwrap();
+            let store = JsonPlanStore::for_repository(dir.path());
+            assert!(
+                matches!(store.load(), Err(PlanStoreError::Corrupt { .. })),
+                "the tree a project lies in is inspected, never planned: {kind}"
+            );
+        }
     }
 
     #[test]

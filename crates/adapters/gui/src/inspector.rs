@@ -11,7 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, ElementName, Relation};
+use cutaway_architecture::{
+    ArchitectureGraph, ElementId, ElementKind, ElementName, Relation, SemanticKind,
+};
 use cutaway_lenses::BoundaryView;
 use cutaway_planning::ModificationKind;
 use eframe::egui;
@@ -19,7 +21,7 @@ use eframe::egui;
 use crate::canvas::{self, EdgeStatus};
 use crate::focus::Containment;
 use crate::glyph;
-use crate::label::{Labels, kind_name, kind_symbol};
+use crate::label::{self, Labels, kind_name, kind_symbol};
 use crate::{Modifying, Scene, Selection, Session, Standing, focus};
 
 /// How many rows one list shows before it names the rest. The cap is a
@@ -93,7 +95,7 @@ fn nothing_selected(ui: &mut egui::Ui, session: &mut Session) {
             ));
             chosen = list(
                 ui,
-                &unscoped_rows(view, &Labels::of(&session.graph)),
+                &unscoped_rows(view, &Labels::of(&session.graph, &session.cut.kinds)),
                 Prominence::Quiet,
             )
             .or(chosen);
@@ -135,17 +137,22 @@ fn help(ui: &mut egui::Ui) {
          expand or collapse it from here.",
     );
     ui.label(
-        "Keys 1-5 toggle packages, directories, modules, types and functions in and \
-         out of the picture; + and - open and close a whole layer of boundaries. \
-         Whatever you selected carries over to the new picture.",
+        "Keys 1-6 toggle packages, directories, modules, files, types and functions \
+         in and out of the picture; + and - open and close a whole layer of \
+         boundaries. Whatever you selected carries over to the new picture.",
+    );
+    ui.label(
+        "A boundary the sources read two ways - the module written in one file is \
+         that file - speaks as the reading the picture shows: hide modules and it \
+         reads as the file it is. The panel names both.",
     );
     ui.label(
         "Press F to focus the picture on the selected boundary; Escape shows \
          everything again.",
     );
     ui.label(
-        "Press ctrl+F or / to search every element by name, however the picture is \
-         cut; enter opens the picture down to the one you choose.",
+        "Press ctrl+F or / to search every element by either of its names, however \
+         the picture is cut; enter opens the picture down to the one you choose.",
     );
     ui.label(
         "Severed connections turn red, drawn ones green; the plan saves to \
@@ -175,7 +182,7 @@ fn node(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
         return;
     };
     ui.heading(panel.heading);
-    ui.small(panel.kind);
+    ui.small(panel.readings);
     // The id is the element's path through the sources: a reader knows the
     // boundary by it even where two short names read alike.
     ui.small(egui::RichText::new(id.as_str()).monospace());
@@ -311,7 +318,7 @@ fn plan_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
             } else {
                 format!(
                     "Planned for removal: goes with {}.",
-                    Labels::of(&session.viewed).qualified(&root)
+                    Labels::of(&session.viewed, &session.cut.kinds).qualified(&root)
                 )
             };
             ui.colored_label(canvas::SEVERED, line);
@@ -348,7 +355,7 @@ fn modify_controls(ui: &mut egui::Ui, session: &mut Session, id: &ElementId) {
     let planned = session.plan.modification_of(&subject).map(|modification| {
         planned_modification(
             &modification.kind,
-            &Labels::renaming(&session.viewed, &session.renames),
+            &Labels::renaming(&session.viewed, &session.cut.kinds, &session.renames),
         )
     });
     if let Some(line) = planned {
@@ -455,23 +462,30 @@ fn modification_field(
 }
 
 /// The kinds of boundary a reader may plan inside one of this kind: the
-/// project takes packages, a package and a directory take directories and
-/// modules, a module takes further modules and the items declared in it. An
-/// item holds nothing the picture draws, and a file holds nothing at all,
-/// so nothing is planned inside either. Files are discovered from the
-/// sources, never planned, so no list offers them.
-fn addable_kinds(parent: Option<ElementKind>) -> &'static [ElementKind] {
+/// project takes packages, a package or a directory takes modules, and a
+/// module or a file takes further modules and the items declared in it. An
+/// item holds nothing the picture draws, so nothing is planned inside one.
+///
+/// The file arm answers for the files no language read a boundary out of -
+/// a crate root, a `.go` file, a README alike - because a file a language
+/// did read one out of answers as that reading instead. Such a file may
+/// hold declarations the way a module does, and nothing here can tell code
+/// from prose, so the list offers what a module offers rather than refusing
+/// the case that is legitimate.
+///
+/// Only what a language reads is planned. Directories and files are the
+/// tree the sources lie in, discovered by inspecting it and never stated
+/// ahead of it, so no list offers them.
+fn addable_kinds(parent: Option<ElementKind>) -> &'static [SemanticKind] {
     match parent {
-        None | Some(ElementKind::Project) => &[ElementKind::Package],
-        Some(ElementKind::Package | ElementKind::Directory) => {
-            &[ElementKind::Directory, ElementKind::Module]
-        }
-        Some(ElementKind::Module) => &[
-            ElementKind::Module,
-            ElementKind::Type,
-            ElementKind::Function,
+        None | Some(ElementKind::Project) => &[SemanticKind::Package],
+        Some(ElementKind::Package | ElementKind::Directory) => &[SemanticKind::Module],
+        Some(ElementKind::Module | ElementKind::File) => &[
+            SemanticKind::Module,
+            SemanticKind::Type,
+            SemanticKind::Function,
         ],
-        Some(ElementKind::File | ElementKind::Function | ElementKind::Type) => &[],
+        Some(ElementKind::Function | ElementKind::Type) => &[],
     }
 }
 
@@ -502,7 +516,10 @@ fn add_controls(
         ui.horizontal(|ui| {
             for kind in kinds {
                 if ui
-                    .selectable_label(session.addition.kind == *kind, kind_name(*kind))
+                    .selectable_label(
+                        session.addition.kind == *kind,
+                        kind_name(ElementKind::from(*kind)),
+                    )
                     .clicked()
                 {
                     session.addition.kind = *kind;
@@ -735,7 +752,8 @@ fn run(written: &mut egui::text::LayoutJob, text: &str, font: &egui::FontId, col
 /// What the panel says about a selected boundary.
 struct NodePanel {
     heading: String,
-    kind: &'static str,
+    /// Every reading the boundary carries, in one line.
+    readings: String,
     /// What the boundary is, for the panel to decide what may be planned
     /// inside it.
     element_kind: ElementKind,
@@ -749,15 +767,15 @@ fn node_panel(session: &Session, id: &ElementId) -> Option<NodePanel> {
     };
     // The heading is where a reader reads what a boundary is called, so a
     // renamed one says what it becomes right there.
-    let labels = Labels::renaming(&view.graph, &session.renames);
+    let labels = Labels::renaming(&view.graph, &session.cut.kinds, &session.renames);
     let element = session.element_of(id)?;
     Some(NodePanel {
         heading: format!(
             "{} {}",
-            kind_symbol(element.primary_kind()),
+            kind_symbol(label::spoken(element, &session.cut.kinds).0),
             labels.qualified(id)
         ),
-        kind: kind_name(element.primary_kind()),
+        readings: label::readings(element, &labels.source_name(id)),
         element_kind: element.primary_kind(),
         contents: contents_rows(&view.graph, &labels, id),
         connections: connection_rows(view, &labels, id),
@@ -774,7 +792,7 @@ fn edge_panel(session: &Session, relation: &Relation) -> Option<EdgePanel> {
     let Ok(Scene { view, .. }) = &session.scene else {
         return None;
     };
-    let labels = Labels::of(&view.graph);
+    let labels = Labels::of(&view.graph, &session.cut.kinds);
     Some(EdgePanel {
         heading: format!(
             "{} {} {}",
@@ -785,7 +803,7 @@ fn edge_panel(session: &Session, relation: &Relation) -> Option<EdgePanel> {
         provenance: provenance_rows(
             view,
             &session.graph,
-            &Labels::of(&session.graph),
+            &Labels::of(&session.graph, &session.cut.kinds),
             relation,
             &session.plan,
         ),
@@ -986,6 +1004,17 @@ mod tests {
         ElementId::new(text).unwrap()
     }
 
+    /// The vocabulary the rows read under: everything the picture can
+    /// render, which is what a reader who has hidden nothing looks at.
+    /// Labels borrow the vocabulary they speak under, so the set stands for
+    /// the whole run rather than per call.
+    static DRAWN: std::sync::LazyLock<BTreeSet<ElementKind>> =
+        std::sync::LazyLock::new(|| Cut::whole().kinds);
+
+    fn drawn() -> &'static BTreeSet<ElementKind> {
+        &DRAWN
+    }
+
     fn add(graph: &mut ArchitectureGraph, id_text: &str, kind: ElementKind) {
         add_named(graph, id_text, id_text, kind);
     }
@@ -1071,7 +1100,7 @@ mod tests {
     }
 
     fn rows_of(view: &BoundaryView, id_text: &str) -> Connections {
-        let labels = Labels::of(&view.graph);
+        let labels = Labels::of(&view.graph, drawn());
         connection_rows(view, &labels, &id(id_text))
     }
 
@@ -1164,7 +1193,7 @@ mod tests {
     #[test]
     fn a_row_that_answers_no_question_leaves_its_colour_to_the_theme() {
         let view = boundary_view(&graph(), &all_packages_open()).unwrap();
-        let labels = Labels::of(&view.graph);
+        let labels = Labels::of(&view.graph, drawn());
         for row in contents_rows(&view.graph, &labels, &id("package:a")) {
             assert_eq!(
                 row.ink, None,
@@ -1250,7 +1279,7 @@ mod tests {
     #[test]
     fn a_frame_lists_the_boundaries_it_directly_holds() {
         let view = boundary_view(&graph(), &all_packages_open()).unwrap();
-        let labels = Labels::of(&view.graph);
+        let labels = Labels::of(&view.graph, drawn());
         let rows = contents_rows(&view.graph, &labels, &id("package:a"));
         assert_eq!(
             texts(&rows),
@@ -1272,7 +1301,7 @@ mod tests {
         let mut cut = Cut::whole();
         cut.kinds = BTreeSet::from([ElementKind::Package]);
         let view = boundary_view(&graph, &cut).unwrap();
-        let rows = unscoped_rows(&view, &Labels::of(&graph));
+        let rows = unscoped_rows(&view, &Labels::of(&graph, drawn()));
         assert_eq!(texts(&rows), [format!("stray {} b/one", glyph::OUTWARD)]);
         assert_eq!(rows[0].target, None);
     }
@@ -1284,7 +1313,7 @@ mod tests {
         let rows = provenance_rows(
             &view,
             &graph,
-            &Labels::of(&graph),
+            &Labels::of(&graph, drawn()),
             &depends("package:a", "package:b"),
             &cutaway_planning::Plan::new(),
         );
@@ -1313,7 +1342,7 @@ mod tests {
         let rows = provenance_rows(
             &view,
             &graph,
-            &Labels::of(&graph),
+            &Labels::of(&graph, drawn()),
             &depends("package:a", "package:b"),
             &plan,
         );
@@ -1382,6 +1411,43 @@ mod tests {
     }
 
     #[test]
+    fn only_what_a_language_reads_is_offered_for_planning() {
+        for parent in [
+            None,
+            Some(ElementKind::Project),
+            Some(ElementKind::Package),
+            Some(ElementKind::Directory),
+            Some(ElementKind::Module),
+            Some(ElementKind::File),
+        ] {
+            assert!(
+                !addable_kinds(parent).is_empty()
+                    || matches!(parent, Some(ElementKind::Function | ElementKind::Type)),
+                "a boundary that holds something offers something: {parent:?}"
+            );
+        }
+        assert_eq!(
+            addable_kinds(Some(ElementKind::Package)),
+            &[SemanticKind::Module],
+            "the tree a package lies in is inspected, never planned"
+        );
+        assert_eq!(
+            addable_kinds(Some(ElementKind::Directory)),
+            &[SemanticKind::Module]
+        );
+    }
+
+    #[test]
+    fn a_file_offers_what_a_module_offers() {
+        assert_eq!(
+            addable_kinds(Some(ElementKind::File)),
+            addable_kinds(Some(ElementKind::Module)),
+            "a file no language read a boundary out of may still hold \
+             declarations, and nothing here tells code from prose"
+        );
+    }
+
+    #[test]
     fn a_planned_split_names_every_element_it_becomes() {
         let graph = graph();
         assert_eq!(
@@ -1393,7 +1459,7 @@ mod tests {
                     ])
                     .unwrap(),
                 },
-                &Labels::of(&graph)
+                &Labels::of(&graph, drawn())
             ),
             "Planned split into engine, transport."
         );
@@ -1405,7 +1471,7 @@ mod tests {
         assert_eq!(
             planned_modification(
                 &ModificationKind::Merge { with: id("b/one") },
-                &Labels::of(&graph)
+                &Labels::of(&graph, drawn())
             ),
             "Planned merge into b/one."
         );

@@ -26,7 +26,7 @@ use eframe::egui::{self, Rect};
 use crate::camera::{self, Camera};
 use crate::canvas::{self, CanvasAction, Content, EdgeStatus, EdgeVisual, NodeStatus};
 use crate::focus::{self, Containment};
-use crate::label::{Labels, Renames, kind_name};
+use crate::label::{self, Labels, Renames};
 use crate::palette::Palette;
 use crate::{Scene, Selection, VersionInspector, glyph, layout, palette, subject_of, vocabulary};
 
@@ -174,10 +174,11 @@ impl CompareSession {
         let comparison = &self.comparison;
         let weights = &self.weights;
         let renames = &self.renames;
+        let vocabulary = &self.cut.kinds;
         self.scene = boundary_view(comparison.union(), &self.cut)
             .map_err(|error| error.to_string())
             .map(|view| {
-                let layout = layout::compute(&view.graph, weights, renames);
+                let layout = layout::compute(&view.graph, weights, vocabulary, renames);
                 Scene {
                     generation,
                     containment: Containment::of(&view.graph),
@@ -637,10 +638,18 @@ fn boundary(ui: &mut egui::Ui, session: &CompareSession, id: &ElementId) {
     let Ok(scene) = &session.scene else {
         return;
     };
-    let labels = Labels::over(&scene.view.graph, &scene.containment, &session.renames);
+    let labels = Labels::over(
+        &scene.view.graph,
+        &scene.containment,
+        &session.cut.kinds,
+        &session.renames,
+    );
     ui.label(labels.qualified(id));
     if let Some(element) = scene.view.graph.element(id) {
-        ui.label(egui::RichText::new(kind_name(element.primary_kind())).weak());
+        // Every reading of the boundary, the one the picture speaks it
+        // under first. A boundary changes by either of them, so a panel
+        // that named one alone would leave half the story out.
+        ui.label(egui::RichText::new(label::readings(element, &labels.source_name(id))).weak());
     }
     ui.separator();
     ui.label(told(scene.nodes.get(id).copied()));
@@ -652,8 +661,12 @@ fn told(status: Option<NodeStatus>) -> &'static str {
         Some(NodeStatus::Added) => "Arrives: only the newer version has it.",
         Some(NodeStatus::Removed) => "Leaves: only the older version has it.",
         Some(NodeStatus::Modified) => {
+            // A boundary reads as two things at once, so either reading
+            // changing is the boundary changing: a crate that moved keeps
+            // its name and stands somewhere else in the tree.
             "Changes inside: it stands in both versions, and something beneath it moved - \
-             or its own name, kind, or contents changed."
+             or the boundary itself changed: its name, its kind, where it lies in the \
+             tree, or its contents."
         }
         None => "Unchanged.",
     }
@@ -663,7 +676,12 @@ fn connection(ui: &mut egui::Ui, session: &CompareSession, relation: &Relation) 
     let Ok(scene) = &session.scene else {
         return;
     };
-    let labels = Labels::over(&scene.view.graph, &scene.containment, &session.renames);
+    let labels = Labels::over(
+        &scene.view.graph,
+        &scene.containment,
+        &session.cut.kinds,
+        &session.renames,
+    );
     ui.label(format!(
         "{} {} {}",
         labels.qualified(&relation.from),
@@ -716,6 +734,7 @@ pub(crate) fn picture(ui: &mut egui::Ui, session: &mut CompareSession) {
             world: scene.world,
             edges: &scene.edges,
             nodes: &scene.nodes,
+            vocabulary: &session.cut.kinds,
             renames: &session.renames,
             selected_edge,
             selected_node,
@@ -738,6 +757,7 @@ pub(crate) fn overlay(ctx: &egui::Context, session: &mut CompareSession) {
         ctx,
         &mut session.palette,
         session.comparison.union(),
+        &session.cut.kinds,
         session.viewport,
     );
     if let Some(target) = found {

@@ -270,9 +270,13 @@ impl Element {
 
     /// The element one vocabulary kind alone describes. Each kind belongs to
     /// exactly one reading, so the kind decides the aspect. This is the way
-    /// in for a caller holding a kind and nothing more - a stored plan, a
-    /// reader asking for a new boundary; a producer that knows which reading
-    /// it speaks names the aspect instead.
+    /// in for a caller holding a kind and nothing more; a producer that
+    /// knows which reading it speaks names the aspect instead.
+    ///
+    /// Nothing in the workspace produces elements this way today: a plan
+    /// states what a language reads and says so in a [`SemanticKind`], and
+    /// the analyzers and the inspection core name their aspects. It stands
+    /// for the tests that build a graph from kinds alone.
     #[must_use]
     pub fn of_kind(id: ElementId, kind: ElementKind, name: ElementName) -> Self {
         match kind {

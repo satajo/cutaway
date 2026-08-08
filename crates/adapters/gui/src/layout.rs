@@ -21,7 +21,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use cutaway_architecture::{ArchitectureGraph, ElementId, RelationKind};
+use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
 use eframe::egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 use crate::label::{Labels, Renames};
@@ -173,6 +173,7 @@ pub fn concept_weights(graph: &ArchitectureGraph) -> BTreeMap<ElementId, usize> 
 pub fn compute(
     view: &ArchitectureGraph,
     weights: &BTreeMap<ElementId, usize>,
+    vocabulary: &BTreeSet<ElementKind>,
     renames: &Renames,
 ) -> Layout {
     let mut parents: BTreeMap<ElementId, ElementId> = BTreeMap::new();
@@ -232,7 +233,7 @@ pub fn compute(
     // A box must fit the label the canvas writes on it, glyph, shortened
     // name and the plan's rename included, so both read the label from the
     // same place.
-    let labels = Labels::renaming(view, renames);
+    let labels = Labels::renaming(view, vocabulary, renames);
     let label_of = |id: &ElementId| -> String { labels.label(id).text() };
 
     // Refinement must read each frame the way its own flow does, and the
@@ -745,6 +746,13 @@ mod tests {
         BTreeMap::new()
     }
 
+    /// The vocabulary the labels read under. The arrangement follows the
+    /// text of a label and not the reading behind it, so every test lays
+    /// its picture out under the whole vocabulary.
+    fn drawn() -> BTreeSet<ElementKind> {
+        cutaway_lenses::Cut::whole().kinds
+    }
+
     #[test]
     fn a_dependency_reads_from_left_to_right() {
         let mut graph = ArchitectureGraph::new();
@@ -752,7 +760,7 @@ mod tests {
         let dependency = add_package(&mut graph, "domain");
         depend(&mut graph, &dependent, &dependency);
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         assert!(layout.rects[&dependent].max.x < layout.rects[&dependency].min.x);
     }
 
@@ -767,7 +775,7 @@ mod tests {
         depend(&mut graph, &left_a, &right_a);
         depend(&mut graph, &left_b, &right_a);
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         let separate = [
             (&left, &right),
             (&left_a, &left_b),
@@ -791,7 +799,7 @@ mod tests {
         let light = add_package(&mut graph, "omega");
 
         let weights = BTreeMap::from([(heavy.clone(), 49), (light.clone(), 0)]);
-        let layout = compute(&graph, &weights, &Renames::default());
+        let layout = compute(&graph, &weights, &drawn(), &Renames::default());
         assert!(layout.rects[&heavy].area() > layout.rects[&light].area());
     }
 
@@ -803,7 +811,7 @@ mod tests {
             add_module(&mut graph, &package, &format!("crowded/m{index:02}.rs"));
         }
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         let box_of = layout.rects[&package];
         let aspect = box_of.width() / box_of.height();
         assert!(
@@ -833,7 +841,7 @@ mod tests {
             children.push(child);
         }
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         for (index, a) in children.iter().enumerate() {
             assert!(
                 layout.rects[&package].contains_rect(layout.rects[a]),
@@ -860,7 +868,7 @@ mod tests {
         let dependency = add_module(&mut graph, &package, "pkg/a-domain.rs");
         depend(&mut graph, &dependent, &dependency);
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         assert!(layout.rects[&dependent].max.y < layout.rects[&dependency].min.y);
     }
 
@@ -876,7 +884,7 @@ mod tests {
         let dependency = add_module(&mut graph, &dependency_frame, "pkg/a-used/inner.rs");
         depend(&mut graph, &dependent, &dependency);
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         assert!(layout.rects[&dependent_frame].max.y < layout.rects[&dependency_frame].min.y);
     }
 
@@ -901,7 +909,7 @@ mod tests {
         depend(&mut graph, &inner_dependent, &inner_dependency);
         depend(&mut graph, &deep_dependent, &deep_dependency);
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         assert!(
             layout.rects[&outer_dependent].max.y < layout.rects[&outer_dependency].min.y,
             "a top-level frame's contents flow downward"
@@ -928,7 +936,7 @@ mod tests {
             depend(&mut graph, caller, &sink);
         }
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         let mut runs: BTreeMap<u32, usize> = BTreeMap::new();
         for caller in &callers {
             assert!(
@@ -954,7 +962,7 @@ mod tests {
             .map(|index| add_module(&mut graph, &package, &format!("flat/m{index:02}.rs")))
             .collect();
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         let runs: BTreeSet<u32> = children
             .iter()
             .map(|child| layout.rects[child].min.y.to_bits())
@@ -979,7 +987,7 @@ mod tests {
             .map(|index| add_module(&mut graph, &package, &format!("small/m{index}.rs")))
             .collect();
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         let runs: BTreeSet<u32> = children
             .iter()
             .map(|child| layout.rects[child].min.y.to_bits())
@@ -997,8 +1005,8 @@ mod tests {
             depend(&mut graph, &module, &sink);
         }
 
-        let first = compute(&graph, &no_weights(), &Renames::default());
-        let second = compute(&graph, &no_weights(), &Renames::default());
+        let first = compute(&graph, &no_weights(), &drawn(), &Renames::default());
+        let second = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         assert_eq!(first.rects, second.rects);
     }
 
@@ -1013,7 +1021,7 @@ mod tests {
             depend(&mut graph, &pair[0], &pair[1]);
         }
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         for pair in chain.windows(2) {
             let (dependent, dependency) = (layout.rects[&pair[0]], layout.rects[&pair[1]]);
             let reads_first = dependent.center().y < dependency.center().y
@@ -1036,7 +1044,7 @@ mod tests {
         let plain_frame = add_package(&mut graph, "beta");
         let plain = add_named_module(&mut graph, &plain_frame, "beta/y.rs", "y");
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         let difference = (layout.rects[&nested].width() - layout.rects[&plain].width()).abs();
         assert!(
             difference < 1.0,
@@ -1049,7 +1057,7 @@ mod tests {
         let mut graph = ArchitectureGraph::new();
         let package = add_package(&mut graph, "app");
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         assert!(layout.rects[&package].width() >= label_width(&format!("{} app", glyph::PACKAGE)));
     }
 
@@ -1064,7 +1072,7 @@ mod tests {
         depend(&mut graph, &upper, &straight);
         depend(&mut graph, &lower, &crossed);
 
-        let layout = compute(&graph, &no_weights(), &Renames::default());
+        let layout = compute(&graph, &no_weights(), &drawn(), &Renames::default());
         let above =
             |a: &ElementId, b: &ElementId| layout.rects[a].center().y < layout.rects[b].center().y;
         assert_eq!(above(&upper, &lower), above(&straight, &crossed));
