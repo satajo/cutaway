@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, Relation, RelationKind};
 use cutaway_comparison::{Comparison, ElementChange, Presence};
+use cutaway_inspection::Inspection;
 use cutaway_inspection::ports::project_history::{Version, VersionId};
+use cutaway_inspection::ports::source_analyzer::AnalysisGap;
 use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use eframe::egui::{self, Rect};
 
@@ -60,10 +62,13 @@ impl History {
 pub(crate) struct CompareSession {
     before: VersionId,
     after: VersionId,
-    /// The architecture of every version read so far. A version costs one
-    /// inspection of its whole source tree, so a picker flipped back to a
-    /// version already read answers from here.
-    graphs: BTreeMap<VersionId, ArchitectureGraph>,
+    /// The reading of every version read so far: its architecture, and
+    /// everywhere the analyzers could not read what its sources hold. A
+    /// version costs one inspection of its whole source tree, so a picker
+    /// flipped back to a version already read answers from here. The gaps
+    /// travel with the graph they qualify, because a graph is only ever as
+    /// complete as the reading that produced it.
+    readings: BTreeMap<VersionId, Inspection>,
     comparison: Comparison,
     /// Where the picture cuts the union: the frontier of open boundaries
     /// and the vocabulary of kinds it renders. Element ids hold across
@@ -101,7 +106,7 @@ impl CompareSession {
         let mut session = Self {
             before,
             after,
-            graphs: BTreeMap::new(),
+            readings: BTreeMap::new(),
             // An empty comparison stands until the pair below is read; a
             // version costs an inspection, and one code path reads them.
             comparison: Comparison::between(&ArchitectureGraph::new(), &ArchitectureGraph::new()),
@@ -147,7 +152,8 @@ impl CompareSession {
             self.selection = None;
             return;
         }
-        self.comparison = Comparison::between(&self.graphs[&before], &self.graphs[&after]);
+        self.comparison =
+            Comparison::between(&self.readings[&before].graph, &self.readings[&after].graph);
         self.weights = layout::concept_weights(self.comparison.union());
         // The pair was named to see what changed between it, so the
         // boundaries hiding a change open by themselves. The reader closes
@@ -164,12 +170,37 @@ impl CompareSession {
 
     /// Reads the architecture of one version, unless it is already read.
     fn read(&mut self, history: &History, id: &VersionId) -> Result<(), InspectVersionError> {
-        if self.graphs.contains_key(id) {
+        if self.readings.contains_key(id) {
             return Ok(());
         }
-        let inspection = (history.inspect)(id)?;
-        self.graphs.insert(id.clone(), inspection.graph);
+        self.readings.insert(id.clone(), (history.inspect)(id)?);
         Ok(())
+    }
+
+    /// The sides of the pair the analyzers could not read in full, the
+    /// before first, each with what they could not read.
+    ///
+    /// A side is named as the reader names it - by the picker it stands
+    /// under, and by the version that picker holds - because a warning that
+    /// named the version alone would leave them matching ids against a
+    /// heading that has scrolled away.
+    ///
+    /// Where both pickers name one version the two sides are one: the
+    /// picture shows that version against itself, so calling the reading a
+    /// before or an after would invent a difference between it and itself.
+    fn partial_reads(&self) -> Vec<(String, &[AnalysisGap])> {
+        let sides = if self.before == self.after {
+            vec![("Both sides", &self.before)]
+        } else {
+            vec![("Before", &self.before), ("After", &self.after)]
+        };
+        sides
+            .into_iter()
+            .filter_map(|(picker, id)| {
+                let gaps = self.readings.get(id)?.gaps.as_slice();
+                (!gaps.is_empty()).then(|| (format!("{picker} ({})", short(id)), gaps))
+            })
+            .collect()
     }
 
     /// Paints the union at the current cut, leaving the camera where it is.
@@ -605,6 +636,25 @@ fn short(id: &VersionId) -> String {
 /// or about the one thing the reader selected. It only reads - a
 /// comparison states what happened, and nothing here can answer back.
 pub(crate) fn panel(ui: &mut egui::Ui, session: &CompareSession) {
+    // A comparison reads every difference between the two sides as something
+    // that happened, so a side read only in part invents history: what the
+    // analyzers missed in the older version arrives out of nowhere, and what
+    // they missed in the newer one leaves. Which side is thin therefore
+    // stands above the story, named, before the reader reads a single change
+    // out of it.
+    let partial = session.partial_reads();
+    for (side, gaps) in &partial {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("{side}: {}", crate::partial_read(gaps)),
+        );
+    }
+    if !partial.is_empty() {
+        // The warning stands still while everything below it scrolls, and a
+        // scrolling line meeting a standing one flush reads as a fault in
+        // the painting.
+        ui.separator();
+    }
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.heading(format!(
             "From {} to {}",
@@ -615,6 +665,13 @@ pub(crate) fn panel(ui: &mut egui::Ui, session: &CompareSession) {
             None => whole_story(ui, session),
             Some(Selection::Node(id)) => boundary(ui, session, id),
             Some(Selection::Edge(relation)) => connection(ui, session, relation),
+        }
+        for (side, gaps) in &partial {
+            crate::partial_read_files(
+                ui,
+                &format!("Where the reading of {side} stopped short:"),
+                gaps,
+            );
         }
     });
 }
@@ -787,6 +844,8 @@ pub(crate) fn overlay(ctx: &egui::Context, session: &mut CompareSession) {
 #[cfg(test)]
 mod tests {
     use cutaway_architecture::{Element, ElementName, SemanticKind};
+    use cutaway_inspection::ports::source_analyzer::GapReason;
+    use cutaway_inspection::ports::source_tree::SourcePath;
 
     use super::*;
 
@@ -904,6 +963,72 @@ mod tests {
     #[test]
     fn a_project_with_no_version_offers_no_pair() {
         assert_eq!(pair(&[]), None);
+    }
+
+    /// A history whose every version holds one module, read in full except
+    /// for the versions named here, each of which lost one file to a gap.
+    fn history(versions: &[&str], thin: &[&str]) -> History {
+        let thin: Vec<String> = thin.iter().map(|id| (*id).to_owned()).collect();
+        History::new(
+            versions.iter().map(|id| version(id)).collect(),
+            Box::new(move |id: &VersionId| {
+                let unreadable = AnalysisGap {
+                    path: SourcePath::new("src/unreadable.rs").unwrap(),
+                    reason: GapReason::NonUtf8Text,
+                };
+                Ok(Inspection {
+                    graph: wired(&["root"], &[], &[]),
+                    gaps: thin
+                        .iter()
+                        .any(|named| named == id.as_str())
+                        .then_some(unreadable)
+                        .into_iter()
+                        .collect(),
+                })
+            }),
+        )
+    }
+
+    /// The sides a comparison declares as read only in part, in the order it
+    /// declares them.
+    fn declared(history: &History) -> Vec<String> {
+        CompareSession::build(history)
+            .expect("the history lists a version")
+            .partial_reads()
+            .into_iter()
+            .map(|(side, _)| side)
+            .collect()
+    }
+
+    #[test]
+    fn only_the_compared_side_read_in_part_is_declared_as_such() {
+        assert_eq!(
+            declared(&history(&["newer", "older"], &["older"])),
+            ["Before (older)"],
+            "a side is named by the picker the reader acts on, and by its version"
+        );
+        assert_eq!(
+            declared(&history(&["newer", "older"], &["newer"])),
+            ["After (newer)"]
+        );
+        assert!(declared(&history(&["newer", "older"], &[])).is_empty());
+    }
+
+    #[test]
+    fn a_pair_thin_on_both_sides_declares_the_before_first() {
+        assert_eq!(
+            declared(&history(&["newer", "older"], &["older", "newer"])),
+            ["Before (older)", "After (newer)"]
+        );
+    }
+
+    #[test]
+    fn one_version_compared_with_itself_declares_its_partial_reading_once() {
+        assert_eq!(
+            declared(&history(&["only"], &["only"])),
+            ["Both sides (only)"],
+            "neither picker holds a version the other does not, so neither side is the change"
+        );
     }
 
     #[test]

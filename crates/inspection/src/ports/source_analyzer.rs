@@ -71,6 +71,16 @@ pub struct AnalysisGap {
     pub reason: GapReason,
 }
 
+/// The place and the reason as one line: "path: reason". A gap is read
+/// wherever it surfaces - a panel beside the picture, a driver answering a
+/// scenario - and it says the same thing in every one of them, so the
+/// phrasing stands with the type rather than with each reader of it.
+impl fmt::Display for AnalysisGap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.path, self.reason)
+    }
+}
+
 /// Why one file yielded less than it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GapReason {
@@ -198,6 +208,19 @@ impl Extent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gap_names_the_file_before_the_reason() {
+        let gap = AnalysisGap {
+            path: SourcePath::new("src/broken.rs").unwrap(),
+            reason: GapReason::NonUtf8Text,
+        };
+
+        assert_eq!(
+            gap.to_string(),
+            format!("src/broken.rs: {}", GapReason::NonUtf8Text)
+        );
+    }
 
     #[test]
     fn a_lone_break_in_the_syntax_reads_differently_from_several() {

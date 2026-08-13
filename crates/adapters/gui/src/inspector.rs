@@ -27,13 +27,42 @@ use crate::{Modifying, Scene, Selection, Session, Standing, focus};
 /// How many rows one list shows before it names the rest. The cap is a
 /// display limit and not a data limit: the count above every list still
 /// speaks for all of it, and the canvas draws all of it.
-const ROW_LIMIT: usize = 15;
+///
+/// It is the rule for every list standing in a panel beside the picture, so
+/// the lists of the comparison's panel and the declaration of a partial read
+/// keep to it too.
+pub(crate) const ROW_LIMIT: usize = 15;
 
 pub(crate) fn show(ui: &mut egui::Ui, session: &mut Session) {
-    egui::ScrollArea::vertical().show(ui, |ui| match session.selection.clone() {
-        None => nothing_selected(ui, session),
-        Some(Selection::Node(id)) => node(ui, session, &id),
-        Some(Selection::Edge(relation)) => edge(ui, session, &relation),
+    // A picture the analyzers could not read the whole of says so above
+    // everything else and goes on saying it, whatever the reader selects and
+    // however far they scroll: the declaration is the only thing standing
+    // between a thin picture and a reader taking it for a whole one.
+    let partial = !session.gaps.is_empty();
+    if partial {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            crate::partial_read(&session.gaps),
+        );
+        // The warning stands still while everything below it scrolls, and a
+        // scrolling line meeting a standing one flush reads as a fault in
+        // the painting: the rule between them says the panel is in two
+        // parts on purpose.
+        ui.separator();
+    }
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        match session.selection.clone() {
+            None => nothing_selected(ui, session),
+            Some(Selection::Node(id)) => node(ui, session, &id),
+            Some(Selection::Edge(relation)) => edge(ui, session, &relation),
+        }
+        // The files themselves come last. The panel's first job is what the
+        // reader selected, and the line above the scroll already carries the
+        // warning; down here the list only answers which files to go and
+        // look at.
+        if partial {
+            crate::partial_read_files(ui, "Where the reading stopped short:", &session.gaps);
+        }
     });
 }
 

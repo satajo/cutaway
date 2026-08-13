@@ -66,6 +66,7 @@ use cutaway_architecture::{
 };
 use cutaway_inspection::ports::project_history::{Version, VersionId};
 use cutaway_inspection::ports::source_analyzer::AnalysisGap;
+use cutaway_inspection::ports::source_tree::SourcePath;
 use cutaway_inspection::{Inspection, InspectionError};
 use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
@@ -174,6 +175,58 @@ fn whole_reason(error: &dyn Error) -> String {
     chain.join(": ")
 }
 
+/// How a picture built on a partial read declares itself: how many files the
+/// analyzers could not read to the end, what that leaves out of what stands
+/// in front of the reader, and where the files themselves are named.
+///
+/// It counts files and not gaps, because one file can stop a reading twice
+/// over - a module two files contest and one of them holding syntax the
+/// grammar cannot read - and the reader counts what they would have to go
+/// and open. Taking the gaps themselves rather than a number is what keeps
+/// the two counts from ever parting.
+///
+/// A gap is a declared limit and not a failure - the reading went on around
+/// it - so this speaks in the voice of a warning and never of an error. It
+/// says what is at stake rather than that something went wrong, because the
+/// risk here is a thin picture read as a whole one.
+fn partial_read(gaps: &[AnalysisGap]) -> String {
+    let files: BTreeSet<&SourcePath> = gaps.iter().map(|gap| &gap.path).collect();
+    if files.len() == 1 {
+        "1 file could not be read in full; the picture may be missing what it holds. \
+         It is named at the end of this panel."
+            .to_owned()
+    } else {
+        format!(
+            "{} files could not be read in full; the picture may be missing what they hold. \
+             They are named at the end of this panel.",
+            files.len()
+        )
+    }
+}
+
+/// Every file the reading stopped short in, and where it stopped, under a
+/// heading of the caller's own - one panel names the project it is looking
+/// at, another the side of a comparison the reading belongs to.
+///
+/// By path, because a reader arrives here hunting one of them and the order
+/// the analyzers ran in is no order at all to a reader. Past the panel's row
+/// cap the rest are counted rather than named: the cap is a display limit
+/// and not a data limit, and the count above the panel already speaks for
+/// all of them.
+fn partial_read_files(ui: &mut egui::Ui, heading: &str, gaps: &[AnalysisGap]) {
+    ui.separator();
+    ui.colored_label(ui.visuals().warn_fg_color, heading);
+    let mut sorted: Vec<&AnalysisGap> = gaps.iter().collect();
+    sorted.sort_by(|one, other| one.path.cmp(&other.path));
+    for gap in sorted.iter().take(inspector::ROW_LIMIT) {
+        ui.small(gap.to_string());
+    }
+    let held_back = sorted.len().saturating_sub(inspector::ROW_LIMIT);
+    if held_back > 0 {
+        ui.small(format!("{} and {held_back} more", glyph::ELLIPSIS));
+    }
+}
+
 /// A failure where the panel's content would have stood. A whole cause chain
 /// runs longer than a narrow panel is tall, and a reason the reader cannot
 /// read to the end is no reason at all, so it scrolls instead of clipping.
@@ -259,6 +312,10 @@ struct Scene {
 
 struct Session {
     graph: ArchitectureGraph,
+    /// Everywhere the analyzers could not read what the sources hold. The
+    /// picture is drawn from what they did read, so the gaps travel with it
+    /// and the panel declares them for as long as the session stands.
+    gaps: Vec<AnalysisGap>,
     /// The architecture the picture shows: the sources' graph with the
     /// plan's own additions drawn into it. The lens reads this, and so does
     /// every question about where a planned element sits.
@@ -346,7 +403,12 @@ enum Modifying {
 }
 
 impl Session {
-    fn open(graph: ArchitectureGraph, plan: &Plan, store: Box<dyn PlanStore>) -> Self {
+    fn open(
+        graph: ArchitectureGraph,
+        gaps: Vec<AnalysisGap>,
+        plan: &Plan,
+        store: Box<dyn PlanStore>,
+    ) -> Self {
         let weights = layout::concept_weights(&graph);
         // A stored plan may predate the concrete-relation contract:
         // normalization re-anchors it to this graph before anything reads
@@ -355,6 +417,7 @@ impl Session {
         let mut session = Self {
             viewed: graph.clone(),
             graph,
+            gaps,
             plan,
             store,
             cut: Cut::whole(),
@@ -1426,7 +1489,12 @@ impl CutawayApp {
                             project.versions,
                             project.inspect_version,
                         ));
-                        Ok(Session::open(project.graph, &project.plan, project.store))
+                        Ok(Session::open(
+                            project.graph,
+                            project.gaps,
+                            &project.plan,
+                            project.store,
+                        ))
                     }
                     Err(error) => Err(error),
                 });
@@ -1865,6 +1933,7 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
 
 #[cfg(test)]
 mod tests {
+    use cutaway_inspection::ports::source_analyzer::GapReason;
     use cutaway_inspection::ports::source_tree::SourceTreeError;
     use cutaway_planning::ports::plan_store::PlanStoreError;
     use eframe::egui::{pos2, vec2};
@@ -1908,6 +1977,65 @@ mod tests {
         assert_eq!(
             whole_reason(&failure),
             "cannot read the architecture: cannot read the source tree: permission denied"
+        );
+    }
+
+    fn unread(path: &str, reason: GapReason) -> AnalysisGap {
+        AnalysisGap {
+            path: SourcePath::new(path).unwrap(),
+            reason,
+        }
+    }
+
+    #[test]
+    fn a_partial_read_counts_the_files_and_says_what_it_costs_the_picture() {
+        let one = partial_read(&[unread("src/one.rs", GapReason::NonUtf8Text)]);
+        assert!(one.starts_with("1 file "), "{one}");
+        assert!(
+            one.contains("what it holds"),
+            "a single file is spoken of in the singular: {one}"
+        );
+        assert!(
+            one.contains("end of this panel"),
+            "the warning says where the files themselves are named: {one}"
+        );
+
+        let several = partial_read(&[
+            unread("src/one.rs", GapReason::NonUtf8Text),
+            unread("src/two.rs", GapReason::NonUtf8Text),
+            unread("src/three.rs", GapReason::NonUtf8Text),
+            unread("src/four.rs", GapReason::NonUtf8Text),
+        ]);
+        assert!(several.starts_with("4 files "), "{several}");
+        assert!(several.contains("what they hold"), "{several}");
+        assert!(
+            !several.contains("fail") && !several.contains("error"),
+            "a gap is a declared limit of the reading, not a failure: {several}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_stopped_the_reading_twice_is_still_one_file() {
+        let twice = partial_read(&[
+            unread(
+                "src/contested.rs",
+                GapReason::ConflictingDefinitions {
+                    other: SourcePath::new("src/contested/mod.rs").unwrap(),
+                },
+            ),
+            unread(
+                "src/contested.rs",
+                GapReason::SyntaxErrors {
+                    line: 4,
+                    column: 1,
+                    regions: 1,
+                },
+            ),
+        ]);
+
+        assert!(
+            twice.starts_with("1 file "),
+            "the count is of files to go and open, not of reasons: {twice}"
         );
     }
 
@@ -2274,9 +2402,10 @@ mod tests {
         }
     }
 
-    /// A session over [`two_packages`] with an empty plan, cut at packages.
+    /// A session over [`two_packages`] with an empty plan, cut at packages,
+    /// read whole.
     fn session() -> Session {
-        Session::open(two_packages(), &Plan::new(), Box::new(Nowhere))
+        Session::open(two_packages(), Vec::new(), &Plan::new(), Box::new(Nowhere))
     }
 
     fn scene(session: &Session) -> &Scene {
