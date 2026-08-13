@@ -159,8 +159,15 @@ pub enum InvalidDirectoryPath {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceTreeError {
-    #[error("cannot read the source tree: {reason}")]
-    Unreadable { reason: String },
+    /// The tree could not be read. What stopped it is whatever the adapter
+    /// holding the sources says, carried along as the cause rather than
+    /// flattened into these words: the core names the operation, the cause
+    /// names the file, the path, or the permission behind it.
+    #[error("cannot read the source tree")]
+    Unreadable {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("the source tree contains an invalid path")]
     InvalidPath {
         #[from]

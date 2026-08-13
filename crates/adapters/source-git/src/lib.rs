@@ -8,7 +8,7 @@
 //! the architecture. Access goes through gix, keeping the whole application
 //! pure Rust.
 
-use std::fmt::Display;
+use std::error::Error;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ impl GitSourceTree {
     pub fn open(path: &Path) -> Result<Self, OpenRepositoryError> {
         let repo = gix::open(path).map_err(|source| OpenRepositoryError::NotARepository {
             path: path.to_owned(),
-            reason: source.to_string(),
+            source: Box::new(source),
         })?;
         let directory = repo.workdir().unwrap_or(path);
         let name = directory
@@ -90,12 +90,11 @@ impl SourceTree for GitSourceTree {
             if !record.mode.is_blob() {
                 continue;
             }
-            let path = record
-                .filepath
-                .to_str()
-                .map_err(|_| SourceTreeError::Unreadable {
-                    reason: format!("the tree contains a non-UTF-8 path: {}", record.filepath),
-                })?;
+            let path = record.filepath.to_str().map_err(|_| {
+                unreadable_tree(UnusableGitData::NonUtf8Path {
+                    path: record.filepath.to_string(),
+                })
+            })?;
             let blob = self.repo.find_object(record.oid).map_err(unreadable_tree)?;
             files.push(SourceFile {
                 path: SourcePath::new(path)?,
@@ -109,12 +108,11 @@ impl SourceTree for GitSourceTree {
 
 impl ProjectHistory for GitSourceTree {
     fn recent(&self, limit: NonZeroUsize) -> Result<Vec<Version>, ProjectHistoryError> {
-        let head = self
-            .repo
-            .head_id()
-            .map_err(|source| ProjectHistoryError::Unreadable {
-                reason: format!("the repository has no commit to start from: {source}"),
-            })?;
+        let head = self.repo.head_id().map_err(|source| {
+            unreadable_history(UnusableGitData::NoCommit {
+                source: Box::new(source),
+            })
+        })?;
         let walk = self
             .repo
             .rev_walk(Some(head.detach()))
@@ -131,9 +129,7 @@ impl ProjectHistory for GitSourceTree {
             // lossily: a summary the reader cannot trust is worse than none.
             let message = message
                 .to_str()
-                .map_err(|_| ProjectHistoryError::Unreadable {
-                    reason: format!("the message of commit {} is not UTF-8", step.id),
-                })?;
+                .map_err(|_| unreadable_history(UnusableGitData::NonUtf8Message { id: step.id }))?;
             versions.push(Version {
                 id: version_id(step.id)?,
                 summary: message.lines().next().unwrap_or_default().trim().to_owned(),
@@ -161,16 +157,35 @@ impl ProjectHistory for GitSourceTree {
     }
 }
 
-fn unreadable_tree(source: impl Display) -> SourceTreeError {
+/// What stopped a read crosses the port whole, as the cause of the port's
+/// own refusal: git says which object, which reference or which permission
+/// was in the way, and only the last link of the chain says it.
+fn unreadable_tree(source: impl Error + Send + Sync + 'static) -> SourceTreeError {
     SourceTreeError::Unreadable {
-        reason: source.to_string(),
+        source: Box::new(source),
     }
 }
 
-fn unreadable_history(source: impl Display) -> ProjectHistoryError {
+fn unreadable_history(source: impl Error + Send + Sync + 'static) -> ProjectHistoryError {
     ProjectHistoryError::Unreadable {
-        reason: source.to_string(),
+        source: Box::new(source),
     }
+}
+
+/// The refusals this adapter makes itself, where git handed it something it
+/// cannot pass on. They travel as causes exactly as git's own errors do, so
+/// the reader meets one chain whichever end of the adapter stopped.
+#[derive(Debug, thiserror::Error)]
+enum UnusableGitData {
+    #[error("the repository has no commit to start from")]
+    NoCommit {
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
+    #[error("the tree contains a non-UTF-8 path: {path}")]
+    NonUtf8Path { path: String },
+    #[error("the message of commit {id} is not UTF-8")]
+    NonUtf8Message { id: gix::ObjectId },
 }
 
 /// A commit hash in full hex is the version's identity: it is stable, and it
@@ -181,8 +196,19 @@ fn version_id(commit: gix::ObjectId) -> Result<VersionId, ProjectHistoryError> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenRepositoryError {
-    #[error("{path} is not a git repository: {reason}")]
-    NotARepository { path: PathBuf, reason: String },
+    /// What git says about the path stays with the refusal instead of being
+    /// folded into this line: a directory that is no repository and one whose
+    /// `.git` cannot be read both fail here, and only the cause tells them
+    /// apart.
+    #[error("{path} is not a git repository")]
+    NotARepository {
+        path: PathBuf,
+        /// Boxed: what git says about a failed open is far larger than
+        /// everything else this enum carries, and every caller of `open`
+        /// would pay for it on the way it succeeds.
+        #[source]
+        source: Box<gix::open::Error>,
+    },
     #[error("{path} yields no usable project name")]
     Unnameable { path: PathBuf },
 }

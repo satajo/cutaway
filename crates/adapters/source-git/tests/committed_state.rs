@@ -56,3 +56,18 @@ fn a_directory_without_a_repository_is_rejected_on_open() {
     let dir = tempfile::tempdir().unwrap();
     assert!(GitSourceTree::open(dir.path()).is_err());
 }
+
+#[test]
+fn a_refused_open_keeps_what_git_said_about_the_path() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let Err(error) = GitSourceTree::open(dir.path()) else {
+        panic!("a directory that is no repository does not open");
+    };
+
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "an open fails in many ways - no repository, an unreadable .git, a \
+         broken config - and only git's own account tells them apart: {error}"
+    );
+}

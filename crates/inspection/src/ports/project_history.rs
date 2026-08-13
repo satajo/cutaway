@@ -77,8 +77,15 @@ pub enum InvalidVersionId {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectHistoryError {
-    #[error("cannot read the project history: {reason}")]
-    Unreadable { reason: String },
+    /// The history could not be read. What stopped it is whatever the
+    /// adapter holding the versions says, carried along as the cause rather
+    /// than flattened into these words: the core names the operation, the
+    /// cause names the commit or the reference behind it.
+    #[error("cannot read the project history")]
+    Unreadable {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("the project has no version {id}")]
     UnknownVersion { id: VersionId },
 }

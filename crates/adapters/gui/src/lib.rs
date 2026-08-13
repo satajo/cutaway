@@ -56,6 +56,7 @@ mod summary;
 mod vocabulary;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -63,6 +64,7 @@ use cutaway_architecture::{
     ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
     SemanticKind,
 };
+use cutaway_inspection::InspectionError;
 use cutaway_inspection::ports::project_history::{Version, VersionId};
 use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
@@ -92,14 +94,90 @@ pub struct OpenedProject {
     pub inspect_version: VersionInspector,
 }
 
-/// Opens the project at a path. Failures arrive as human-readable text: the
-/// GUI displays them, it never reacts to individual causes.
-pub type ProjectOpener = Box<dyn Fn(&Path) -> Result<OpenedProject, String>>;
+/// Opens the project at a path. Failures arrive typed and whole: the variant
+/// names the step that failed and carries the failure behind it, so the GUI
+/// renders the entire cause chain down to the file that could not be read. It
+/// still never reacts to individual causes - the variants say where the
+/// opening stopped, never what to do about it.
+pub type ProjectOpener = Box<dyn Fn(&Path) -> Result<OpenedProject, OpenProjectError>>;
+
+/// Why a project could not be opened, named by the step that failed. What
+/// stands behind the repository and the plan is whatever adapter serves them,
+/// so those failures cross as opaque sources: the GUI knows the steps of an
+/// opening, never the technologies carrying them out. What the inspection
+/// core says crosses as itself - the GUI drives that core and speaks its
+/// language.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenProjectError {
+    /// Opening the repository, or reading the versions it lists: one
+    /// repository answers for both, and the reader who picked the folder is
+    /// told the folder failed them either way.
+    #[error("cannot read the repository")]
+    Repository {
+        source: Box<dyn Error + Send + Sync>,
+    },
+    #[error("cannot read the architecture")]
+    Inspection {
+        #[from]
+        source: InspectionError,
+    },
+    #[error("cannot load the plan")]
+    Plan {
+        source: Box<dyn Error + Send + Sync>,
+    },
+}
 
 /// Reads the architecture of one version of the opened project. What a
 /// version is stays with the adapter that listed it; the GUI only ever
 /// hands back an id it was given.
-pub type VersionInspector = Box<dyn Fn(&VersionId) -> Result<ArchitectureGraph, String>>;
+pub type VersionInspector =
+    Box<dyn Fn(&VersionId) -> Result<ArchitectureGraph, InspectVersionError>>;
+
+/// Why one version of the project could not be read. No plan is read when a
+/// version is pinned - a comparison states what happened, not what should -
+/// so the steps end at the architecture.
+#[derive(Debug, thiserror::Error)]
+pub enum InspectVersionError {
+    #[error("cannot read the repository at that version")]
+    Repository {
+        source: Box<dyn Error + Send + Sync>,
+    },
+    #[error("cannot read the architecture")]
+    Inspection {
+        #[from]
+        source: InspectionError,
+    },
+}
+
+/// The whole of what an error says, from the headline down to the last cause:
+/// every link of the chain, joined with ": ". A headline alone names the step
+/// that failed and never the file or the reason behind it, and that is
+/// precisely what the reader needs to act.
+///
+/// A link that merely passes its source's words along - `#[error(transparent)]`
+/// and its kin - says nothing of its own, so it is left out rather than
+/// printed twice.
+fn whole_reason(error: &dyn Error) -> String {
+    let mut chain: Vec<String> = Vec::new();
+    let mut link = Some(error);
+    while let Some(current) = link {
+        let said = current.to_string();
+        if chain.last() != Some(&said) {
+            chain.push(said);
+        }
+        link = current.source();
+    }
+    chain.join(": ")
+}
+
+/// A failure where the panel's content would have stood. A whole cause chain
+/// runs longer than a narrow panel is tall, and a reason the reader cannot
+/// read to the end is no reason at all, so it scrolls instead of clipping.
+fn failure(ui: &mut egui::Ui, reason: &str) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.colored_label(ui.visuals().error_fg_color, reason);
+    });
+}
 
 pub fn run(opener: ProjectOpener) -> Result<(), StartupError> {
     eframe::run_native(
@@ -1287,7 +1365,7 @@ struct CutawayApp {
     /// dialog is open.
     picker: Option<mpsc::Receiver<Option<PathBuf>>>,
     mode: Mode,
-    session: Option<Result<Session, String>>,
+    session: Option<Result<Session, OpenProjectError>>,
     /// The versions of the open project and the way to read one. It answers
     /// for the whole project, so it stands beside the comparison rather than
     /// inside it and outlives every pair the reader puts against each other.
@@ -1346,7 +1424,7 @@ impl CutawayApp {
                         ));
                         Ok(Session::open(project.graph, &project.plan, project.store))
                     }
-                    Err(reason) => Err(reason),
+                    Err(error) => Err(error),
                 });
                 self.repository = Some(path);
             }
@@ -1419,17 +1497,13 @@ impl CutawayApp {
             .default_size(280.0)
             .show(ui, |ui| match self.mode {
                 Mode::Explore => match &mut self.session {
-                    Some(Err(reason)) => {
-                        ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
-                    }
+                    Some(Err(error)) => failure(ui, &whole_reason(error)),
                     Some(Ok(session)) => inspector::show(ui, session),
                     None => {}
                 },
                 Mode::Compare => match comparing(self.history.as_ref(), &mut self.compare) {
                     Some((_, Ok(comparison))) => compare::panel(ui, comparison),
-                    Some((_, Err(reason))) => {
-                        ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
-                    }
+                    Some((_, Err(reason))) => failure(ui, reason),
                     None => {}
                 },
             });
@@ -1787,10 +1861,45 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
 
 #[cfg(test)]
 mod tests {
+    use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
+    use cutaway_inspection::ports::source_tree::{SourcePath, SourceTreeError};
     use cutaway_planning::ports::plan_store::PlanStoreError;
     use eframe::egui::{pos2, vec2};
 
     use super::*;
+
+    #[test]
+    fn a_failure_reads_out_to_the_last_cause_under_it() {
+        let failure = OpenProjectError::Inspection {
+            source: InspectionError::Analysis {
+                source: SourceAnalysisError::Unparseable {
+                    path: SourcePath::new("pkg/foo.go").unwrap(),
+                    reason: "unexpected token".to_owned(),
+                },
+            },
+        };
+
+        assert_eq!(
+            whole_reason(&failure),
+            "cannot read the architecture: analysis of the sources failed: \
+             cannot parse pkg/foo.go: unexpected token",
+            "the headline names the step that stopped; only the causes under it name the file"
+        );
+    }
+
+    #[test]
+    fn a_link_that_only_passes_its_cause_along_is_not_read_twice() {
+        let failure = OpenProjectError::Inspection {
+            source: InspectionError::Source(SourceTreeError::Unreadable {
+                source: Box::new(std::io::Error::other("permission denied")),
+            }),
+        };
+
+        assert_eq!(
+            whole_reason(&failure),
+            "cannot read the architecture: cannot read the source tree: permission denied"
+        );
+    }
 
     fn id(text: &str) -> ElementId {
         ElementId::new(text).unwrap()

@@ -28,7 +28,10 @@ use crate::canvas::{self, CanvasAction, Content, EdgeStatus, EdgeVisual, NodeSta
 use crate::focus::{self, Containment};
 use crate::label::{self, Labels, Renames};
 use crate::palette::Palette;
-use crate::{Scene, Selection, VersionInspector, glyph, layout, palette, subject_of, vocabulary};
+use crate::{
+    InspectVersionError, Scene, Selection, VersionInspector, glyph, layout, palette, subject_of,
+    vocabulary, whole_reason,
+};
 
 /// How many characters of a version id name it in the interface: enough to
 /// tell the versions of one project apart, and the same prefix the reader
@@ -133,11 +136,14 @@ impl CompareSession {
         self.status = (before == after).then(|| {
             "Both pickers name one version; the picture shows it against itself.".to_owned()
         });
-        if let Err(reason) = self
+        if let Err(error) = self
             .read(history, &before)
             .and_then(|()| self.read(history, &after))
         {
-            self.scene = Err(reason);
+            // The picture cannot stand without both versions, so where it
+            // would have stood the reader meets the whole failure instead -
+            // the step that stopped, and every cause under it.
+            self.scene = Err(whole_reason(&error));
             self.selection = None;
             return;
         }
@@ -157,7 +163,7 @@ impl CompareSession {
     }
 
     /// Reads the architecture of one version, unless it is already read.
-    fn read(&mut self, history: &History, id: &VersionId) -> Result<(), String> {
+    fn read(&mut self, history: &History, id: &VersionId) -> Result<(), InspectVersionError> {
         if self.graphs.contains_key(id) {
             return Ok(());
         }
