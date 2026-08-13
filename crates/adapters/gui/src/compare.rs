@@ -167,8 +167,8 @@ impl CompareSession {
         if self.graphs.contains_key(id) {
             return Ok(());
         }
-        let graph = (history.inspect)(id)?;
-        self.graphs.insert(id.clone(), graph);
+        let inspection = (history.inspect)(id)?;
+        self.graphs.insert(id.clone(), inspection.graph);
         Ok(())
     }
 

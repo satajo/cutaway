@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{Element, ElementId, ElementName, SemanticKind};
-use cutaway_inspection::ports::source_analyzer::{Extent, Interpretation, SourceAnalysisError};
+use cutaway_inspection::ports::source_analyzer::{AnalysisGap, Extent, GapReason, Interpretation};
 use cutaway_inspection::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
 use crate::declarations::DeclarationIndex;
@@ -49,6 +49,12 @@ pub struct Module {
     /// sources hold one: `foo.rs` beside `foo/`, or `foo/mod.rs` inside
     /// `foo/`.
     expansion: Option<String>,
+    /// Whether another file of the package defines this same module path.
+    /// Rust admits one file per module, so a second one leaves the module
+    /// name claimed by nobody. Only the name is lost: the file is read like
+    /// any other, it stands plain in the tree under its own path, and what
+    /// it writes still speaks from there.
+    contested: bool,
 }
 
 impl Module {
@@ -56,10 +62,11 @@ impl Module {
         self.id.clone()
     }
 
-    /// What this file lets the architecture read, and None for a crate root:
-    /// the package already is that boundary, so the file stands as itself.
+    /// What this file lets the architecture read. None for a crate root -
+    /// the package already is that boundary, so the file stands as itself -
+    /// and None for a contested module, whose name no reading may claim.
     pub fn interpretation(&self) -> Option<Interpretation> {
-        if self.segments.as_ref().is_none_or(Vec::is_empty) {
+        if self.contested || self.segments.as_ref().is_none_or(Vec::is_empty) {
             return None;
         }
         let extent = match &self.expansion {
@@ -137,10 +144,9 @@ pub struct ModuleCatalog {
 }
 
 impl ModuleCatalog {
-    pub fn build(
-        packages: &[DiscoveredPackage],
-        files: &[SourceFile],
-    ) -> Result<Self, SourceAnalysisError> {
+    /// Places every `.rs` file of the tree in the module structure, and
+    /// declares the gap where two files define one module.
+    pub fn build(packages: &[DiscoveredPackage], files: &[SourceFile]) -> (Self, Vec<AnalysisGap>) {
         let mut catalog = Self {
             modules: Vec::new(),
             by_path: BTreeMap::new(),
@@ -163,6 +169,10 @@ impl ModuleCatalog {
             .iter()
             .flat_map(|file| ancestors(file.path.as_str()))
             .collect();
+        // Which files claim which module path. Who claims a path alone is
+        // decided once every file has spoken, so the claims are gathered
+        // before any of them is granted.
+        let mut claims: BTreeMap<(usize, Vec<String>), Vec<usize>> = BTreeMap::new();
 
         for file in files {
             let path = file.path.as_str();
@@ -216,18 +226,11 @@ impl ModuleCatalog {
             });
 
             let index = catalog.modules.len();
-            if let (Some(package), Some(segments)) = (package, segments.as_ref())
-                && let Some(existing) = catalog
-                    .by_segments
-                    .insert((package, segments.clone()), index)
-            {
-                return Err(SourceAnalysisError::Unparseable {
-                    path: file.path.clone(),
-                    reason: format!(
-                        "module {name} is defined by both {} and {path}",
-                        catalog.modules[existing].path
-                    ),
-                });
+            if let (Some(package), Some(segments)) = (package, segments.as_ref()) {
+                claims
+                    .entry((package, segments.clone()))
+                    .or_default()
+                    .push(index);
             }
             catalog.by_path.insert(file.path.clone(), index);
             catalog.modules.push(Module {
@@ -237,9 +240,44 @@ impl ModuleCatalog {
                 segments,
                 name,
                 expansion,
+                contested: false,
             });
         }
-        Ok(catalog)
+
+        let gaps = catalog.grant(claims);
+        (catalog, gaps)
+    }
+
+    /// Gives each module path to the file that alone claims it.
+    ///
+    /// A path several files claim is nobody's: naming one of them would lie
+    /// about where the language reads the module, and naming both would put
+    /// two elements under one id. So the path stays unclaimed, every
+    /// claimant is contested, and the gap tells each of them what it is up
+    /// against. The conflict costs the module name and nothing else - the
+    /// claimants are read like any other file and keep witnessing what they
+    /// write, from the plain node the tree gives each of them.
+    fn grant(&mut self, claims: BTreeMap<(usize, Vec<String>), Vec<usize>>) -> Vec<AnalysisGap> {
+        let mut gaps = Vec::new();
+        for (module_path, claimants) in claims {
+            let [only] = claimants[..] else {
+                for (position, index) in claimants.iter().enumerate() {
+                    // Each claimant names the next one, so a pair names each
+                    // other and a longer ring still gives everyone a witness.
+                    let other = claimants[(position + 1) % claimants.len()];
+                    self.modules[*index].contested = true;
+                    gaps.push(AnalysisGap {
+                        path: self.modules[*index].path.clone(),
+                        reason: GapReason::ConflictingDefinitions {
+                            other: self.modules[other].path.clone(),
+                        },
+                    });
+                }
+                continue;
+            };
+            self.by_segments.insert(module_path, only);
+        }
+        gaps
     }
 
     pub fn modules(&self) -> impl Iterator<Item = &Module> {

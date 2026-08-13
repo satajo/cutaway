@@ -158,6 +158,12 @@ pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<Reference> {
 }
 
 fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Reference>) {
+    // Error recovery nests well-formed-looking nodes inside a region the
+    // grammar could not read, and what those nodes mean is anybody's guess.
+    // A broken region witnesses no dependency.
+    if node.is_error() {
+        return;
+    }
     let mut cursor = node.walk();
     match node.kind() {
         // An import binds a qualifier for the rest of the file; `declared`

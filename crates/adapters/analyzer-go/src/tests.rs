@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
 use cutaway_inspection::inspect;
 use cutaway_inspection::ports::source_analyzer::{
-    Extent, SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    AnalysisGap, Extent, GapReason, SourceAnalyzer, SourceStructure,
 };
 use cutaway_inspection::ports::source_tree::{
     DirectoryPath, ProjectName, SourceFile, SourcePath, SourceTree, SourceTreeError,
@@ -22,11 +22,12 @@ fn sources(files: &[(&str, &str)]) -> Vec<SourceFile> {
 }
 
 fn analyze(files: &[(&str, &str)]) -> SourceStructure {
-    try_analyze(files).unwrap()
+    GoSourceAnalyzer.analyze(&sources(files))
 }
 
-fn try_analyze(files: &[(&str, &str)]) -> Result<SourceStructure, SourceAnalysisError> {
-    GoSourceAnalyzer.analyze(&sources(files))
+/// Everywhere the analyzer could not read what the sources hold.
+fn gaps(files: &[(&str, &str)]) -> Vec<AnalysisGap> {
+    analyze(files).gaps
 }
 
 struct Fixture(Vec<SourceFile>);
@@ -43,7 +44,9 @@ impl SourceTree for Fixture {
 
 /// The architecture the wired application builds out of these sources.
 fn inspected(files: &[(&str, &str)]) -> ArchitectureGraph {
-    inspect(&Fixture(sources(files)), &[&GoSourceAnalyzer]).expect("the sources inspect")
+    inspect(&Fixture(sources(files)), &[&GoSourceAnalyzer])
+        .expect("the sources inspect")
+        .graph
 }
 
 /// The containment parent one element stands under in the whole picture.
@@ -164,12 +167,32 @@ fn modules_are_discovered_from_their_manifests() {
 }
 
 #[test]
-fn a_manifest_without_a_module_path_is_rejected() {
-    let result = try_analyze(&[("go.mod", "go 1.22\n")]);
+fn a_manifest_without_a_module_path_is_a_gap() {
+    let declared = gaps(&[("go.mod", "go 1.22\n")]);
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].path.as_str(), "go.mod");
     assert!(matches!(
-        result,
-        Err(SourceAnalysisError::Unparseable { .. })
+        declared[0].reason,
+        GapReason::ManifestUnreadable { .. }
     ));
+}
+
+#[test]
+fn a_broken_manifest_leaves_the_other_modules_standing() {
+    let structure = analyze(&[
+        ALPHA,
+        ("alpha/main.go", "package main\n"),
+        ("beta/go.mod", "go 1.22\n"),
+    ]);
+    let packages: Vec<&str> = structure
+        .interpretations
+        .iter()
+        .filter(|i| i.element.primary_kind() == ElementKind::Package)
+        .map(|i| i.element.id.as_str())
+        .collect();
+    assert_eq!(packages, ["package:example.com/alpha"]);
+    assert_eq!(structure.gaps.len(), 1);
+    assert_eq!(structure.gaps[0].path.as_str(), "beta/go.mod");
 }
 
 #[test]
@@ -948,14 +971,15 @@ fn directories_the_go_tool_excludes_stay_outside_the_architecture() {
 
 #[test]
 fn a_file_the_go_tool_excludes_is_never_parsed() {
-    let result = try_analyze(&[
+    let structure = analyze(&[
         ALPHA,
         ("alpha/main.go", "package main\n"),
         ("alpha/vendor/example.com/dep/dep.go", "package dep func(\n"),
     ]);
     assert!(
-        result.is_ok(),
-        "a broken vendored file is outside the build, so it cannot fail analysis"
+        structure.gaps.is_empty(),
+        "a broken vendored file is outside the build, so nothing about it was read or missed: {:?}",
+        structure.gaps
     );
 }
 
@@ -1004,12 +1028,87 @@ fn a_nested_module_carves_its_subtree_out_of_the_enclosing_module() {
 }
 
 #[test]
-fn a_file_with_syntax_errors_is_rejected() {
-    let result = try_analyze(&[ALPHA, ("alpha/main.go", "package main\n\nfunc broken( {\n")]);
-    assert!(matches!(
-        result,
-        Err(SourceAnalysisError::Unparseable { .. })
-    ));
+fn a_file_with_a_syntax_error_still_yields_the_declarations_that_parsed() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/main.go",
+            "package main\n\nfunc Good() {}\n\nfunc broken( {\n",
+        ),
+    ]);
+    assert_eq!(
+        declared_in(&structure, "alpha/main.go"),
+        [("Good".to_owned(), ElementKind::Function)]
+    );
+}
+
+#[test]
+fn a_file_with_a_syntax_error_is_a_gap_at_the_failing_line() {
+    let declared = gaps(&[
+        ALPHA,
+        (
+            "alpha/main.go",
+            "package main\n\nfunc Good() {}\n\nfunc broken( {\n",
+        ),
+    ]);
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].path.as_str(), "alpha/main.go");
+    assert!(
+        matches!(declared[0].reason, GapReason::SyntaxErrors { line: 5, .. }),
+        "the gap points at the broken construct, not at the file: {:?}",
+        declared[0].reason
+    );
+}
+
+#[test]
+fn a_file_of_pure_garbage_stands_as_a_plain_file_and_a_gap() {
+    let files = [ALPHA, ("alpha/main.go", "\u{1}\u{2} not go at all ][\n")];
+    let structure = analyze(&files);
+    assert_eq!(declared_in(&structure, "alpha/main.go"), []);
+    assert!(reads_nothing(&structure, "alpha/main.go"));
+    assert_eq!(structure.gaps.len(), 1);
+    assert_eq!(structure.gaps[0].path.as_str(), "alpha/main.go");
+
+    let graph = inspected(&files);
+    assert_eq!(
+        holder(&graph, "alpha/main.go"),
+        Some("package:example.com/alpha".to_owned()),
+        "the file the language could not read still stands where the tree puts it"
+    );
+}
+
+#[test]
+fn a_reference_inside_a_broken_region_witnesses_nothing() {
+    let structure = analyze(&[
+        ALPHA,
+        (
+            "alpha/store/store.go",
+            "package store\n\ntype Item struct{}\n",
+        ),
+        // The same name twice: once where the grammar can read it, once
+        // inside a region it cannot.
+        (
+            "alpha/main.go",
+            "package main\n\nimport \"example.com/alpha/store\"\n\n\
+             func Sound() {\n\tvar kept store.Item\n\t_ = kept\n}\n\n\
+             func Broken() {\n\t@@@ store.Item @@@\n}\n",
+        ),
+    ]);
+    let witnessed = dependencies(&structure);
+    assert!(
+        witnessed.contains(&(
+            "alpha/main.go#function:Sound".to_owned(),
+            "alpha/store/store.go#type:Item".to_owned()
+        )),
+        "the reading itself must still work, or the test below proves nothing: {witnessed:?}"
+    );
+    assert!(
+        !witnessed.contains(&(
+            "alpha/main.go#function:Broken".to_owned(),
+            "alpha/store/store.go#type:Item".to_owned()
+        )),
+        "what stands inside a region the grammar could not read means nothing: {witnessed:?}"
+    );
 }
 
 #[test]

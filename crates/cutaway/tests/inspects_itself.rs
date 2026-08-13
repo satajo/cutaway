@@ -31,6 +31,7 @@ fn cutaways_own_architecture() -> ArchitectureGraph {
         ],
     )
     .unwrap()
+    .graph
 }
 
 /// The vocabulary that speaks what the languages read and nothing the

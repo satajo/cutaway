@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
 use cutaway_inspection::inspect;
 use cutaway_inspection::ports::source_analyzer::{
-    Extent, SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    AnalysisGap, Extent, GapReason, SourceAnalyzer, SourceStructure,
 };
 use cutaway_inspection::ports::source_tree::{
     DirectoryPath, ProjectName, SourceFile, SourcePath, SourceTree, SourceTreeError,
@@ -22,11 +22,12 @@ fn sources(files: &[(&str, &str)]) -> Vec<SourceFile> {
 }
 
 fn analyze(files: &[(&str, &str)]) -> SourceStructure {
-    try_analyze(files).unwrap()
+    RustSourceAnalyzer.analyze(&sources(files))
 }
 
-fn try_analyze(files: &[(&str, &str)]) -> Result<SourceStructure, SourceAnalysisError> {
-    RustSourceAnalyzer.analyze(&sources(files))
+/// Everywhere the analyzer could not read what the sources hold.
+fn gaps(files: &[(&str, &str)]) -> Vec<AnalysisGap> {
+    analyze(files).gaps
 }
 
 struct Fixture(Vec<SourceFile>);
@@ -43,7 +44,9 @@ impl SourceTree for Fixture {
 
 /// The architecture the wired application builds out of these sources.
 fn inspected(files: &[(&str, &str)]) -> ArchitectureGraph {
-    inspect(&Fixture(sources(files)), &[&RustSourceAnalyzer]).expect("the sources inspect")
+    inspect(&Fixture(sources(files)), &[&RustSourceAnalyzer])
+        .expect("the sources inspect")
+        .graph
 }
 
 /// The boundary a picture speaking no directories and no files draws around
@@ -833,26 +836,225 @@ fn a_file_module_declaration_adds_no_element_beside_the_file_module() {
 }
 
 #[test]
-fn a_module_defined_by_two_files_is_rejected() {
-    let result = try_analyze(&[
+fn a_module_two_files_define_costs_the_module_name_and_nothing_else() {
+    let files = [
+        MANIFEST_A,
         MANIFEST_B,
-        ("crates/b/src/lib.rs", "mod util;\n"),
-        ("crates/b/src/util.rs", ""),
-        ("crates/b/src/util/mod.rs", ""),
+        ("crates/a/src/lib.rs", "pub struct Thing;\n"),
+        ("crates/b/src/lib.rs", "pub mod util;\npub mod other;\n"),
+        ("crates/b/src/util.rs", "use a::Thing;\n\npub struct One;\n"),
+        ("crates/b/src/util/mod.rs", "pub struct Two;\n"),
+        ("crates/b/src/other.rs", "use crate::util::One;\n"),
+    ];
+    let structure = analyze(&files);
+
+    assert!(
+        reads_nothing(&structure, "crates/b/src/util.rs")
+            && reads_nothing(&structure, "crates/b/src/util/mod.rs"),
+        "neither file may claim the module both of them define"
+    );
+    assert_eq!(
+        extent_of(&structure, "crates/b/src/util.rs#type:One"),
+        Extent::Within {
+            file: file("crates/b/src/util.rs"),
+            parent: None,
+        },
+        "the conflict is about the module's name, not about what the files write"
+    );
+    assert_eq!(
+        extent_of(&structure, "crates/b/src/util/mod.rs#type:Two"),
+        Extent::Within {
+            file: file("crates/b/src/util/mod.rs"),
+            parent: None,
+        }
+    );
+    assert!(
+        dependencies(&structure).contains(&(
+            "crates/b/src/util.rs".to_owned(),
+            "crates/a/src/lib.rs#type:Thing".to_owned()
+        )),
+        "a contested file still speaks from the node the tree gives it: {:?}",
+        dependencies(&structure)
+    );
+    assert!(
+        !dependencies(&structure)
+            .iter()
+            .any(|(_, to)| to.contains("util")),
+        "a path through the contested name reaches neither claimant: {:?}",
+        dependencies(&structure)
+    );
+    assert!(
+        dependencies(&structure).contains(&(
+            "crates/b/src/other.rs".to_owned(),
+            "package:b-lib".to_owned()
+        )),
+        "a path into a name nobody claims stops at the deepest boundary that \
+         does exist, as any unresolvable path does: {:?}",
+        dependencies(&structure)
+    );
+
+    let conflicts = structure.gaps;
+    assert_eq!(
+        conflicts.len(),
+        2,
+        "both files are told what they are missing"
+    );
+    assert!(
+        conflicts
+            .iter()
+            .all(|gap| matches!(gap.reason, GapReason::ConflictingDefinitions { .. })),
+        "{conflicts:?}"
+    );
+
+    let graph = inspected(&files);
+    assert_eq!(
+        semantic_holder(&graph, "crates/b/src/util.rs"),
+        Some("package:b-lib".to_owned()),
+        "a file whose module nobody claims still stands where the tree puts it"
+    );
+}
+
+#[test]
+fn a_file_with_a_syntax_error_still_yields_the_declarations_that_parsed() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        ("crates/b/src/lib.rs", "pub mod good;\n"),
+        (
+            "crates/b/src/good.rs",
+            "pub struct Kept;\n\npub fn broken( {\n",
+        ),
     ]);
+    assert_eq!(
+        extent_of(&structure, "crates/b/src/good.rs#type:Kept"),
+        Extent::Within {
+            file: file("crates/b/src/good.rs"),
+            parent: None,
+        }
+    );
+}
+
+#[test]
+fn a_file_with_a_syntax_error_is_a_gap_at_the_failing_line() {
+    let declared = gaps(&[
+        MANIFEST_B,
+        ("crates/b/src/lib.rs", "pub mod good;\n"),
+        (
+            "crates/b/src/good.rs",
+            "pub struct Kept;\n\npub fn broken( {\n",
+        ),
+    ]);
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].path.as_str(), "crates/b/src/good.rs");
+    assert!(
+        matches!(declared[0].reason, GapReason::SyntaxErrors { line: 3, .. }),
+        "the gap points at the broken construct, not at the file: {:?}",
+        declared[0].reason
+    );
+}
+
+#[test]
+fn a_file_of_pure_garbage_stands_as_a_plain_file_and_a_gap() {
+    let files = [
+        MANIFEST_B,
+        ("crates/b/src/lib.rs", "pub mod junk;\n"),
+        ("crates/b/src/junk.rs", "\u{1}\u{2} not rust at all ][\n"),
+    ];
+    let structure = analyze(&files);
+    assert_eq!(structure.gaps.len(), 1);
+    assert_eq!(structure.gaps[0].path.as_str(), "crates/b/src/junk.rs");
+
+    let graph = inspected(&files);
+    assert_eq!(
+        semantic_holder(&graph, "crates/b/src/junk.rs"),
+        Some("package:b-lib".to_owned()),
+        "the file the language could not read still stands where the tree puts it"
+    );
+}
+
+#[test]
+fn a_manifest_naming_its_package_with_nothing_is_a_gap() {
+    let files = [
+        MANIFEST_A,
+        ("crates/b/Cargo.toml", "[package]\nname = \"\"\n"),
+        ("crates/b/src/lib.rs", "pub struct Kept;\n"),
+    ];
+    let structure = analyze(&files);
+    let packages: Vec<_> = structure
+        .interpretations
+        .iter()
+        .filter(|i| i.element.primary_kind() == ElementKind::Package)
+        .map(|i| i.element.id.as_str())
+        .collect();
+    assert_eq!(
+        packages,
+        ["package:a"],
+        "a package nothing can name is no package"
+    );
+    assert_eq!(structure.gaps.len(), 1);
+    assert_eq!(structure.gaps[0].path.as_str(), "crates/b/Cargo.toml");
     assert!(matches!(
-        result,
-        Err(SourceAnalysisError::Unparseable { .. })
+        structure.gaps[0].reason,
+        GapReason::ManifestUnreadable { .. }
+    ));
+
+    assert!(
+        inspected(&files)
+            .element(&ElementId::new("crates/b/src/lib.rs").unwrap())
+            .is_some(),
+        "the rest of the tree stands whatever one manifest fails to say"
+    );
+}
+
+#[test]
+fn a_broken_manifest_leaves_the_other_packages_standing() {
+    let structure = analyze(&[
+        MANIFEST_A,
+        ("crates/b/Cargo.toml", "[package\nname = \"b-lib\"\n"),
+    ]);
+    let packages: Vec<_> = structure
+        .interpretations
+        .iter()
+        .filter(|i| i.element.primary_kind() == ElementKind::Package)
+        .map(|i| i.element.id.as_str())
+        .collect();
+    assert_eq!(packages, ["package:a"]);
+    assert_eq!(structure.gaps.len(), 1);
+    assert_eq!(structure.gaps[0].path.as_str(), "crates/b/Cargo.toml");
+    assert!(matches!(
+        structure.gaps[0].reason,
+        GapReason::ManifestUnreadable { .. }
     ));
 }
 
 #[test]
-fn a_file_with_syntax_errors_is_rejected() {
-    let result = try_analyze(&[MANIFEST_B, ("crates/b/src/lib.rs", "pub fn broken( {\n")]);
-    assert!(matches!(
-        result,
-        Err(SourceAnalysisError::Unparseable { .. })
-    ));
+fn a_reference_inside_a_broken_region_witnesses_nothing() {
+    let structure = analyze(&[
+        MANIFEST_B,
+        ("crates/b/src/lib.rs", "pub mod store;\npub mod app;\n"),
+        ("crates/b/src/store.rs", "pub struct Item;\n"),
+        // The same name twice: once where the grammar can read it, and once
+        // in a declaration cut off mid-way, whose unclosed parenthesis
+        // swallows the rest of the file into one broken region.
+        (
+            "crates/b/src/app.rs",
+            "pub struct Sound(pub crate::store::Item);\n\npub struct Broken(crate::store::Item\n",
+        ),
+    ]);
+    let witnessed = dependencies(&structure);
+    assert!(
+        witnessed.contains(&(
+            "crates/b/src/app.rs#type:Sound".to_owned(),
+            "crates/b/src/store.rs#type:Item".to_owned()
+        )),
+        "the reading itself must still work, or the test below proves nothing: {witnessed:?}"
+    );
+    assert!(
+        !witnessed.contains(&(
+            "crates/b/src/app.rs".to_owned(),
+            "crates/b/src/store.rs#type:Item".to_owned()
+        )),
+        "what stands inside a region the grammar could not read means nothing: {witnessed:?}"
+    );
 }
 
 #[test]

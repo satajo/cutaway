@@ -84,6 +84,12 @@ pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<Reference> {
 }
 
 fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Reference>) {
+    // Error recovery nests well-formed-looking nodes inside a region the
+    // grammar could not read, and what those nodes mean is anybody's guess.
+    // A broken region witnesses no dependency.
+    if node.is_error() {
+        return;
+    }
     let segment = |n: tree_sitter::Node<'_>| {
         n.utf8_text(text.as_bytes())
             .expect("node ranges lie within the parsed text")
@@ -152,6 +158,11 @@ fn collect_use_declarations<'tree>(
     at_module_level: bool,
     found: &mut Vec<(tree_sitter::Node<'tree>, bool)>,
 ) {
+    // What a region the grammar could not read seems to import is a guess of
+    // the error recovery, not a `use` the file writes.
+    if node.is_error() {
+        return;
+    }
     if node.kind() == "use_declaration" {
         found.push((node, at_module_level));
         return;

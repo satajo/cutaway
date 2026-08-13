@@ -13,8 +13,8 @@ use cutaway_analyzer_typescript::TypeScriptSourceAnalyzer;
 use cutaway_gui::{
     InspectVersionError, OpenProjectError, OpenedProject, ProjectOpener, VersionInspector,
 };
-use cutaway_inspection::inspect;
 use cutaway_inspection::ports::project_history::{ProjectHistory, VersionId};
+use cutaway_inspection::{Inspection, inspect};
 use cutaway_plan_file::JsonPlanStore;
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_source_git::GitSourceTree;
@@ -29,7 +29,7 @@ fn main() -> ExitCode {
     // file names itself there rather than being flattened into a headline.
     let opener: ProjectOpener = Box::new(|path: &Path| {
         let tree = GitSourceTree::open(path).map_err(reading_the_repository)?;
-        let graph = inspect(&tree, &analyzers())?;
+        let Inspection { graph, gaps } = inspect(&tree, &analyzers())?;
         let versions = tree
             .recent(NonZeroUsize::new(RECENT_VERSIONS).expect("the version limit is not zero"))
             .map_err(reading_the_repository)?;
@@ -52,6 +52,7 @@ fn main() -> ExitCode {
         });
         Ok(OpenedProject {
             graph,
+            gaps,
             plan,
             store: Box::new(store),
             versions,

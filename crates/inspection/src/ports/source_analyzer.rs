@@ -1,3 +1,5 @@
+use std::fmt;
+
 use cutaway_architecture::{Element, ElementId, Relation};
 
 use crate::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
@@ -40,15 +42,90 @@ use crate::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 /// - Relations may name interpreted elements and the ids of plain substrate
 ///   nodes, which are paths. The inspector validates every endpoint after
 ///   assembly.
+/// - Analysis never fails. Input an analyzer cannot read is a gap in what it
+///   read, declared as such ([`AnalysisGap`]) and never silently dropped:
+///   whatever stands around the unreadable part is still read, and the
+///   picture says where it is thin.
 pub trait SourceAnalyzer {
-    fn analyze(&self, files: &[SourceFile]) -> Result<SourceStructure, SourceAnalysisError>;
+    fn analyze(&self, files: &[SourceFile]) -> SourceStructure;
 }
 
-/// Everything one analyzer read out of a source tree.
+/// Everything one analyzer read out of a source tree, and everywhere it
+/// could not read what stands there.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceStructure {
     pub interpretations: Vec<Interpretation>,
     pub relations: Vec<Relation>,
+    pub gaps: Vec<AnalysisGap>,
+}
+
+/// One place an analyzer could not read the sources, and what it therefore
+/// left out of the picture.
+///
+/// A gap is no failure: the analysis went on around it. It is the analyzer
+/// declaring the limit of its own reading, so a reader is never shown a
+/// partial picture as a whole one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisGap {
+    pub path: SourcePath,
+    pub reason: GapReason,
+}
+
+/// Why one file yielded less than it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GapReason {
+    /// The file is not valid UTF-8; the analyzer read none of it.
+    NonUtf8Text,
+    /// The file holds syntax the grammar cannot read; everything outside the
+    /// unreadable regions was read. The position is that of the first such
+    /// region, 1-based, for the reader hunting the construct. The count says
+    /// how many regions the grammar marked, which is a floor rather than a
+    /// tally: error recovery swallows what follows a break into the same
+    /// region, so several broken constructs often come out as one - it
+    /// tells a lone break from more of them, never how many there are.
+    SyntaxErrors {
+        line: usize,
+        column: usize,
+        regions: usize,
+    },
+    /// A manifest that could not be understood; the ecosystem structure it
+    /// would have declared - the package, and everything standing under it -
+    /// is absent from the picture.
+    ManifestUnreadable { detail: String },
+    /// Two files define the same boundary. Neither reading joins the
+    /// picture: emitting both would collide, and picking one would lie about
+    /// which of them the language reads.
+    ConflictingDefinitions { other: SourcePath },
+}
+
+impl fmt::Display for GapReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonUtf8Text => write!(f, "not valid UTF-8, so nothing in it was read"),
+            Self::SyntaxErrors {
+                line,
+                column,
+                regions: 1,
+            } => write!(
+                f,
+                "syntax the language cannot read at line {line}, column {column}; \
+                 everything around it was read"
+            ),
+            Self::SyntaxErrors { line, column, .. } => write!(
+                f,
+                "syntax the language cannot read at line {line}, column {column}, \
+                 and further syntax it could not read after that; everything \
+                 around them was read"
+            ),
+            Self::ManifestUnreadable { detail } => {
+                write!(f, "a manifest that cannot be read: {detail}")
+            }
+            Self::ConflictingDefinitions { other } => write!(
+                f,
+                "the same boundary is defined here and in {other}, so neither reading stands"
+            ),
+        }
+    }
 }
 
 /// One element a language read, and the part of the source tree it read it
@@ -118,10 +195,31 @@ impl Extent {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum SourceAnalysisError {
-    #[error("{path} is not valid UTF-8")]
-    NonUtf8Text { path: SourcePath },
-    #[error("cannot parse {path}: {reason}")]
-    Unparseable { path: SourcePath, reason: String },
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lone_break_in_the_syntax_reads_differently_from_several() {
+        let at = |regions| {
+            GapReason::SyntaxErrors {
+                line: 12,
+                column: 5,
+                regions,
+            }
+            .to_string()
+        };
+
+        let one = at(1);
+        assert!(one.contains("line 12, column 5"), "{one}");
+        assert!(
+            !one.contains("further"),
+            "a lone break points at itself and promises nothing beyond it: {one}"
+        );
+        assert!(
+            at(3).contains("further"),
+            "several breaks send the reader past the first one: {}",
+            at(3)
+        );
+    }
 }

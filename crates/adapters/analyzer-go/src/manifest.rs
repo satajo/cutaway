@@ -2,7 +2,7 @@
 //! directives stay unread - the sources alone witness what a module depends
 //! on.
 
-use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
+use cutaway_inspection::ports::source_analyzer::{AnalysisGap, GapReason};
 use cutaway_inspection::ports::source_tree::SourceFile;
 
 /// One module a go.mod declares.
@@ -16,27 +16,35 @@ pub struct DiscoveredModule {
     pub dir: String,
 }
 
-/// Finds every `go.mod` and reads its `module` directive. A go.mod without
-/// one declares nothing the go tool can build, so it is a broken manifest
-/// rather than an absent module.
-pub fn discover_modules(
-    files: &[SourceFile],
-) -> Result<Vec<DiscoveredModule>, SourceAnalysisError> {
+/// Finds every `go.mod` and reads its `module` directive, together with the
+/// gap left by every manifest that could not be read. A go.mod without a
+/// module directive declares nothing the go tool can build, so it is a broken
+/// manifest rather than an absent module: the module it would have named is
+/// missing from the picture, and the gap says so. Every other manifest of the
+/// tree is read regardless.
+pub fn discover_modules(files: &[SourceFile]) -> (Vec<DiscoveredModule>, Vec<AnalysisGap>) {
     let mut modules = Vec::new();
+    let mut gaps = Vec::new();
     for file in files {
         let path = file.path.as_str();
         if !(path == "go.mod" || path.ends_with("/go.mod")) {
             continue;
         }
-        let text =
-            std::str::from_utf8(&file.contents).map_err(|_| SourceAnalysisError::NonUtf8Text {
+        let Ok(text) = std::str::from_utf8(&file.contents) else {
+            gaps.push(AnalysisGap {
                 path: file.path.clone(),
-            })?;
-        let Some(module_path) = module_directive(text) else {
-            return Err(SourceAnalysisError::Unparseable {
-                path: file.path.clone(),
-                reason: "the manifest declares no module path".to_owned(),
+                reason: GapReason::NonUtf8Text,
             });
+            continue;
+        };
+        let Some(module_path) = module_directive(text) else {
+            gaps.push(AnalysisGap {
+                path: file.path.clone(),
+                reason: GapReason::ManifestUnreadable {
+                    detail: "it declares no module path".to_owned(),
+                },
+            });
+            continue;
         };
         modules.push(DiscoveredModule {
             path: module_path,
@@ -47,7 +55,7 @@ pub fn discover_modules(
         });
     }
     modules.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(modules)
+    (modules, gaps)
 }
 
 /// Reads the module path out of a go.mod. The directive stands alone on its

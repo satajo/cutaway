@@ -191,6 +191,7 @@ impl InProcessDriver {
         let nothing = InMemorySourceTree::default();
         let sources = self.versioned_sources.get(version).unwrap_or(&nothing);
         inspect(sources, &[&RustSourceAnalyzer, &TypeScriptSourceAnalyzer])
+            .map(|inspection| inspection.graph)
             .map_err(|error| error.to_string())
     }
 
@@ -440,7 +441,8 @@ impl ApplicationDriver for InProcessDriver {
             &self.sources,
             &[&RustSourceAnalyzer, &TypeScriptSourceAnalyzer],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .graph;
         // Inspecting a project is reading its present, so whatever comparison
         // stood before it ends here.
         self.comparing = None;

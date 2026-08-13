@@ -11,5 +11,5 @@ mod inspector;
 pub mod ports;
 mod substrate;
 
-pub use inspector::{InspectionError, inspect};
+pub use inspector::{Inspection, InspectionError, inspect};
 pub use substrate::ExtentError;

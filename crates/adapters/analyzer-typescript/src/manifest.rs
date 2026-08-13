@@ -4,7 +4,7 @@
 //! Dependency fields stay unread - the sources alone witness what a package
 //! depends on.
 
-use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
+use cutaway_inspection::ports::source_analyzer::{AnalysisGap, GapReason};
 use cutaway_inspection::ports::source_tree::SourceFile;
 use serde_json::Value;
 
@@ -23,13 +23,13 @@ pub struct DiscoveredPackage {
     pub entry_candidates: Vec<String>,
 }
 
-/// Finds every `package.json` that names a package. A manifest without a
-/// `name` is legal - workspace roots are written that way - and declares no
-/// package.
-pub fn discover_packages(
-    files: &[SourceFile],
-) -> Result<Vec<DiscoveredPackage>, SourceAnalysisError> {
+/// Finds every `package.json` that names a package, together with the gap
+/// left by every manifest that could not be read. A manifest no JSON reader
+/// can make sense of takes only its own package out of the picture; every
+/// other manifest of the tree is read regardless.
+pub fn discover_packages(files: &[SourceFile]) -> (Vec<DiscoveredPackage>, Vec<AnalysisGap>) {
     let mut packages = Vec::new();
+    let mut gaps = Vec::new();
     for file in files {
         let path = file.path.as_str();
         if !(path == "package.json" || path.ends_with("/package.json")) {
@@ -38,18 +38,45 @@ pub fn discover_packages(
         if is_vendored(path) {
             continue;
         }
-        let text =
-            std::str::from_utf8(&file.contents).map_err(|_| SourceAnalysisError::NonUtf8Text {
+        let Ok(text) = std::str::from_utf8(&file.contents) else {
+            gaps.push(AnalysisGap {
                 path: file.path.clone(),
-            })?;
-        let manifest: Value =
-            serde_json::from_str(text).map_err(|error| SourceAnalysisError::Unparseable {
-                path: file.path.clone(),
-                reason: error.to_string(),
-            })?;
+                reason: GapReason::NonUtf8Text,
+            });
+            continue;
+        };
+        let manifest: Value = match serde_json::from_str(text) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                gaps.push(AnalysisGap {
+                    path: file.path.clone(),
+                    reason: GapReason::ManifestUnreadable {
+                        detail: error.to_string(),
+                    },
+                });
+                continue;
+            }
+        };
+        // A manifest without a `name` is no gap: npm's own private workspace
+        // roots are written that way, so the file was read whole and simply
+        // declares no package. This is where a go.mod without a module
+        // directive differs - there the missing directive breaks the
+        // manifest, here the missing field is one of the legal forms.
         let Some(name) = manifest.get("name").and_then(Value::as_str) else {
             continue;
         };
+        // An empty `name` is another matter: it declares a package no
+        // specifier can address and no id can name, so the field is broken
+        // rather than absent.
+        if name.is_empty() {
+            gaps.push(AnalysisGap {
+                path: file.path.clone(),
+                reason: GapReason::ManifestUnreadable {
+                    detail: "it declares no package name".to_owned(),
+                },
+            });
+            continue;
+        }
         let dir = path
             .strip_suffix("package.json")
             .map_or("", |dir| dir.trim_end_matches('/'))
@@ -61,7 +88,7 @@ pub fn discover_packages(
         });
     }
     packages.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(packages)
+    (packages, gaps)
 }
 
 /// Everything the package may be entered through, in decreasing authority:

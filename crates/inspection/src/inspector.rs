@@ -5,7 +5,7 @@ use cutaway_architecture::{
     SemanticKind,
 };
 
-use crate::ports::source_analyzer::{Interpretation, SourceAnalysisError, SourceAnalyzer};
+use crate::ports::source_analyzer::{AnalysisGap, Interpretation, SourceAnalyzer};
 use crate::ports::source_tree::{ProjectName, SourceTree, SourceTreeError};
 use crate::substrate::{self, ExtentError};
 
@@ -20,10 +20,13 @@ use crate::substrate::{self, ExtentError};
 /// of its own or fused with what a language read there, and every one of them
 /// carries a fingerprint of its contents. What no language read stands as a
 /// plain file or directory, grouped by the same laws the whole tree follows.
+/// Where a language tried and could not read what stands there, the reading
+/// is thin rather than absent, and every such place comes out declared beside
+/// the graph.
 pub fn inspect(
     tree: &dyn SourceTree,
     analyzers: &[&dyn SourceAnalyzer],
-) -> Result<ArchitectureGraph, InspectionError> {
+) -> Result<Inspection, InspectionError> {
     let files = tree.files()?;
     let project = project_element(&tree.name());
     let project_id = project.id.clone();
@@ -33,10 +36,12 @@ pub fn inspect(
 
     let mut interpretations: Vec<Interpretation> = Vec::new();
     let mut relations = BTreeSet::new();
+    let mut gaps = Vec::new();
     for analyzer in analyzers {
-        let structure = analyzer.analyze(&files)?;
+        let structure = analyzer.analyze(&files);
         interpretations.extend(structure.interpretations);
         relations.extend(structure.relations);
+        gaps.extend(structure.gaps);
     }
 
     for placed in substrate::assemble(&files, &interpretations)? {
@@ -51,7 +56,19 @@ pub fn inspect(
     for relation in relations {
         graph.add_relation(relation)?;
     }
-    Ok(graph)
+    Ok(Inspection { graph, gaps })
+}
+
+/// One reading of one version of a project: the architecture, and every place
+/// the sources held something no analyzer could read.
+///
+/// The two travel together because they answer one question. A picture built
+/// on a partial read is still a picture worth showing, and it may only be
+/// shown by someone who can say where it is thin.
+#[derive(Debug)]
+pub struct Inspection {
+    pub graph: ArchitectureGraph,
+    pub gaps: Vec<AnalysisGap>,
 }
 
 fn project_element(name: &ProjectName) -> Element {
@@ -66,11 +83,6 @@ fn project_element(name: &ProjectName) -> Element {
 pub enum InspectionError {
     #[error(transparent)]
     Source(#[from] SourceTreeError),
-    #[error("analysis of the sources failed")]
-    Analysis {
-        #[from]
-        source: SourceAnalysisError,
-    },
     #[error("an analyzer read something the sources do not hold")]
     Extent {
         #[from]
@@ -88,7 +100,7 @@ mod tests {
     use cutaway_architecture::{ElementKind, SemanticKind};
 
     use super::*;
-    use crate::ports::source_analyzer::{Extent, SourceStructure};
+    use crate::ports::source_analyzer::{Extent, GapReason, SourceStructure};
     use crate::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
     #[derive(Debug, Default)]
@@ -123,8 +135,8 @@ mod tests {
     struct FakeAnalyzer(SourceStructure);
 
     impl SourceAnalyzer for FakeAnalyzer {
-        fn analyze(&self, _files: &[SourceFile]) -> Result<SourceStructure, SourceAnalysisError> {
-            Ok(self.0.clone())
+        fn analyze(&self, _files: &[SourceFile]) -> SourceStructure {
+            self.0.clone()
         }
     }
 
@@ -153,7 +165,9 @@ mod tests {
 
     #[test]
     fn the_project_root_holds_what_lies_at_the_top_of_the_tree() {
-        let graph = inspect(&FakeTree::holding(&[("README.md", "hi")]), &[]).unwrap();
+        let graph = inspect(&FakeTree::holding(&[("README.md", "hi")]), &[])
+            .unwrap()
+            .graph;
 
         assert!(contains(&graph, "project:fixture", "README.md"));
     }
@@ -163,9 +177,9 @@ mod tests {
         let tree = FakeTree::holding(&[("crates/a/Cargo.toml", ""), ("crates/a/src/lib.rs", "")]);
         let analyzer = FakeAnalyzer(SourceStructure {
             interpretations: vec![package("package:a", "a", directory("crates/a"))],
-            relations: Vec::new(),
+            ..SourceStructure::default()
         });
-        let graph = inspect(&tree, &[&analyzer]).unwrap();
+        let graph = inspect(&tree, &[&analyzer]).unwrap().graph;
 
         assert!(contains(&graph, "project:fixture", "package:a"));
         assert!(contains(&graph, "package:a", "crates/a/src/lib.rs"));
@@ -185,12 +199,13 @@ mod tests {
                 package("package:b", "b", directory("b")),
             ],
             relations: vec![depends.clone()],
+            gaps: Vec::new(),
         });
         let two = FakeAnalyzer(SourceStructure {
-            interpretations: Vec::new(),
             relations: vec![depends.clone()],
+            ..SourceStructure::default()
         });
-        let graph = inspect(&tree, &[&one, &two]).unwrap();
+        let graph = inspect(&tree, &[&one, &two]).unwrap().graph;
 
         assert_eq!(
             graph.relations().filter(|r| **r == depends).count(),
@@ -204,11 +219,11 @@ mod tests {
         let tree = FakeTree::holding(&[("a/x", ""), ("b/x", "")]);
         let one = FakeAnalyzer(SourceStructure {
             interpretations: vec![package("package:a", "a", directory("a"))],
-            relations: Vec::new(),
+            ..SourceStructure::default()
         });
         let two = FakeAnalyzer(SourceStructure {
             interpretations: vec![package("package:a", "a", directory("b"))],
-            relations: Vec::new(),
+            ..SourceStructure::default()
         });
         assert!(matches!(
             inspect(&tree, &[&one, &two]),
@@ -226,6 +241,7 @@ mod tests {
                 to: ElementId::new("package:missing").unwrap(),
                 kind: RelationKind::DependsOn,
             }],
+            gaps: Vec::new(),
         });
         assert!(matches!(
             inspect(&tree, &[&analyzer]),
@@ -237,7 +253,7 @@ mod tests {
     fn an_element_read_out_of_nothing_the_sources_hold_fails_the_inspection() {
         let analyzer = FakeAnalyzer(SourceStructure {
             interpretations: vec![package("package:a", "a", directory("crates/a"))],
-            relations: Vec::new(),
+            ..SourceStructure::default()
         });
         assert!(matches!(
             inspect(&FakeTree::default(), &[&analyzer]),
@@ -246,8 +262,32 @@ mod tests {
     }
 
     #[test]
+    fn what_no_analyzer_could_read_comes_out_beside_the_graph() {
+        let tree = FakeTree::holding(&[("a/x", "")]);
+        let gap = AnalysisGap {
+            path: SourcePath::new("a/x").unwrap(),
+            reason: GapReason::NonUtf8Text,
+        };
+        let one = FakeAnalyzer(SourceStructure {
+            gaps: vec![gap.clone()],
+            ..SourceStructure::default()
+        });
+        let two = FakeAnalyzer(SourceStructure::default());
+        let inspection = inspect(&tree, &[&one, &two]).unwrap();
+
+        assert_eq!(inspection.gaps, vec![gap]);
+        assert!(
+            inspection
+                .graph
+                .element(&ElementId::new("a/x").unwrap())
+                .is_some(),
+            "a file no analyzer could read still stands in the picture"
+        );
+    }
+
+    #[test]
     fn an_empty_project_is_just_its_root() {
-        let graph = inspect(&FakeTree::default(), &[]).unwrap();
+        let graph = inspect(&FakeTree::default(), &[]).unwrap().graph;
         assert_eq!(graph.elements().count(), 1);
         assert_eq!(
             graph.elements().next().unwrap().primary_kind(),
@@ -257,7 +297,9 @@ mod tests {
 
     #[test]
     fn a_file_no_language_reads_stands_in_the_graph_as_itself() {
-        let graph = inspect(&FakeTree::holding(&[("README.md", "hello")]), &[]).unwrap();
+        let graph = inspect(&FakeTree::holding(&[("README.md", "hello")]), &[])
+            .unwrap()
+            .graph;
 
         let readme = graph
             .element(&ElementId::new("README.md").unwrap())

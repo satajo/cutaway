@@ -64,8 +64,9 @@ use cutaway_architecture::{
     ArchitectureGraph, Element, ElementId, ElementKind, ElementName, Relation, RelationKind,
     SemanticKind,
 };
-use cutaway_inspection::InspectionError;
 use cutaway_inspection::ports::project_history::{Version, VersionId};
+use cutaway_inspection::ports::source_analyzer::AnalysisGap;
+use cutaway_inspection::{Inspection, InspectionError};
 use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{
@@ -86,6 +87,10 @@ use crate::palette::Palette;
 /// builds this from the real adapters.
 pub struct OpenedProject {
     pub graph: ArchitectureGraph,
+    /// Everywhere the analyzers could not read what the sources hold. A
+    /// picture standing on a partial read travels with the declaration of
+    /// what is missing from it.
+    pub gaps: Vec<AnalysisGap>,
     pub plan: Plan,
     pub store: Box<dyn PlanStore>,
     /// The project's recent versions, newest first. The comparison picks its
@@ -130,8 +135,7 @@ pub enum OpenProjectError {
 /// Reads the architecture of one version of the opened project. What a
 /// version is stays with the adapter that listed it; the GUI only ever
 /// hands back an id it was given.
-pub type VersionInspector =
-    Box<dyn Fn(&VersionId) -> Result<ArchitectureGraph, InspectVersionError>>;
+pub type VersionInspector = Box<dyn Fn(&VersionId) -> Result<Inspection, InspectVersionError>>;
 
 /// Why one version of the project could not be read. No plan is read when a
 /// version is pinned - a comparison states what happened, not what should -
@@ -1861,28 +1865,34 @@ fn picture(ui: &mut egui::Ui, session: &mut Session) {
 
 #[cfg(test)]
 mod tests {
-    use cutaway_inspection::ports::source_analyzer::SourceAnalysisError;
-    use cutaway_inspection::ports::source_tree::{SourcePath, SourceTreeError};
+    use cutaway_inspection::ports::source_tree::SourceTreeError;
     use cutaway_planning::ports::plan_store::PlanStoreError;
     use eframe::egui::{pos2, vec2};
 
     use super::*;
 
+    /// Whatever an adapter puts behind a step of the opening, however deep
+    /// its own causes go. The GUI never learns these types; the walker must
+    /// reach the bottom of them all the same.
+    #[derive(Debug, thiserror::Error)]
+    #[error("cannot read cutaway.json")]
+    struct StoreFailure {
+        source: Corruption,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("unexpected token at line 3")]
+    struct Corruption;
+
     #[test]
     fn a_failure_reads_out_to_the_last_cause_under_it() {
-        let failure = OpenProjectError::Inspection {
-            source: InspectionError::Analysis {
-                source: SourceAnalysisError::Unparseable {
-                    path: SourcePath::new("pkg/foo.go").unwrap(),
-                    reason: "unexpected token".to_owned(),
-                },
-            },
+        let failure = OpenProjectError::Plan {
+            source: Box::new(StoreFailure { source: Corruption }),
         };
 
         assert_eq!(
             whole_reason(&failure),
-            "cannot read the architecture: analysis of the sources failed: \
-             cannot parse pkg/foo.go: unexpected token",
+            "cannot load the plan: cannot read cutaway.json: unexpected token at line 3",
             "the headline names the step that stopped; only the causes under it name the file"
         );
     }

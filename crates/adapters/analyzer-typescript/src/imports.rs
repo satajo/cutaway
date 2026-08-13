@@ -167,6 +167,11 @@ fn reexported(node: tree_sitter::Node<'_>, text: &str) -> Option<Import> {
 /// names a module the sources can witness; a computed specifier is decided at
 /// runtime and states nothing.
 fn collect_calls(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Import>) {
+    // What a region the grammar could not read seems to require is a guess of
+    // the error recovery, not a specifier the file names.
+    if node.is_error() {
+        return;
+    }
     if node.kind() == "call_expression"
         && let Some(function) = node.child_by_field_name("function")
         && (function.kind() == "import"
@@ -222,6 +227,12 @@ pub fn referenced(root: tree_sitter::Node<'_>, text: &str) -> Vec<Reference> {
 }
 
 fn collect_referenced(node: tree_sitter::Node<'_>, text: &str, out: &mut Vec<Reference>) {
+    // Error recovery nests well-formed-looking nodes inside a region the
+    // grammar could not read, and what those nodes mean is anybody's guess.
+    // A broken region witnesses no dependency.
+    if node.is_error() {
+        return;
+    }
     let bare = |name: tree_sitter::Node<'_>| Reference {
         qualifier: None,
         name: text_of(name, text),

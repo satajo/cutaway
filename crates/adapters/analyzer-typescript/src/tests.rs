@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use cutaway_architecture::{ArchitectureGraph, ElementId, ElementKind, RelationKind};
 use cutaway_inspection::inspect;
 use cutaway_inspection::ports::source_analyzer::{
-    Extent, SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    AnalysisGap, Extent, GapReason, SourceAnalyzer, SourceStructure,
 };
 use cutaway_inspection::ports::source_tree::{
     DirectoryPath, ProjectName, SourceFile, SourcePath, SourceTree, SourceTreeError,
@@ -22,11 +22,12 @@ fn sources(files: &[(&str, &str)]) -> Vec<SourceFile> {
 }
 
 fn analyze(files: &[(&str, &str)]) -> SourceStructure {
-    try_analyze(files).unwrap()
+    TypeScriptSourceAnalyzer.analyze(&sources(files))
 }
 
-fn try_analyze(files: &[(&str, &str)]) -> Result<SourceStructure, SourceAnalysisError> {
-    TypeScriptSourceAnalyzer.analyze(&sources(files))
+/// Everywhere the analyzer could not read what the sources hold.
+fn gaps(files: &[(&str, &str)]) -> Vec<AnalysisGap> {
+    analyze(files).gaps
 }
 
 struct Fixture(Vec<SourceFile>);
@@ -43,7 +44,9 @@ impl SourceTree for Fixture {
 
 /// The architecture the wired application builds out of these sources.
 fn inspected(files: &[(&str, &str)]) -> ArchitectureGraph {
-    inspect(&Fixture(sources(files)), &[&TypeScriptSourceAnalyzer]).expect("the sources inspect")
+    inspect(&Fixture(sources(files)), &[&TypeScriptSourceAnalyzer])
+        .expect("the sources inspect")
+        .graph
 }
 
 /// The containment parent one element stands under in the whole picture.
@@ -1119,24 +1122,156 @@ fn a_package_nested_in_another_packages_directory_parents_onto_it() {
 }
 
 #[test]
-fn a_file_with_syntax_errors_is_rejected() {
-    let result = try_analyze(&[
+fn a_file_with_a_syntax_error_still_yields_the_declarations_that_parsed() {
+    let structure = analyze(&[
         MANIFEST_APP,
-        ("packages/app/src/index.ts", "export function broken( {\n"),
+        (
+            "packages/app/src/widget.ts",
+            "export class Kept {}\n\nexport function broken( {\n",
+        ),
     ]);
+    assert_eq!(
+        parent_of(&structure, "packages/app/src/widget.ts#type:Kept"),
+        Some("packages/app/src/widget.ts".to_owned())
+    );
+}
+
+#[test]
+fn a_file_with_a_syntax_error_is_a_gap_at_the_failing_line() {
+    let declared = gaps(&[
+        MANIFEST_APP,
+        (
+            "packages/app/src/widget.ts",
+            "export class Kept {}\n\nexport function broken( {\n",
+        ),
+    ]);
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].path.as_str(), "packages/app/src/widget.ts");
+    assert!(
+        matches!(declared[0].reason, GapReason::SyntaxErrors { line: 3, .. }),
+        "the gap points at the broken construct, not at the file: {:?}",
+        declared[0].reason
+    );
+}
+
+#[test]
+fn a_file_of_pure_garbage_stands_as_a_plain_file_and_a_gap() {
+    let files = [
+        MANIFEST_APP,
+        (
+            "packages/app/src/junk.ts",
+            "\u{1}\u{2} not typescript at all ][\n",
+        ),
+    ];
+    let structure = analyze(&files);
+    assert_eq!(structure.gaps.len(), 1);
+    assert_eq!(structure.gaps[0].path.as_str(), "packages/app/src/junk.ts");
+
+    let graph = inspected(&files);
+    assert_eq!(
+        semantic_holder(&graph, "packages/app/src/junk.ts"),
+        Some("package:app".to_owned()),
+        "the file the language could not read still stands where the tree puts it"
+    );
+}
+
+#[test]
+fn a_malformed_manifest_is_a_gap() {
+    let declared = gaps(&[("package.json", "{\"name\": }")]);
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].path.as_str(), "package.json");
     assert!(matches!(
-        result,
-        Err(SourceAnalysisError::Unparseable { .. })
+        declared[0].reason,
+        GapReason::ManifestUnreadable { .. }
     ));
 }
 
 #[test]
-fn a_malformed_manifest_is_rejected() {
-    let result = try_analyze(&[("package.json", "{\"name\": }")]);
+fn a_manifest_naming_its_package_with_nothing_is_a_gap() {
+    let files = [
+        MANIFEST_APP,
+        ("packages/core/package.json", r#"{"name":""}"#),
+        ("packages/core/src/index.ts", "export class Kept {}\n"),
+    ];
+    let structure = analyze(&files);
+    let packages: Vec<_> = structure
+        .interpretations
+        .iter()
+        .filter(|i| i.element.primary_kind() == ElementKind::Package)
+        .map(|i| i.element.id.as_str())
+        .collect();
+    assert_eq!(
+        packages,
+        ["package:app"],
+        "a package nothing can name is no package"
+    );
+    assert_eq!(structure.gaps.len(), 1);
+    assert_eq!(
+        structure.gaps[0].path.as_str(),
+        "packages/core/package.json"
+    );
     assert!(matches!(
-        result,
-        Err(SourceAnalysisError::Unparseable { .. })
+        structure.gaps[0].reason,
+        GapReason::ManifestUnreadable { .. }
     ));
+
+    assert!(
+        inspected(&files)
+            .element(&ElementId::new("packages/core/src/index.ts").unwrap())
+            .is_some(),
+        "the rest of the tree stands whatever one manifest fails to say"
+    );
+}
+
+#[test]
+fn a_broken_manifest_leaves_the_other_packages_standing() {
+    let structure = analyze(&[MANIFEST_APP, ("packages/core/package.json", "{\"name\": }")]);
+    let packages: Vec<_> = structure
+        .interpretations
+        .iter()
+        .filter(|i| i.element.primary_kind() == ElementKind::Package)
+        .map(|i| i.element.id.as_str())
+        .collect();
+    assert_eq!(packages, ["package:app"]);
+    assert_eq!(structure.gaps.len(), 1);
+    assert_eq!(
+        structure.gaps[0].path.as_str(),
+        "packages/core/package.json"
+    );
+}
+
+#[test]
+fn a_reference_inside_a_broken_region_witnesses_nothing() {
+    let structure = analyze(&[
+        MANIFEST_APP,
+        MANIFEST_CORE,
+        ("packages/core/src/index.ts", "export class Widget {}\n"),
+        // The namespace import binds the qualifier without naming anything
+        // behind it, so only what the file writes can witness the class: once
+        // where the grammar reads it, and once past an unclosed brace that
+        // swallows the rest of the file into one broken region.
+        (
+            "packages/app/src/index.ts",
+            "import * as core from \"core\";\n\n\
+             export function sound() { return new core.Widget(); }\n\n\
+             export function broken() { { new core.Widget(\n",
+        ),
+    ]);
+    let witnessed = dependencies(&structure);
+    assert!(
+        witnessed.contains(&(
+            "packages/app/src/index.ts#function:sound".to_owned(),
+            "packages/core/src/index.ts#type:Widget".to_owned()
+        )),
+        "the reading itself must still work, or the test below proves nothing: {witnessed:?}"
+    );
+    assert!(
+        !witnessed.contains(&(
+            "package:app".to_owned(),
+            "packages/core/src/index.ts#type:Widget".to_owned()
+        )),
+        "what stands inside a region the grammar could not read means nothing: {witnessed:?}"
+    );
 }
 
 #[test]

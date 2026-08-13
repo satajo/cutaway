@@ -59,7 +59,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cutaway_architecture::{Element, ElementId, ElementName, Relation, RelationKind, SemanticKind};
 use cutaway_inspection::ports::source_analyzer::{
-    Extent, Interpretation, SourceAnalysisError, SourceAnalyzer, SourceStructure,
+    AnalysisGap, Extent, GapReason, Interpretation, SourceAnalyzer, SourceStructure,
 };
 use cutaway_inspection::ports::source_tree::{DirectoryPath, SourceFile, SourcePath};
 
@@ -85,8 +85,8 @@ struct ParsedFile {
 }
 
 impl SourceAnalyzer for TypeScriptSourceAnalyzer {
-    fn analyze(&self, files: &[SourceFile]) -> Result<SourceStructure, SourceAnalysisError> {
-        let packages = manifest::discover_packages(files)?;
+    fn analyze(&self, files: &[SourceFile]) -> SourceStructure {
+        let (packages, mut gaps) = manifest::discover_packages(files);
         let catalog = ModuleCatalog::build(&packages, files);
 
         let mut interpretations: Vec<Interpretation> = packages
@@ -110,12 +110,15 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
             if catalog.module_of(&file.path).is_none() {
                 continue;
             }
-            let text = std::str::from_utf8(&file.contents).map_err(|_| {
-                SourceAnalysisError::NonUtf8Text {
+            let Ok(text) = std::str::from_utf8(&file.contents) else {
+                gaps.push(AnalysisGap {
                     path: file.path.clone(),
-                }
-            })?;
-            let tree = parse(text, &file.path)?;
+                    reason: GapReason::NonUtf8Text,
+                });
+                continue;
+            };
+            let (tree, gap) = parse(text, &file.path);
+            gaps.extend(gap);
             let root = tree.root_node();
             let surface = declarations::top_level(root, text, &file.path);
             declaration_index.add(&file.path, &surface);
@@ -173,10 +176,11 @@ impl SourceAnalyzer for TypeScriptSourceAnalyzer {
             witness_dependencies(&file, module, &catalog, &packages, surface, &mut relations);
         }
 
-        Ok(SourceStructure {
+        SourceStructure {
             interpretations,
             relations: relations.into_iter().collect(),
-        })
+            gaps,
+        }
     }
 }
 
@@ -319,24 +323,64 @@ fn resolve_reference(
     bindings.get(reference.name.as_str()).cloned()
 }
 
-fn parse(text: &str, path: &SourcePath) -> Result<tree_sitter::Tree, SourceAnalysisError> {
+/// The syntax tree of one file, and the gap where the grammar lost the
+/// thread.
+///
+/// A syntax error is no reason to drop a file: tree-sitter answers with a
+/// whole tree whatever it meets, marking what it could not read and parsing
+/// everything around it, so the file still contributes what it holds and the
+/// gap declares the rest.
+fn parse(text: &str, path: &SourcePath) -> (tree_sitter::Tree, Option<AnalysisGap>) {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&grammar(path.extension()))
         .expect("the bundled grammars match the linked tree-sitter version");
+    // tree-sitter answers with nothing only when no language is set - ruled
+    // out by the line above - or when a cancellation flag or a timeout it was
+    // never given fires. Any of those is this adapter miswiring the parser,
+    // never something a source file can do.
     let tree = parser
         .parse(text, None)
-        .ok_or_else(|| SourceAnalysisError::Unparseable {
-            path: path.clone(),
-            reason: "the parser produced no syntax tree".to_owned(),
-        })?;
-    if tree.root_node().has_error() {
-        return Err(SourceAnalysisError::Unparseable {
-            path: path.clone(),
-            reason: "the file contains syntax errors".to_owned(),
-        });
+        .expect("a parser with a language set and no deadline always answers");
+    let gap = unreadable_regions(tree.root_node()).map(|(first, regions)| AnalysisGap {
+        path: path.clone(),
+        reason: GapReason::SyntaxErrors {
+            // tree-sitter counts rows and columns from zero; a reader hunting
+            // the construct counts from one.
+            line: first.row + 1,
+            column: first.column + 1,
+            regions,
+        },
+    });
+    (tree, gap)
+}
+
+/// Where the grammar first lost the thread, and how many such regions the
+/// file holds.
+///
+/// tree-sitter marks what it could not read as an error node and what it had
+/// to invent to keep going as a missing one. A region is the outermost of
+/// either: what stands inside a broken region was recovered by guesswork
+/// rather than read, so it is part of the same wound and not another one.
+fn unreadable_regions(root: tree_sitter::Node<'_>) -> Option<(tree_sitter::Point, usize)> {
+    let mut found = Vec::new();
+    collect_unreadable(root, &mut found);
+    Some((*found.first()?, found.len()))
+}
+
+fn collect_unreadable(node: tree_sitter::Node<'_>, out: &mut Vec<tree_sitter::Point>) {
+    if node.is_error() || node.is_missing() {
+        out.push(node.start_position());
+        return;
     }
-    Ok(tree)
+    // A subtree holding nothing broken cannot hide a broken region.
+    if !node.has_error() {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_unreadable(child, out);
+    }
 }
 
 /// The grammar that reads a file, chosen by extension.
