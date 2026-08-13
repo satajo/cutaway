@@ -9,7 +9,8 @@ use cutaway_architecture::{
     SemanticKind,
 };
 use cutaway_comparison::{Comparison, ElementChange, Presence};
-use cutaway_inspection::inspect;
+use cutaway_inspection::ports::source_analyzer::AnalysisGap;
+use cutaway_inspection::{Inspection, inspect};
 use cutaway_lenses::{BoundaryView, Cut, boundary_view};
 use cutaway_planning::ports::plan_store::PlanStore;
 use cutaway_planning::{
@@ -36,6 +37,16 @@ pub trait ApplicationDriver {
     /// architecture through a fresh cut, every boundary closed, every kind
     /// spoken.
     fn compare_versions(&mut self, before: &str, after: &str) -> Result<(), String>;
+    /// Everywhere the languages could not read what the inspected project's
+    /// sources hold: one line per place, `<path>: <what stood in the way>`.
+    /// Nothing declared says the whole project was read, so a picture is
+    /// never taken for whole while it is thin.
+    fn analysis_gaps(&self) -> Vec<String>;
+    /// The same declaration about one version of a comparison, worded the
+    /// same way, so a picture thin on one side says which side thinned it:
+    /// declarations missing from a version read as arrivals or departures
+    /// unless the reading of that version says they were never read.
+    fn analysis_gaps_in_version(&self, version: &str) -> Vec<String>;
     /// How one rendered boundary reads in the comparison picture: "added",
     /// "removed", or "modified". None while the comparison leaves it alone.
     fn change_reading_of(&self, name: &str) -> Option<String>;
@@ -136,6 +147,12 @@ fn frame_of<'a>(graph: &'a ArchitectureGraph, id: &ElementId) -> Option<&'a Elem
         .map(|relation| &relation.from)
 }
 
+/// Gaps as a scenario reads them: the words the gap itself speaks, so the
+/// scenario sees what a reader beside the picture sees.
+fn declared(gaps: &[AnalysisGap]) -> Vec<String> {
+    gaps.iter().map(AnalysisGap::to_string).collect()
+}
+
 /// The kind a scenario names by the plural word the picture speaks.
 fn rendered_kind(kind: &str) -> Result<ElementKind, String> {
     match kind {
@@ -160,11 +177,13 @@ pub struct InProcessDriver {
     /// A comparison inspects two of them; the unversioned `sources` stay out
     /// of it, so a scenario may explore one project and compare another.
     versioned_sources: BTreeMap<String, InMemorySourceTree>,
-    /// The comparison the picture reads, while the picture reads one. It
-    /// holds the union architecture the boundaries are cut from, and it
-    /// answers how every boundary and every connection changed.
-    comparing: Option<Comparison>,
+    /// The comparison the picture reads, while the picture reads one.
+    comparing: Option<Comparing>,
     graph: Option<ArchitectureGraph>,
+    /// Everywhere the languages fell short of the inspected sources. It
+    /// belongs beside the graph it qualifies, so every reading of the project
+    /// replaces it whole.
+    gaps: Vec<AnalysisGap>,
     /// The architecture the picture shows: the inspected graph with the
     /// plan's own additions drawn in. The lens reads this, and so does every
     /// question about where a planned element sits.
@@ -173,6 +192,20 @@ pub struct InProcessDriver {
     view: Option<BoundaryView>,
     plan: Plan,
     store: InMemoryPlanStore,
+}
+
+/// One comparison the picture reads: the union architecture the boundaries
+/// are cut from and how every boundary and connection changed, together with
+/// what the reading of each compared version fell short of.
+///
+/// The gaps travel inside the comparison rather than beside it, because they
+/// qualify these two readings and no others: a comparison the picture leaves
+/// behind takes its declarations with it, instead of leaving them to answer
+/// for readings nobody holds any more.
+#[derive(Debug)]
+struct Comparing {
+    comparison: Comparison,
+    gaps: BTreeMap<String, Vec<AnalysisGap>>,
 }
 
 impl InProcessDriver {
@@ -184,14 +217,15 @@ impl InProcessDriver {
         self.viewed.as_ref().expect("a project is inspected")
     }
 
-    /// The architecture one named version holds, read with the analyzers the
-    /// application wires in. A version no step ever named holds no files, and
-    /// an empty tree inspects to an empty project rather than to a failure.
-    fn architecture_of_version(&self, version: &str) -> Result<ArchitectureGraph, String> {
+    /// What one named version reads as: its architecture, and everywhere the
+    /// languages could not read what stands in it. Read with the analyzers
+    /// the application wires in. A version no step ever named holds no files,
+    /// and an empty tree inspects to an empty project rather than to a
+    /// failure.
+    fn reading_of_version(&self, version: &str) -> Result<Inspection, String> {
         let nothing = InMemorySourceTree::default();
         let sources = self.versioned_sources.get(version).unwrap_or(&nothing);
         inspect(sources, &[&RustSourceAnalyzer, &TypeScriptSourceAnalyzer])
-            .map(|inspection| inspection.graph)
             .map_err(|error| error.to_string())
     }
 
@@ -219,8 +253,8 @@ impl InProcessDriver {
         // The comparison carries its own architecture - the union of the two
         // versions - so the inspected project stands untouched behind it, and
         // viewing the boundaries again returns to it unchanged.
-        let viewed = if let Some(comparison) = &self.comparing {
-            comparison.union().clone()
+        let viewed = if let Some(comparing) = &self.comparing {
+            comparing.comparison.union().clone()
         } else {
             let graph = self.graph.as_ref().ok_or("no project inspected yet")?;
             self.plan.viewed_architecture(graph)
@@ -437,34 +471,61 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn inspect_project(&mut self) -> Result<(), String> {
-        let graph = inspect(
+        let inspection = inspect(
             &self.sources,
             &[&RustSourceAnalyzer, &TypeScriptSourceAnalyzer],
         )
-        .map_err(|error| error.to_string())?
-        .graph;
+        .map_err(|error| error.to_string())?;
         // Inspecting a project is reading its present, so whatever comparison
         // stood before it ends here.
         self.comparing = None;
-        self.viewed = Some(self.plan.viewed_architecture(&graph));
-        self.graph = Some(graph);
+        self.viewed = Some(self.plan.viewed_architecture(&inspection.graph));
+        self.graph = Some(inspection.graph);
+        self.gaps = inspection.gaps;
         Ok(())
     }
 
     fn compare_versions(&mut self, before: &str, after: &str) -> Result<(), String> {
-        let comparison = Comparison::between(
-            &self.architecture_of_version(before)?,
-            &self.architecture_of_version(after)?,
-        );
-        self.comparing = Some(comparison);
+        let earlier = self.reading_of_version(before)?;
+        let later = self.reading_of_version(after)?;
+        self.comparing = Some(Comparing {
+            comparison: Comparison::between(&earlier.graph, &later.graph),
+            gaps: [
+                (before.to_owned(), earlier.gaps),
+                (after.to_owned(), later.gaps),
+            ]
+            .into(),
+        });
         // A comparison starts from a whole picture of its own: the scope of
         // whatever stood before it named a boundary of another architecture.
         self.cut = Some(Cut::whole());
         self.rebuild_view()
     }
 
+    fn analysis_gaps(&self) -> Vec<String> {
+        // "Nothing was unreadable" is an answer about a project that was
+        // read; about one that never was it would read as agreement.
+        assert!(self.graph.is_some(), "no project is inspected");
+        declared(&self.gaps)
+    }
+
+    fn analysis_gaps_in_version(&self, version: &str) -> Vec<String> {
+        // The comparison the picture reads is what read the two versions, so
+        // a version no comparison of it holds has nothing to say about
+        // itself, and saying "nothing was unreadable" for it would read as
+        // agreement.
+        let gaps = self
+            .comparing
+            .as_ref()
+            .and_then(|comparing| comparing.gaps.get(version))
+            .unwrap_or_else(|| {
+                panic!("no comparison in the picture has read the version {version}")
+            });
+        declared(gaps)
+    }
+
     fn change_reading_of(&self, name: &str) -> Option<String> {
-        let comparison = self.comparing.as_ref()?;
+        let comparison = &self.comparing.as_ref()?.comparison;
         let id = self.boundary(name);
         let reading = *comparison.readings_at(&self.rendered()).get(&id)?;
         Some(
@@ -478,7 +539,7 @@ impl ApplicationDriver for InProcessDriver {
     }
 
     fn connection_reading_of(&self, from: &str, to: &str) -> Option<String> {
-        let comparison = self.comparing.as_ref()?;
+        let comparison = &self.comparing.as_ref()?.comparison;
         // The rendered connection stands for every dependency behind it, so
         // it reads as one only while all of them read alike.
         let behind = self.concrete_behind(from, to);

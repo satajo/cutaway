@@ -425,6 +425,49 @@ fn the_boundaries_do_not_include(world: &mut CutawayWorld, expected: String) {
     );
 }
 
+/// A gap speaks as one line: the file, then what stood in the way there. A
+/// scenario names the file and asks that something stood in the way, leaving
+/// the wording of the reason to the reading.
+fn assert_gap_declared(declared: &[String], path: &str) {
+    assert!(
+        declared
+            .iter()
+            .any(|gap| gap.starts_with(&format!("{path}: "))),
+        "expected a gap in {path}, the reading declares {declared:?}"
+    );
+}
+
+fn assert_nothing_declared(declared: &[String]) {
+    assert!(
+        declared.is_empty(),
+        "expected the sources to be read whole, the reading declares {declared:?}"
+    );
+}
+
+#[then(expr = "the reading declares a gap in {string}")]
+fn the_reading_declares_a_gap(world: &mut CutawayWorld, path: String) {
+    assert_gap_declared(&world.driver.analysis_gaps(), &path);
+}
+
+#[then("the reading declares no gaps")]
+fn the_reading_declares_no_gaps(world: &mut CutawayWorld) {
+    assert_nothing_declared(&world.driver.analysis_gaps());
+}
+
+#[then(expr = "the reading of version {string} declares a gap in {string}")]
+fn the_reading_of_a_version_declares_a_gap(
+    world: &mut CutawayWorld,
+    version: String,
+    path: String,
+) {
+    assert_gap_declared(&world.driver.analysis_gaps_in_version(&version), &path);
+}
+
+#[then(expr = "the reading of version {string} declares no gaps")]
+fn the_reading_of_a_version_declares_no_gaps(world: &mut CutawayWorld, version: String) {
+    assert_nothing_declared(&world.driver.analysis_gaps_in_version(&version));
+}
+
 #[then(expr = "a connection goes from {string} to {string}")]
 fn a_connection_goes(world: &mut CutawayWorld, from: String, to: String) {
     let connections = world.driver.connections();

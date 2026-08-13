@@ -56,7 +56,11 @@ crates/
                        plain directory earns a boundary only where it groups two
                        things or more - a single-child chain dissolves and hands
                        its segments to the substrate name below it - while a
-                       directory an extent names always survives.
+                       directory an extent names always survives. Analysis is
+                       total too: input an analyzer cannot read degrades to a
+                       best-effort read of everything around it and a declared
+                       gap - the path and the reason - carried beside the graph
+                       as `Inspection { graph, gaps }`.
     src/ports/         SourceTree, SourceAnalyzer, ProjectHistory. One file
                        per port.
   lenses/              Domain: boundary views - rollups of the graph along a
@@ -138,8 +142,10 @@ crates/
 
 - Parse, don't validate: constructors enforce invariants (`ElementId`,
   `SourcePath`) and return typed errors. New concepts get their own types.
-- Defaults are strict. Lenient behavior (skipping unparseable files, lossy
-  decoding) requires an explicit, user-visible opt-in; none exists today.
+- Defaults are strict. Input that cannot be read degrades to a best-effort
+  read with a declared, user-visible gap; the declaration is the strictness.
+  Skipping a file silently or repairing it silently (lossy decoding, guessed
+  syntax) remains forbidden.
 - Tests are named after the behavior they pin down
   (`a_relation_requires_both_of_its_endpoints_to_exist`), not after the code
   they call.
